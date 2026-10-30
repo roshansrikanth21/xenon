@@ -31,10 +31,14 @@ Implemented and covered by tests:
 - Duplicate-node collapsing, password redaction, and a 6000-character context cap.
 - Screenshot capture of the active window, used only when UIA has too little content.
 - Opt-in OpenAI-compatible vision client, injectable transport for offline tests.
+- Local SQLite + FTS5 memory: Obsidian Markdown ingestion, tags, source attribution,
+  idempotent re-sync, per-file and per-source deletion, ranked retrieval.
 - `python -m xenon screen` prints what Xenon currently sees.
-- Latency benchmark with a 250 ms median budget gate.
+- `python -m xenon memory ingest|search` mirrors a vault and queries it.
+- Latency benchmarks with budget gates for screen context and memory retrieval.
 
-Not built yet: wake word and task orchestration, the memory store and connectors, and the tray UI.
+Not built yet: wake word and task orchestration, Notion and Claude/Codex connectors,
+answer synthesis, and the tray UI.
 
 ## Quick start
 
@@ -60,6 +64,18 @@ Measure screen-context latency:
 python -m benchmarks.screen_latency --samples 15
 ```
 
+Mirror an Obsidian vault and query it:
+
+```powershell
+$env:XENON_DB_PATH = "memory/xenon.db"
+python -m xenon memory ingest --kind obsidian --root "C:\Users\you\vault"
+python -m xenon memory search "project deadline"
+```
+
+Hidden folders such as `.obsidian` and `.trash` are skipped. Re-running ingest is
+idempotent: unchanged files stay untouched, edits replace old text, and deleted
+files leave the index.
+
 ## Measured latency
 
 Local run on 30 Oct 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9, Opera in the foreground:
@@ -67,6 +83,7 @@ Local run on 30 Oct 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9, Opera in t
 | Path | Cold | Median | p95 | Budget |
 | --- | ---: | ---: | ---: | ---: |
 | UIA-only observe (depth 4) | 322 ms | **29 ms** | 34 ms | 250 ms |
+| Memory retrieval, 500 docs | ingest 264 ms | **0.1 ms** | 0.9 ms | 100 ms |
 
 Cold start is dominated by pywinauto/COM initialization. A long-running service must prewarm the adapter at startup so the first user request does not pay it.
 
