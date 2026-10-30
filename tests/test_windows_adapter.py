@@ -2,10 +2,10 @@ import io
 import sys
 import unittest
 
-from xenon.screen import UiControl
+from xenon.screen import CapturedFrame, UiControl
 from xenon.windows import (
-    CapturedFrame,
     NullControlReader,
+    UiaControlReader,
     Win32Backend,
     WindowsUiAutomation,
 )
@@ -138,6 +138,75 @@ class WindowsAdapterTests(unittest.TestCase):
 
             with Image.open(stream) as image:
                 self.assertEqual(image.size, (640, 480))
+
+
+class FakeInfo:
+    def __init__(self, role: str, name: str, is_password: bool = False) -> None:
+        self.control_type = role
+        self.name = name
+        self.is_password = is_password
+
+
+class FakeElement:
+    def __init__(
+        self,
+        role: str = "Text",
+        name: str = "",
+        value: object = None,
+        is_password: bool = False,
+        children: tuple["FakeElement", ...] = (),
+    ) -> None:
+        self.element_info = FakeInfo(role, name, is_password)
+        self._value = value
+        self._is_password = is_password
+        self._children = children
+
+    def children(self) -> tuple["FakeElement", ...]:
+        return self._children
+
+    def get_value(self):
+        return self._value
+
+    def is_password(self) -> bool:
+        return self._is_password
+
+
+class UiaControlReaderTests(unittest.TestCase):
+    def test_collapses_duplicate_elements_into_one_control(self) -> None:
+        root = FakeElement(
+            children=(
+                FakeElement(role="Text", name="Speed Dial"),
+                FakeElement(role="Text", name="Speed Dial"),
+                FakeElement(role="Edit", name="Search", value="xenon"),
+            )
+        )
+        controls: list[UiControl] = []
+
+        UiaControlReader()._walk(root, 0, 50, controls, set())
+
+        self.assertEqual(len(controls), 2)
+        self.assertEqual(controls[0].name, "Speed Dial")
+        self.assertEqual(controls[1].value, "xenon")
+
+    def test_stops_walking_past_max_depth(self) -> None:
+        leaf = FakeElement(role="Text", name="too deep")
+        middle = FakeElement(role="Group", name="group", children=(leaf,))
+        root = FakeElement(role="Pane", name="root", children=(middle,))
+        controls: list[UiControl] = []
+
+        UiaControlReader(max_depth=0)._walk(root, 0, 50, controls, set())
+
+        self.assertEqual([control.name for control in controls], ["group"])
+
+    def test_marks_password_fields_without_reading_their_value(self) -> None:
+        root = FakeElement(
+            children=(FakeElement(role="Edit", name="Password", value="secret", is_password=True),)
+        )
+        controls: list[UiControl] = []
+
+        UiaControlReader()._walk(root, 0, 50, controls, set())
+
+        self.assertTrue(controls[0].is_password)
 
 
 class Win32BackendTests(unittest.TestCase):

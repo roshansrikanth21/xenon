@@ -14,10 +14,9 @@ import io
 import os
 import sys
 from ctypes import wintypes
-from dataclasses import dataclass
 from typing import Protocol
 
-from xenon.screen import UiControl, WindowSnapshot
+from xenon.screen import CapturedFrame, UiControl, WindowSnapshot
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 DEFAULT_MAX_CONTROLS = 200
@@ -26,13 +25,6 @@ DEFAULT_MAX_DEPTH = 6
 
 class ScreenUnavailable(RuntimeError):
     """Raised when the desktop cannot provide a foreground window."""
-
-
-@dataclass(frozen=True)
-class CapturedFrame:
-    image: bytes
-    width: int
-    height: int
 
 
 class WindowBackend(Protocol):
@@ -169,10 +161,17 @@ class UiaControlReader:
             return ()
 
         controls: list[UiControl] = []
-        self._walk(window, 0, limit, controls)
+        self._walk(window, 0, limit, controls, set())
         return tuple(controls)
 
-    def _walk(self, wrapper, depth: int, limit: int, out: list[UiControl]) -> None:
+    def _walk(
+        self,
+        wrapper,
+        depth: int,
+        limit: int,
+        out: list[UiControl],
+        seen: set[tuple[str, str, str, bool]],
+    ) -> None:
         if depth > self._max_depth or len(out) >= limit:
             return
         try:
@@ -203,7 +202,11 @@ class UiaControlReader:
                 except Exception:
                     pass
 
+            key = (role, name, value, is_password)
+            if key in seen:
+                continue
             if name or value:
+                seen.add(key)
                 out.append(
                     UiControl(
                         role=role,
@@ -212,7 +215,7 @@ class UiaControlReader:
                         is_password=is_password,
                     )
                 )
-            self._walk(child, depth + 1, limit, out)
+            self._walk(child, depth + 1, limit, out, seen)
 
 
 class MssGrabber:

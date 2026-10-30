@@ -21,6 +21,55 @@ Xenon is a daily-use assistant. It does not include pentesting, trading, multi-a
 - Never ingest credentials, session cookies, or hidden product memory automatically.
 - Require confirmation before external side effects, destructive operations, or sending messages.
 
+## Status
+
+Supported platform: **Windows 11**, **Python 3.11+**.
+
+Implemented and covered by tests:
+
+- Read-only foreground window adapter: app, title, bounded UI Automation controls.
+- Duplicate-node collapsing, password redaction, and a 6000-character context cap.
+- Screenshot capture of the active window, used only when UIA has too little content.
+- Opt-in OpenAI-compatible vision client, injectable transport for offline tests.
+- `python -m xenon screen` prints what Xenon currently sees.
+- Latency benchmark with a 250 ms median budget gate.
+
+Not built yet: wake word and task orchestration, the memory store and connectors, and the tray UI.
+
+## Quick start
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev,capture,uia]"
+python -m pytest -q
+python -m xenon screen
+```
+
+Enable the vision fallback only if you want screenshots sent to a model:
+
+```powershell
+$env:XENON_VISION_API_KEY = "..."
+$env:XENON_VISION_MODEL = "your-vision-model"
+# optional: $env:XENON_VISION_BASE_URL = "http://localhost:11434/v1"
+```
+
+Measure screen-context latency:
+
+```powershell
+python -m benchmarks.screen_latency --samples 15
+```
+
+## Measured latency
+
+Local run on 30 Oct 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9, Opera in the foreground:
+
+| Path | Cold | Median | p95 | Budget |
+| --- | ---: | ---: | ---: | ---: |
+| UIA-only observe (depth 4) | 322 ms | **29 ms** | 34 ms | 250 ms |
+
+Cold start is dominated by pywinauto/COM initialization. A long-running service must prewarm the adapter at startup so the first user request does not pay it.
+
 ## Planned stack
 
 - Python 3.11+ service

@@ -1,6 +1,11 @@
 import unittest
 
-from xenon.screen import ScreenObserver, UiControl, WindowSnapshot
+from xenon.screen import (
+    CapturedFrame,
+    ScreenObserver,
+    UiControl,
+    WindowSnapshot,
+)
 
 
 class FakeUiAutomation:
@@ -17,10 +22,27 @@ class FakeVision:
     def __init__(self, response: str = "vision context") -> None:
         self.response = response
         self.calls = 0
+        self.frames: list[CapturedFrame | None] = []
 
-    def describe(self, snapshot: WindowSnapshot) -> str:
+    def describe(self, frame: CapturedFrame | None, snapshot: WindowSnapshot) -> str:
         self.calls += 1
+        self.frames.append(frame)
         return self.response
+
+
+class FailingVision:
+    def describe(self, frame: CapturedFrame | None, snapshot: WindowSnapshot) -> str:
+        raise RuntimeError("model offline")
+
+
+class FakeCapture:
+    def __init__(self, frame: CapturedFrame) -> None:
+        self.frame = frame
+        self.calls = 0
+
+    def capture_foreground(self) -> CapturedFrame:
+        self.calls += 1
+        return self.frame
 
 
 class ScreenObserverTests(unittest.TestCase):
@@ -59,6 +81,117 @@ class ScreenObserverTests(unittest.TestCase):
         self.assertIn("roshan@example.com", context.text)
         self.assertNotIn("secret-value", context.text)
         self.assertIn("[REDACTED]", context.text)
+
+    def test_collapses_repeated_values_in_observed_text(self) -> None:
+        automation = FakeUiAutomation(
+            WindowSnapshot(
+                app_name="Browser",
+                title="Docs",
+                controls=(
+                    UiControl(role="Text", name="Speed Dial"),
+                    UiControl(role="Text", name="Speed Dial"),
+                    UiControl(role="Edit", name="Search", value="xenon"),
+                ),
+            )
+        )
+
+        context = ScreenObserver(automation, FakeVision()).observe()
+
+        self.assertEqual(context.text.count("Speed Dial"), 1)
+        self.assertIn("xenon", context.text)
+
+    def test_caps_context_length_for_large_windows(self) -> None:
+        automation = FakeUiAutomation(
+            WindowSnapshot(
+                app_name="Editor",
+                title="huge.log",
+                controls=tuple(
+                    UiControl(role="Text", name=f"line {index}", value=f"{index}:" + "x" * 200)
+                    for index in range(100)
+                ),
+            )
+        )
+
+        context = ScreenObserver(automation, FakeVision()).observe()
+
+        self.assertLessEqual(len(context.text), ScreenObserver.max_context_chars)
+        self.assertTrue(context.text.endswith("[truncated]"))
+
+    def test_uses_vision_when_automation_only_sees_window_chrome(self) -> None:
+        automation = FakeUiAutomation(
+            WindowSnapshot(
+                app_name="opera",
+                title="deck.pptx - Opera",
+                controls=(
+                    UiControl(role="Document", name="Speed Dial"),
+                    UiControl(role="Pane", name="deck.pptx - Opera"),
+                    UiControl(role="Group", name="Browser client"),
+                ),
+            )
+        )
+        vision = FakeVision("Slide 2: What is AI?")
+
+        context = ScreenObserver(automation, vision).observe()
+
+        self.assertTrue(context.used_vision)
+        self.assertEqual(context.text, "Slide 2: What is AI?")
+        self.assertEqual(vision.calls, 1)
+
+    def test_treats_editable_text_as_sufficient_without_vision(self) -> None:
+        automation = FakeUiAutomation(
+            WindowSnapshot(
+                app_name="Notepad",
+                title="todo.md - Notepad",
+                controls=(UiControl(role="Edit", name="Text editor", value="buy milk"),),
+            )
+        )
+        vision = FakeVision()
+
+        context = ScreenObserver(automation, vision).observe()
+
+        self.assertFalse(context.used_vision)
+        self.assertEqual(vision.calls, 0)
+
+    def test_passes_captured_frame_to_vision(self) -> None:
+        frame = CapturedFrame(image=b"\x89PNG\r\n\x1a\nframe", width=640, height=480)
+        capture = FakeCapture(frame)
+        vision = FakeVision("a task diagram")
+        automation = FakeUiAutomation(
+            WindowSnapshot(app_name="CanvasApp", title="Untitled", controls=())
+        )
+
+        context = ScreenObserver(automation, vision, capture=capture).observe()
+
+        self.assertEqual(capture.calls, 1)
+        self.assertIs(vision.frames[0], frame)
+        self.assertEqual(context.text, "a task diagram")
+
+    def test_does_not_capture_when_uia_is_sufficient(self) -> None:
+        frame = CapturedFrame(image=b"png", width=1, height=1)
+        capture = FakeCapture(frame)
+        automation = FakeUiAutomation(
+            WindowSnapshot(
+                app_name="Notepad",
+                title="notes.md",
+                controls=(UiControl(role="Edit", name="editor", value="draft"),),
+            )
+        )
+
+        ScreenObserver(automation, FakeVision(), capture=capture).observe()
+
+        self.assertEqual(capture.calls, 0)
+
+    def test_reports_vision_failure_honestly(self) -> None:
+        frame = CapturedFrame(image=b"png", width=1, height=1)
+        automation = FakeUiAutomation(
+            WindowSnapshot(app_name="CanvasApp", title="Untitled", controls=())
+        )
+
+        context = ScreenObserver(automation, FailingVision(), capture=FakeCapture(frame)).observe()
+
+        self.assertTrue(context.used_vision)
+        self.assertEqual(context.text, "")
+        self.assertIn("vision", context.error)
 
     def test_uses_vision_only_when_automation_has_no_readable_content(self) -> None:
         automation = FakeUiAutomation(
