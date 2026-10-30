@@ -87,12 +87,30 @@ class ParsedMarkdown:
     tags: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class MemoryDocument:
+    """A connector record ready to be indexed.
+
+    ``external_id`` is the stable identity inside the source: a file path for
+    vaults, a page URI for Notion, a conversation id for chat exports.
+    """
+
+    external_id: str
+    title: str
+    body: str
+    tags: tuple[str, ...] = ()
+    mtime: float = 0.0
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _document_hash(document: "MemoryDocument") -> str:
+    payload = "\x1f".join(
+        [document.title, document.body, ",".join(document.tags)]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def parse_markdown(text: str, fallback_title: str) -> ParsedMarkdown:
@@ -193,7 +211,48 @@ class MemoryStore:
         if not root_path.is_dir():
             raise NotADirectoryError(root_path)
 
-        source_id = self._ensure_source(kind, str(root_path))
+        documents: list[MemoryDocument] = []
+        for file_path in sorted(root_path.rglob("*")):
+            if not file_path.is_file() or file_path.suffix.lower() not in MARKDOWN_SUFFIXES:
+                continue
+            relative = file_path.relative_to(root_path)
+            if any(part.startswith(HIDDEN_PREFIX) for part in relative.parts):
+                continue
+            text = file_path.read_text(encoding="utf-8-sig", errors="replace")
+            parsed = parse_markdown(text, file_path.stem)
+            documents.append(
+                MemoryDocument(
+                    external_id=str(file_path),
+                    title=parsed.title,
+                    body=parsed.body,
+                    tags=parsed.tags,
+                    mtime=file_path.stat().st_mtime,
+                )
+            )
+
+        return self.upsert_documents(
+            kind, str(root_path), documents, replace_missing=True
+        )
+
+    def upsert_documents(
+        self,
+        kind: str,
+        root: str,
+        documents: Iterable[MemoryDocument],
+        replace_missing: bool = False,
+    ) -> IngestResult:
+        """Index connector documents, skipping records whose text is unchanged."""
+        if not kind or not root:
+            raise ValueError("kind and root are required")
+        source_id = self._ensure_source(kind, root)
+        return self._apply(source_id, list(documents), replace_missing)
+
+    def _apply(
+        self,
+        source_id: str,
+        documents: list[MemoryDocument],
+        replace_missing: bool,
+    ) -> IngestResult:
         existing = {
             row["path"]: row
             for row in self._connection.execute(
@@ -206,18 +265,10 @@ class MemoryStore:
         seen: set[str] = set()
 
         with self._connection:
-            for file_path in sorted(root_path.rglob("*")):
-                if not file_path.is_file() or file_path.suffix.lower() not in MARKDOWN_SUFFIXES:
-                    continue
-                relative = file_path.relative_to(root_path)
-                if any(part.startswith(HIDDEN_PREFIX) for part in relative.parts):
-                    continue
-
-                text = file_path.read_text(encoding="utf-8-sig", errors="replace")
-                parsed = parse_markdown(text, file_path.stem)
-                digest = _hash(text)
-                stored_path = str(file_path)
+            for document in documents:
+                stored_path = document.external_id
                 seen.add(stored_path)
+                digest = _document_hash(document)
                 previous = existing.get(stored_path)
 
                 if previous is not None and previous["content_hash"] == digest:
@@ -234,11 +285,11 @@ class MemoryStore:
                             document_id,
                             source_id,
                             stored_path,
-                            parsed.title,
-                            parsed.body,
-                            ",".join(parsed.tags),
+                            document.title,
+                            document.body,
+                            ",".join(document.tags),
                             digest,
-                            file_path.stat().st_mtime,
+                            document.mtime,
                             self._clock(),
                         ),
                     )
@@ -249,26 +300,29 @@ class MemoryStore:
                         "UPDATE documents SET title = ?, body = ?, tags = ?, content_hash = ?,"
                         " file_mtime = ?, updated_at = ? WHERE id = ?",
                         (
-                            parsed.title,
-                            parsed.body,
-                            ",".join(parsed.tags),
+                            document.title,
+                            document.body,
+                            ",".join(document.tags),
                             digest,
-                            file_path.stat().st_mtime,
+                            document.mtime,
                             self._clock(),
                             document_id,
                         ),
                     )
                     updated += 1
 
-                self._index(document_id, parsed)
+                self._index(document_id, document)
 
             removed = 0
-            for stored_path, row in existing.items():
-                if stored_path in seen:
-                    continue
-                self._unindex(row["id"])
-                self._connection.execute("DELETE FROM documents WHERE id = ?", (row["id"],))
-                removed += 1
+            if replace_missing:
+                for stored_path, row in existing.items():
+                    if stored_path in seen:
+                        continue
+                    self._unindex(row["id"])
+                    self._connection.execute(
+                        "DELETE FROM documents WHERE id = ?", (row["id"],)
+                    )
+                    removed += 1
 
         return IngestResult(
             source_id=source_id,
@@ -353,11 +407,11 @@ class MemoryStore:
         self._connection.commit()
         return source_id
 
-    def _index(self, document_id: str, parsed: ParsedMarkdown) -> None:
+    def _index(self, document_id: str, document: MemoryDocument) -> None:
         self._unindex(document_id)
         self._connection.execute(
             "INSERT INTO documents_fts (document_id, title, body, tags) VALUES (?, ?, ?, ?)",
-            (document_id, parsed.title, parsed.body, ",".join(parsed.tags)),
+            (document_id, document.title, document.body, ",".join(document.tags)),
         )
 
     def _unindex(self, document_id: str) -> None:
