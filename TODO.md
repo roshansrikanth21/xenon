@@ -1,0 +1,55 @@
+# Xenon v1 TODO
+
+## Definition of done
+
+Xenon can be left running on Windows, wake on a chosen wake word, understand a task using the current screen as context, carry out approved actions, and remember user-approved knowledge from selected sources.
+
+## Phase 0 — Foundation
+
+- [ ] Define supported Windows and Python versions.
+- [ ] Add a local `.env.example`; never commit keys or private memory.
+- [ ] Add CI for unit tests, type checks, and formatting.
+- [ ] Add a test fixture layer for synthetic UI Automation trees, screenshots, and memory sources.
+
+## Phase 1 — Screen Context (test first)
+
+- [ ] Test: identify the foreground app, title, process, and UI Automation controls from a fixture.
+- [ ] Test: redact configured sensitive fields before screen context reaches a model.
+- [ ] Test: answer a context question from UIA-only input without a screenshot.
+- [ ] Test: invoke screenshot/vision fallback only when UIA confidence is insufficient.
+- [ ] Test: capture-to-structured-context median latency stays below 250 ms for UIA-only screens.
+- [ ] Implement the screen observer after these tests exist.
+
+## Phase 2 — Wake and Task Loop (test first)
+
+- [ ] Test: wake word does not dispatch an action without a following command.
+- [ ] Test: wake word plus command dispatches exactly one task.
+- [ ] Test: speaking/audio playback cannot retrigger wake detection.
+- [ ] Test: requested side effects require an approval event before execution.
+- [ ] Test: observe → plan → act → verify returns a truthful final state.
+- [ ] Benchmark wake-to-command and command-to-first-response latency.
+- [ ] Implement the voice and task orchestrator after these tests exist.
+
+## Phase 3 — Memory (test first)
+
+- [ ] Test: ingest an Obsidian Markdown fixture with path, tags, timestamps, and source attribution.
+- [ ] Test: ingest a Notion export/API fixture without duplicating unchanged content.
+- [ ] Test: ingest user-provided Claude/Codex memory exports without reading hidden application stores.
+- [ ] Test: retrieve relevant memories while excluding unrelated sources and deleted records.
+- [ ] Test: delete a source and all derived memories deterministically.
+- [ ] Benchmark local memory retrieval below 100 ms for the initial corpus target.
+- [ ] Implement the local memory store and connectors after these tests exist.
+
+## Phase 4 — End-to-end validation
+
+- [ ] Scenario: user says “what is on this screen?” and Xenon answers from the foreground app.
+- [ ] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification.
+- [ ] Scenario: user asks a question whose answer is in Obsidian/Notion and Xenon cites the source.
+- [ ] Scenario: unplug network; local wake, screen context, and local memory still work.
+
+## Research decisions to validate
+
+- [ ] Evaluate Windows UI Automation as the default perception path.
+- [ ] Evaluate `screen-use` only as a reference or optional adapter; do not import its autonomous loop blindly.
+- [ ] Evaluate Mem0 concepts against a lean SQLite + FTS baseline before adding a memory framework.
+- [ ] Evaluate a local STT model and VAD under actual microphone conditions.
