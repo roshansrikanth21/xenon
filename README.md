@@ -33,7 +33,10 @@ Implemented and covered by tests:
 - Opt-in OpenAI-compatible vision client, injectable transport for offline tests.
 - Local SQLite + FTS5 memory: Obsidian Markdown ingestion, tags, source attribution,
   idempotent re-sync, per-file and per-source deletion, ranked retrieval.
+- Typed assist loop: question + live screen + retrieved memory -> model answer
+  with cited source paths.
 - `python -m xenon screen` prints what Xenon currently sees.
+- `python -m xenon ask "..."` answers from screen and memory.
 - `python -m xenon memory ingest|search` mirrors a vault and queries it.
 - Latency benchmarks with budget gates for screen context and memory retrieval.
 
@@ -50,12 +53,18 @@ python -m pytest -q
 python -m xenon screen
 ```
 
-Enable the vision fallback only if you want screenshots sent to a model:
+Enable answers and the vision fallback only if you want requests sent to a model:
 
 ```powershell
+$env:XENON_MODEL_API_KEY = "..."
+$env:XENON_MODEL_NAME = "your-chat-model"
+# optional: $env:XENON_MODEL_BASE_URL = "http://localhost:11434/v1"
+
 $env:XENON_VISION_API_KEY = "..."
 $env:XENON_VISION_MODEL = "your-vision-model"
 # optional: $env:XENON_VISION_BASE_URL = "http://localhost:11434/v1"
+
+python -m xenon ask "what does this screen mean for my deadline?"
 ```
 
 Measure screen-context latency:

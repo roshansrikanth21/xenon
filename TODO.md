@@ -15,13 +15,15 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 
 - [x] Test: identify the foreground app, title, process, and UI Automation controls from a fixture.
 - [x] Test: redact configured sensitive fields before screen context reaches a model.
-- [ ] Test: answer a context question from UIA-only input without a screenshot.
+- [x] Test: answer a context question from UIA-only input without a screenshot.
 - [x] Test: invoke screenshot/vision fallback only when UIA confidence is insufficient.
 - [x] Test: capture-to-structured-context median latency stays below 250 ms for UIA-only screens (measured 35 ms warm; 337 ms cold).
 - [x] Implement the screen observer and live Windows adapter.
 
 ## Phase 2 — Wake and Task Loop (test first)
 
+- [x] Test: build one answer request from screen context plus cited memory.
+- [x] Implement the typed assist loop (`python -m xenon ask`).
 - [ ] Test: wake word does not dispatch an action without a following command.
 - [ ] Test: wake word plus command dispatches exactly one task.
 - [ ] Test: speaking/audio playback cannot retrigger wake detection.

@@ -5,6 +5,9 @@ import argparse
 import os
 import sys
 
+from xenon.assistant import Assistant
+from xenon.chat import ChatUnavailable, OpenAICompatibleChat
+from xenon.chat import config_from_env as chat_config_from_env
 from xenon.memory import MemoryStore
 from xenon.screen import ScreenObserver
 from xenon.vision import OpenAICompatibleVision, VisionUnavailable, config_from_env
@@ -46,6 +49,38 @@ def _screen(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ask(args: argparse.Namespace) -> int:
+    if sys.platform != "win32":
+        print("xenon ask requires Windows for screen context", file=sys.stderr)
+        return 2
+
+    question = " ".join(args.question).strip()
+    config = chat_config_from_env()
+    if config is None:
+        print(
+            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to enable answers",
+            file=sys.stderr,
+        )
+        return 2
+
+    with MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH)) as store:
+        assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
+        try:
+            answer = assistant.ask(question)
+        except (ChatUnavailable, ValueError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+
+    print(answer.text)
+    if answer.memories:
+        print("\nsources:")
+        for memory in answer.memories:
+            print(f"- {memory.title} ({memory.source_kind}: {memory.path})")
+    source = "vision" if answer.used_vision else "ui-automation"
+    print(f"\n[{answer.latency_ms:.0f} ms, screen via {source}]")
+    return 0
+
+
 def _memory(args: argparse.Namespace) -> int:
     with MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH)) as store:
         if args.memory_command == "ingest":
@@ -76,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
 
     screen = subparsers.add_parser("screen", help="describe the active window")
     screen.set_defaults(handler=_screen)
+
+    ask = subparsers.add_parser("ask", help="answer a question from screen and memory")
+    ask.add_argument("question", nargs="+")
+    ask.set_defaults(handler=_ask)
 
     memory = subparsers.add_parser("memory", help="ingest and search local memory")
     memory_commands = memory.add_subparsers(dest="memory_command", required=True)
