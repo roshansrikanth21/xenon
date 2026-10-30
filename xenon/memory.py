@@ -17,6 +17,14 @@ from typing import Callable, Iterable
 
 MARKDOWN_SUFFIXES = {".md", ".markdown"}
 HIDDEN_PREFIX = "."
+STOPWORDS = frozenset(
+    """
+    a about after all am an and any are as at be been before but by can could did
+    do does for from had has have he her here him his how i if in into is it its
+    me my of on or our out she should so that the their them then there these they
+    this to was we were what when where which who why will with would you your
+    """.split()
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -134,9 +142,22 @@ def _parse_tags(frontmatter: str) -> list[str]:
     return [tag for tag in tags if tag]
 
 
-def _query_expression(query: str) -> str:
-    tokens = re.findall(r"\w+", query, flags=re.UNICODE)
-    return " ".join(f'"{token}"*' for token in tokens)
+def _query_expression(query: str) -> tuple[str, str]:
+    """Return ``(and_expression, or_expression)`` for a natural query.
+
+    Questions are not keyword lists, so an all-terms match is tried first and
+    a ranked any-terms match is the fallback. Stopwords are dropped so a long
+    question still finds the note that answers it.
+    """
+    tokens = [
+        token
+        for token in re.findall(r"\w+", query, flags=re.UNICODE)
+        if token.lower() not in STOPWORDS
+    ]
+    if not tokens:
+        return "", ""
+    quoted = [f'"{token}"*' for token in tokens]
+    return " ".join(quoted), " OR ".join(quoted)
 
 
 class MemoryStore:
@@ -258,25 +279,13 @@ class MemoryStore:
         )
 
     def search(self, query: str, limit: int = 5) -> list[MemoryHit]:
-        expression = _query_expression(query)
-        if not expression:
+        and_expression, or_expression = _query_expression(query)
+        if not and_expression:
             return []
 
-        rows = self._connection.execute(
-            """
-            SELECT d.id, d.title, d.path, d.tags, d.source_id,
-                   s.kind, s.root,
-                   snippet(documents_fts, 2, '[', ']', '…', 12) AS snippet,
-                   bm25(documents_fts) AS score
-            FROM documents_fts
-            JOIN documents d ON d.id = documents_fts.document_id
-            JOIN sources s ON s.id = d.source_id
-            WHERE documents_fts MATCH ?
-            ORDER BY score
-            LIMIT ?
-            """,
-            (expression, limit),
-        )
+        rows = self._search_rows(and_expression, limit)
+        if not rows and or_expression != and_expression:
+            rows = self._search_rows(or_expression, limit)
         return [
             MemoryHit(
                 document_id=row["id"],
@@ -291,6 +300,23 @@ class MemoryStore:
             )
             for row in rows
         ]
+
+    def _search_rows(self, expression: str, limit: int) -> list[sqlite3.Row]:
+        return self._connection.execute(
+            """
+            SELECT d.id, d.title, d.path, d.tags, d.source_id,
+                   s.kind, s.root,
+                   snippet(documents_fts, 2, '[', ']', '…', 12) AS snippet,
+                   bm25(documents_fts) AS score
+            FROM documents_fts
+            JOIN documents d ON d.id = documents_fts.document_id
+            JOIN sources s ON s.id = d.source_id
+            WHERE documents_fts MATCH ?
+            ORDER BY score
+            LIMIT ?
+            """,
+            (expression, limit),
+        ).fetchall()
 
     def delete_document(self, document_id: str) -> bool:
         cursor = self._connection.execute(

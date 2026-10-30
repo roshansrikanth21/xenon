@@ -136,6 +136,25 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(hit.title, "BOM note")
         self.assertNotIn("\ufeff", hit.snippet)
 
+    def test_natural_language_question_falls_back_to_ranked_terms(self) -> None:
+        self.write(
+            "decisions/screen.md",
+            "# Screen reading decision\n\nWe decided to use UI Automation for screen reading.\n",
+        )
+        self.write("decisions/other.md", "# Other\n\nWe decided to order coffee.\n")
+        self.store.ingest_markdown("obsidian", self.vault)
+
+        hits = self.store.search("what did I decide about screen reading?")
+
+        self.assertGreaterEqual(len(hits), 1)
+        self.assertEqual(hits[0].title, "Screen reading decision")
+
+    def test_stopword_only_query_returns_no_results(self) -> None:
+        self.write("note.md", "# Note\n\nwhat is it\n")
+        self.store.ingest_markdown("obsidian", self.vault)
+
+        self.assertEqual(self.store.search("what is it"), [])
+
     def test_empty_query_returns_no_results(self) -> None:
         self.write("note.md", "# Note\n\nbody\n")
         self.store.ingest_markdown("obsidian", self.vault)
