@@ -1,3 +1,4 @@
+import array
 import unittest
 from unittest import mock
 
@@ -34,6 +35,51 @@ class PcmConversionTests(unittest.TestCase):
         pcm = to_pcm16([2.0, -2.0, 0.0])
 
         self.assertEqual(list(pcm), [32767, -32767, 0])
+
+
+class ResampleTests(unittest.TestCase):
+    def test_matching_rates_are_untouched(self) -> None:
+        from xenon.audio import resample_pcm16
+
+        pcm = to_pcm16([0.1, 0.2, 0.3]).tobytes()
+
+        self.assertIs(resample_pcm16(pcm, 16000, 16000), pcm)
+
+    def test_downsamples_22khz_audio_to_16khz(self) -> None:
+        from xenon.audio import resample_pcm16
+
+        samples = [0.1] * 22050
+        pcm = to_pcm16(samples).tobytes()
+
+        out = resample_pcm16(pcm, 22050, 16000)
+
+        self.assertEqual(len(out), 16000 * 2)
+
+    def test_upsamples_8khz_audio_to_16khz(self) -> None:
+        from xenon.audio import resample_pcm16
+
+        pcm = to_pcm16([0.2] * 8000).tobytes()
+
+        out = resample_pcm16(pcm, 8000, 16000)
+
+        self.assertEqual(len(out), 16000 * 2)
+
+    def test_preserves_amplitude(self) -> None:
+        from xenon.audio import resample_pcm16
+
+        pcm = to_pcm16([0.5] * 100).tobytes()
+
+        out = resample_pcm16(pcm, 22050, 16000)
+        values = array.array("h")
+        values.frombytes(out)
+
+        for value in values[1:-1]:
+            self.assertAlmostEqual(value, 16384, delta=2)
+
+    def test_handles_empty_audio(self) -> None:
+        from xenon.audio import resample_pcm16
+
+        self.assertEqual(resample_pcm16(b"", 22050, 16000), b"")
 
 
 class UtteranceDetectorTests(unittest.TestCase):
@@ -178,6 +224,21 @@ class WhisperTranscriberTests(unittest.TestCase):
         WhisperTranscriber(model_factory=lambda *a: model).transcribe(b"\x00\x00", 16000)
 
         self.assertNotIn("initial_prompt", model.calls[0])
+
+    def test_resamples_to_16khz_before_transcription(self) -> None:
+        model = FakeWhisperModel()
+        decoded: dict[str, int] = {}
+
+        def fake_decode(pcm: bytes):
+            decoded["bytes"] = len(pcm)
+            return [0.0]
+
+        with mock.patch("xenon.audio._pcm_to_float", fake_decode):
+            WhisperTranscriber(model_factory=lambda *a: model).transcribe(
+                b"\x00\x00" * 22050, 22050
+            )
+
+        self.assertEqual(decoded["bytes"], 16000 * 2)
 
 
 class FakeSapiEngine:

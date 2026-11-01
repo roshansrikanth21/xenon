@@ -39,8 +39,11 @@ Implemented and covered by tests:
 - Approval-gated desktop tasks: model planner limited to permitted actions, a
   policy that refuses shell/destructive kinds, and a runner that reports
   `succeeded`, `denied`, `failed`, or `unverified` truthfully.
-- Windows actuator for open/focus/type/keys/click/write, plus a foreground-title
-  verifier. Real actions require an explicit plan confirmation.
+- Windows actuator for open/focus/type/keys/click/write, plus foreground-title and
+  file verifiers. Real actions require an explicit plan confirmation.
+- Focus safety: `focus_window` confirms the title it actually reached, and
+  `type_text`/`press_keys` refuse to run if the foreground window changed since
+  that focus step.
 - Startup prewarm for the screen adapter: one throwaway foreground read drops the
   first real observation from 289 ms to 32 ms.
 - Wake gate: a bare wake word only arms the next utterance briefly, commands
@@ -101,11 +104,12 @@ Plan a desktop task before letting it act:
 ```powershell
 python -m xenon do "open notepad and type my standup notes" --dry-run
 python -m xenon do "open notepad and type my standup notes" --expect-title Notepad
+python -m xenon do "save my notes to C:\notes\today.md" --expect-file C:\notes\today.md --expect-text standup
 ```
 
-`do` exits non-zero unless verification passes. Without `--expect-title` there is
-nothing to check afterwards, so it reports `status: unverified` and exits 1 even
-when every step ran. Pass `--expect-title` when you want a success exit code.
+`do` exits non-zero unless verification passes. Without `--expect-title`,
+`--expect-file`, or `--expect-text` there is nothing to check afterwards, so it
+reports `status: unverified` and exits 1 even when every step ran.
 
 Open the command box:
 

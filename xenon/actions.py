@@ -8,6 +8,7 @@ verification succeeded.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
 READ_ONLY_KINDS = frozenset({"observe", "wait"})
@@ -101,6 +102,28 @@ class ApprovalPolicy:
         if kind in SIDE_EFFECT_KINDS:
             return PolicyDecision(allowed=True, requires_approval=True)
         return PolicyDecision(allowed=False, reason=f"unknown action kind {kind!r}")
+
+
+class FileVerifier:
+    """Considers a task verified when the expected file exists with content."""
+
+    def __init__(self, path: str, contains: str = "") -> None:
+        self.path = path
+        self.contains = contains
+
+    def verify(self, goal: str) -> Verification:
+        path = Path(self.path).expanduser()
+        if not path.is_file():
+            return Verification(False, f"{path} was not written")
+        if not self.contains:
+            return Verification(True, f"{path} exists")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            return Verification(False, f"could not read {path}: {error}")
+        if self.contains not in text:
+            return Verification(False, f"{path} does not contain {self.contains!r}")
+        return Verification(True, f"{path} contains the expected text")
 
 
 class TaskRunner:

@@ -269,11 +269,15 @@ def _do(args: argparse.Namespace) -> int:
             print("cancelled")
             return 1
 
+    from xenon.actions import FileVerifier
     from xenon.windows_actions import ForegroundTitleVerifier, WindowsActionBackend
 
-    verifier = (
-        ForegroundTitleVerifier(args.expect_title) if args.expect_title else None
-    )
+    if args.expect_title:
+        verifier = ForegroundTitleVerifier(args.expect_title)
+    elif args.expect_file:
+        verifier = FileVerifier(args.expect_file, args.expect_text)
+    else:
+        verifier = None
     outcome = TaskRunner(
         ApprovalPolicy(),
         WindowsActionBackend(),
@@ -404,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
     do.add_argument("--dry-run", action="store_true", help="print the plan only")
     do.add_argument("--yes", action="store_true", help="skip the plan confirmation")
     do.add_argument("--expect-title", default="", help="verify the foreground title contains this")
+    do.add_argument("--expect-file", default="", help="verify this file exists afterwards")
+    do.add_argument("--expect-text", default="", help="verify the file contains this text")
     do.set_defaults(handler=_do)
 
     ui = subparsers.add_parser("ui", help="open the always-on-top command box")

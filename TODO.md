@@ -60,7 +60,8 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Scenario: Xenon plans one step, runs it after approval, and reports `unverified` when no verifier is configured (verified live).
 - [x] Scenario: user asks a question whose answer is in a Claude export and Obsidian, and both are cited.
 - [x] Test: `ask` and `do --dry-run` run end-to-end against a local stub model.
-- [ ] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification.
+- [x] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification (verified live: write + file-content verification, exit 0).
+- [x] Scenario: real desktop actuation opens an app and verifies the foreground title (verified live).
 - [ ] Scenario: unplug network; local wake, screen context, and local memory still work.
 
 ## Research decisions to validate

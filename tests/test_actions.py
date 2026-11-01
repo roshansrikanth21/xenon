@@ -1,9 +1,12 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from xenon.actions import (
     Action,
     ActionResult,
     ApprovalPolicy,
+    FileVerifier,
     TaskRunner,
     Verification,
 )
@@ -27,6 +30,32 @@ class FakeVerifier:
     def verify(self, goal: str) -> Verification:
         self.goals.append(goal)
         return self.verification
+
+
+class FileVerifierTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "note.md"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_reports_a_missing_file(self) -> None:
+        result = FileVerifier(self.path).verify("save the note")
+
+        self.assertFalse(result.ok)
+        self.assertIn("was not written", result.detail)
+
+    def test_accepts_an_existing_file(self) -> None:
+        self.path.write_text("hello", encoding="utf-8")
+
+        self.assertTrue(FileVerifier(self.path).verify("save the note").ok)
+
+    def test_checks_the_expected_content(self) -> None:
+        self.path.write_text("the deadline is Friday", encoding="utf-8")
+
+        self.assertTrue(FileVerifier(self.path, "Friday").verify("save").ok)
+        self.assertFalse(FileVerifier(self.path, "Monday").verify("save").ok)
 
 
 class ApprovalPolicyTests(unittest.TestCase):

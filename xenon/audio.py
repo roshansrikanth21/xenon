@@ -118,12 +118,48 @@ def _join_pcm(frames: Iterable[SampleFrame]) -> bytes:
     return joined.tobytes()
 
 
+def resample_pcm16(pcm: bytes, from_rate: int, to_rate: int) -> bytes:
+    """Linearly resample 16-bit mono PCM. No-op when the rates already match.
+
+    Whisper only accepts 16 kHz audio, and a microphone may not offer it, so the
+    rate the device gave us must be handled here rather than silently ignored.
+    """
+    if from_rate == to_rate or from_rate <= 0 or to_rate <= 0 or not pcm:
+        return pcm
+
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if sys.byteorder == "big":
+        samples.byteswap()
+
+    count = len(samples)
+    if count < 2:
+        return pcm
+
+    out_count = max(1, int(round(count * to_rate / from_rate)))
+    out = array.array("h", [0]) * out_count
+    step = (count - 1) / max(1, out_count - 1)
+    for index in range(out_count):
+        position = index * step
+        left = int(position)
+        right = min(left + 1, count - 1)
+        weight = position - left
+        out[index] = int(round(samples[left] * (1 - weight) + samples[right] * weight))
+
+    if sys.byteorder == "big":
+        out.byteswap()
+    return out.tobytes()
+
+
 class Transcriber(Protocol):
     def transcribe(self, pcm: bytes, sample_rate: int) -> str: ...
 
 
 class Speaker(Protocol):
     def speak(self, text: str) -> None: ...
+
+
+TARGET_SAMPLE_RATE = 16000
 
 
 class WhisperTranscriber:
@@ -159,7 +195,7 @@ class WhisperTranscriber:
 
     def transcribe(self, pcm: bytes, sample_rate: int) -> str:
         model = self._load()
-        audio = _pcm_to_float(pcm)
+        audio = _pcm_to_float(resample_pcm16(pcm, sample_rate, TARGET_SAMPLE_RATE))
         options = {
             "language": self._language,
             "beam_size": 1,

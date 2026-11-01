@@ -115,23 +115,45 @@ def parse_keys(sequence: str) -> tuple[list[int], int]:
     return modifiers, virtual_key(parts[-1])
 
 
+def _default_desktop():
+    from pywinauto import Desktop
+
+    return Desktop(backend="uia")
+
+
 class WindowsActionBackend:
     """Executes approved actions with Win32 and UI Automation."""
 
-    def __init__(self) -> None:
-        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self._user32.SendInput.argtypes = [
-            wintypes.UINT,
-            ctypes.POINTER(INPUT),
-            ctypes.c_int,
-        ]
-        self._user32.SendInput.restype = wintypes.UINT
-        self._user32.keybd_event.argtypes = [
-            wintypes.BYTE,
-            wintypes.BYTE,
-            wintypes.DWORD,
-            ULONG_PTR,
-        ]
+    def __init__(self, backend=None, desktop_factory=None) -> None:
+        self._backend = backend if backend is not None else Win32Backend()
+        self._desktop_factory = (
+            desktop_factory if desktop_factory is not None else _default_desktop
+        )
+        self._focused_title: str | None = None
+        self._user32 = None
+
+    @property
+    def user32(self):
+        """Load user32 only when a key is actually sent.
+
+        Deferring this keeps the class importable and testable on CI machines
+        that have no Win32 library.
+        """
+        if self._user32 is None:
+            self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+            self.user32.SendInput.argtypes = [
+                wintypes.UINT,
+                ctypes.POINTER(INPUT),
+                ctypes.c_int,
+            ]
+            self.user32.SendInput.restype = wintypes.UINT
+            self.user32.keybd_event.argtypes = [
+                wintypes.BYTE,
+                wintypes.BYTE,
+                wintypes.DWORD,
+                ULONG_PTR,
+            ]
+        return self._user32
 
     def execute(self, action: Action) -> ActionResult:
         handler = getattr(self, f"_do_{action.kind.strip().lower()}", None)
@@ -167,17 +189,42 @@ class WindowsActionBackend:
         return ActionResult(True, f"opened {target}")
 
     def _do_focus_window(self, action: Action) -> ActionResult:
-        from pywinauto import Desktop
+        target = action.target.strip()
+        if not target:
+            return ActionResult(False, "focus_window needs a target")
 
-        window = Desktop(backend="uia").window(title_re=f".*{re.escape(action.target)}.*")
-        window.set_focus()
-        return ActionResult(True, f"focused {action.target}")
+        self._focused_title = None
+        desktop = self._desktop_factory()
+        window = None
+        # Exact title first: a substring match is how a test once typed into the
+        # wrong Notepad document.
+        for build in (
+            lambda: desktop.window(title=target),
+            lambda: desktop.window(title_re=f".*{re.escape(target)}.*"),
+        ):
+            try:
+                candidate = build()
+                candidate.set_focus()
+            except Exception:
+                continue
+            window = candidate
+            break
+
+        if window is None:
+            return ActionResult(False, f"no window matching {target!r}")
+
+        title = self._foreground_title()
+        if target.lower() not in title.lower():
+            return ActionResult(
+                False, f"focus landed on {title!r}, which is not {target!r}"
+            )
+
+        self._focused_title = title
+        return ActionResult(True, f"focused {title}")
 
     def _do_click_control(self, action: Action) -> ActionResult:
-        from pywinauto import Desktop
-
-        handle = Win32Backend().foreground_handle()
-        window = Desktop(backend="uia").window(handle=handle)
+        handle = self._backend.foreground_handle()
+        window = self._desktop_factory().window(handle=handle)
         kwargs = {"title": action.target}
         if action.value.strip():
             kwargs["control_type"] = action.value.strip()
@@ -185,22 +232,46 @@ class WindowsActionBackend:
         control.click_input()
         return ActionResult(True, f"clicked {action.target}")
 
+    def _require_the_focused_window(self) -> ActionResult | None:
+        """Refuse to send input if the foreground window changed since focus."""
+        if self._focused_title is None:
+            return None
+        try:
+            current = self._foreground_title()
+        except Exception as error:
+            return ActionResult(False, f"could not read the foreground window: {error}")
+        if current != self._focused_title:
+            return ActionResult(
+                False,
+                f"foreground window changed to {current!r}; nothing was typed",
+            )
+        return None
+
+    def _foreground_title(self) -> str:
+        return self._backend.title(self._backend.foreground_handle())
+
     def _do_type_text(self, action: Action) -> ActionResult:
         if not action.value:
             return ActionResult(False, "type_text needs a value")
+        refused = self._require_the_focused_window()
+        if refused is not None:
+            return refused
         self._send_unicode(action.value)
         return ActionResult(True, f"typed {len(action.value)} characters")
 
     def _do_press_keys(self, action: Action) -> ActionResult:
+        refused = self._require_the_focused_window()
+        if refused is not None:
+            return refused
         modifiers, key = parse_keys(action.value)
         for modifier in modifiers:
-            self._user32.keybd_event(modifier, 0, 0, 0)
+            self.user32.keybd_event(modifier, 0, 0, 0)
             time.sleep(0.01)
-        self._user32.keybd_event(key, 0, 0, 0)
+        self.user32.keybd_event(key, 0, 0, 0)
         time.sleep(0.01)
-        self._user32.keybd_event(key, 0, KEYEVENTF_KEYUP, 0)
+        self.user32.keybd_event(key, 0, KEYEVENTF_KEYUP, 0)
         for modifier in reversed(modifiers):
-            self._user32.keybd_event(modifier, 0, KEYEVENTF_KEYUP, 0)
+            self.user32.keybd_event(modifier, 0, KEYEVENTF_KEYUP, 0)
         return ActionResult(True, f"pressed {action.value}")
 
     def _do_write_file(self, action: Action) -> ActionResult:
@@ -226,7 +297,7 @@ class WindowsActionBackend:
                 )
             )
         array = (INPUT * len(events))(*events)
-        sent = self._user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
+        sent = self.user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
         if sent != len(events):
             raise OSError(ctypes.get_last_error(), "SendInput did not send every event")
 
