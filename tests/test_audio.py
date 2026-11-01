@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from xenon.audio import (
     MicrophoneSource,
@@ -124,6 +125,13 @@ class FakeWhisperModel:
 
 
 class WhisperTranscriberTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Decoding PCM to a float array needs numpy, which the voice extra
+        # installs. The unit tests only exercise orchestration.
+        patcher = mock.patch("xenon.audio._pcm_to_float", lambda pcm: [0.0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_loads_the_model_lazily_and_joins_segments(self) -> None:
         created: list[tuple[str, str, str]] = []
         model = FakeWhisperModel()
