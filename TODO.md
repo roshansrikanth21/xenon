@@ -24,11 +24,13 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 
 - [x] Test: build one answer request from screen context plus cited memory.
 - [x] Implement the typed assist loop (`python -m xenon ask`).
+- [x] Test: requested side effects require an approval event before execution.
+- [x] Test: observe → plan → act → verify returns a truthful final state.
+- [x] Test: the planner may only propose permitted action kinds.
+- [x] Implement the approval runner, model planner, Windows actuator, and `do` command.
 - [ ] Test: wake word does not dispatch an action without a following command.
 - [ ] Test: wake word plus command dispatches exactly one task.
 - [ ] Test: speaking/audio playback cannot retrigger wake detection.
-- [ ] Test: requested side effects require an approval event before execution.
-- [ ] Test: observe → plan → act → verify returns a truthful final state.
 - [ ] Benchmark wake-to-command and command-to-first-response latency.
 - [ ] Implement the voice and task orchestrator after these tests exist.
 

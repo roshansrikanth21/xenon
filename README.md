@@ -36,16 +36,21 @@ Implemented and covered by tests:
 - Connectors: read-only Notion page trees, Claude `conversations.json`, Codex JSONL.
 - Agent Skills: metadata discovery at startup, instructions loaded only on use,
   keyword matching, and three bundled skills under `skills/`.
+- Approval-gated desktop tasks: model planner limited to permitted actions, a
+  policy that refuses shell/destructive kinds, and a runner that reports
+  `succeeded`, `denied`, `failed`, or `unverified` truthfully.
+- Windows actuator for open/focus/type/keys/click/write, plus a foreground-title
+  verifier. Real actions require an explicit plan confirmation.
 - Typed assist loop: question + live screen + retrieved memory -> model answer
   with cited source paths.
 - `python -m xenon screen` prints what Xenon currently sees.
 - `python -m xenon ask "..." [--skill name]` answers from screen and memory.
+- `python -m xenon do "..." [--dry-run]` plans and runs an approved task.
 - `python -m xenon memory ingest|import|search` and `python -m xenon notion ingest`.
 - `python -m xenon skills list|find`.
 - Latency benchmarks with budget gates for screen context and memory retrieval.
 
-Not built yet: wake word and task orchestration, approval-gated desktop actions,
-and the tray UI.
+Not built yet: wake word and voice loop, and the tray UI.
 
 ## Quick start
 
@@ -69,6 +74,13 @@ $env:XENON_VISION_MODEL = "your-vision-model"
 # optional: $env:XENON_VISION_BASE_URL = "http://localhost:11434/v1"
 
 python -m xenon ask "what does this screen mean for my deadline?"
+```
+
+Plan a desktop task before letting it act:
+
+```powershell
+python -m xenon do "open notepad and type my standup notes" --dry-run
+python -m xenon do "open notepad and type my standup notes" --expect-title Notepad
 ```
 
 Measure screen-context latency:

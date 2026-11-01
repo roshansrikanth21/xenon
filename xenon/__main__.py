@@ -5,6 +5,7 @@ import argparse
 import os
 import sys
 
+from xenon.actions import ApprovalPolicy, TaskRunner
 from xenon.assistant import Assistant
 from xenon.chat import ChatUnavailable, OpenAICompatibleChat
 from xenon.chat import config_from_env as chat_config_from_env
@@ -17,6 +18,7 @@ from xenon.notion import (
     config_from_env as notion_config_from_env,
     sync_to_memory,
 )
+from xenon.planner import ModelPlanner, PlannerError
 from xenon.screen import ScreenObserver
 from xenon.skills import SkillError, SkillRegistry
 from xenon.vision import OpenAICompatibleVision, VisionUnavailable, config_from_env
@@ -96,6 +98,75 @@ def _ask(args: argparse.Namespace) -> int:
     source = "vision" if answer.used_vision else "ui-automation"
     print(f"\n[{answer.latency_ms:.0f} ms, screen via {source}]")
     return 0
+
+
+def _do(args: argparse.Namespace) -> int:
+    if sys.platform != "win32":
+        print("xenon do requires Windows", file=sys.stderr)
+        return 2
+
+    config = chat_config_from_env()
+    if config is None:
+        print(
+            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to plan tasks",
+            file=sys.stderr,
+        )
+        return 2
+
+    goal = " ".join(args.goal).strip()
+    context = _observer().observe()
+    screen = f"{context.title}\n{context.text}"[:4000]
+    planner = ModelPlanner(OpenAICompatibleChat(config))
+    try:
+        plan = planner.plan(goal, screen)
+    except (ChatUnavailable, PlannerError) as error:
+        print(f"planning error: {error}", file=sys.stderr)
+        return 1
+
+    print(f"plan for: {goal}")
+    for index, action in enumerate(plan.actions, start=1):
+        detail = " ".join(
+            part
+            for part in (
+                f"target={action.target!r}" if action.target else "",
+                f"value={action.value!r}" if action.value else "",
+            )
+            if part
+        )
+        note = f"  # {action.reason}" if action.reason else ""
+        print(f"  {index}. {action.kind} {detail}{note}")
+
+    if args.dry_run:
+        return 0
+
+    if not args.yes:
+        try:
+            reply = input("Run this plan? [y/N] ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in {"y", "yes"}:
+            print("cancelled")
+            return 1
+
+    from xenon.windows_actions import ForegroundTitleVerifier, WindowsActionBackend
+
+    verifier = (
+        ForegroundTitleVerifier(args.expect_title) if args.expect_title else None
+    )
+    outcome = TaskRunner(
+        ApprovalPolicy(),
+        WindowsActionBackend(),
+        approver=lambda action: True,
+        verifier=verifier,
+    ).run(goal, plan.actions)
+
+    print(f"status: {outcome.status}")
+    for step in outcome.steps:
+        result = step.result.detail if step.result is not None else "not run"
+        print(f"  - {step.action.kind}: {result}")
+    if outcome.detail:
+        print(f"detail: {outcome.detail}")
+    return 0 if outcome.status == "succeeded" else 1
 
 
 def _notion(args: argparse.Namespace) -> int:
@@ -206,6 +277,13 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("question", nargs="+")
     ask.add_argument("--skill", default="", help="load one Agent Skill by name")
     ask.set_defaults(handler=_ask)
+
+    do = subparsers.add_parser("do", help="plan and run an approved desktop task")
+    do.add_argument("goal", nargs="+")
+    do.add_argument("--dry-run", action="store_true", help="print the plan only")
+    do.add_argument("--yes", action="store_true", help="skip the plan confirmation")
+    do.add_argument("--expect-title", default="", help="verify the foreground title contains this")
+    do.set_defaults(handler=_do)
 
     skills = subparsers.add_parser("skills", help="list or match Agent Skills")
     skill_commands = skills.add_subparsers(dest="skills_command", required=True)
