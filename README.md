@@ -47,6 +47,8 @@ Implemented and covered by tests:
   without the wake word are ignored, and detection is muted while Xenon speaks.
 - Voice loop orchestration with injectable transcribe/speak adapters, so a real
   STT and TTS engine can be dropped in without touching the gating logic.
+- Working local voice path: energy endpointer over the microphone, faster-whisper
+  speech-to-text, and Windows SAPI speech output. No audio leaves the machine.
 - Minimal always-on-top Tk command box with a testable presenter.
 - Typed assist loop: question + live screen + retrieved memory -> model answer
   with cited source paths.
@@ -54,14 +56,15 @@ Implemented and covered by tests:
 - `python -m xenon ask "..." [--skill name]` answers from screen and memory.
 - `python -m xenon do "..." [--dry-run]` plans and runs an approved task.
 - `python -m xenon ui` opens the command box.
+- `python -m xenon voice` listens for the wake word and answers aloud.
 - `python -m xenon memory ingest|import|search` and `python -m xenon notion ingest`.
 - `python -m xenon skills list|find`.
 - Latency benchmarks with budget gates for screen context and memory retrieval.
 - End-to-end CLI tests that drive the real HTTP request path against a local
   OpenAI-compatible stub, so command wiring cannot silently break.
 
-Not built yet: the real microphone/VAD/STT/TTS adapters, a tray icon and global
-hotkey, and a wake-to-command latency benchmark.
+Not built yet: a tray icon and global hotkey, and an always-listening service
+that keeps the microphone and screen adapter warm between commands.
 
 ## Quick start
 
@@ -71,6 +74,12 @@ py -3.11 -m venv .venv
 pip install -e ".[dev,capture,uia]"
 python -m pytest -q
 python -m xenon screen
+```
+
+Add the voice dependencies if you want to talk to Xenon:
+
+```powershell
+pip install -e ".[voice]"
 ```
 
 Enable answers and the vision fallback only if you want requests sent to a model:
@@ -107,6 +116,23 @@ python -m xenon ui --no-topmost   # let other windows cover it
 
 The box keeps the same screen + memory context as `ask` and prints retrieval
 sources under each answer.
+
+Talk to Xenon locally (microphone, no cloud speech services):
+
+```powershell
+python -m xenon voice
+# then say: "Xenon, what is on my screen?"
+```
+
+Speech output uses Windows SAPI and speech input uses faster-whisper, so audio
+never leaves the machine. The first run downloads the Whisper model (about 75 MB
+for `base`); later runs load it in about 2 s and transcribe a few seconds of
+speech in under 10 ms on CPU. Increase accuracy with `XENON_WHISPER_MODEL=small`
+or use `XENON_WHISPER_DEVICE=cuda` when a GPU is available.
+
+Whisper does not always spell an invented name the way you say it, so Xenon sends
+a short `initial_prompt` containing the wake word and accepts extra spellings from
+`XENON_WAKE_ALIASES` (default `zenon, see none`).
 
 Measure screen-context latency:
 
@@ -158,6 +184,7 @@ Local run on 30 Oct–1 Nov 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9:
 | Full `ask` without vision, end to end | — | **210 ms** | — | — |
 | Memory retrieval, 500 docs | ingest 264 ms | **0.1 ms** | 0.9 ms | 100 ms |
 | Wake gate + dispatch (no audio) | — | **0.001 ms** | 0.001 ms | 5 ms |
+| Voice: 2.2 s of speech, warm Whisper `base` | model load 1.9 s | **4–6 ms** | 6 ms | — |
 
 Cold start is dominated by pywinauto/COM initialization. `ScreenObserver.prewarm()`
 pays it once at startup (about 335 ms) and reads one real window so the UIA tree

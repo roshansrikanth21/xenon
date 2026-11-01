@@ -20,7 +20,7 @@ from unittest import mock
 from xenon import __main__ as cli
 from xenon.screen import ScreenContext
 
-COMMANDS = ["screen", "ask", "do", "ui", "skills", "memory", "notion"]
+COMMANDS = ["screen", "ask", "do", "ui", "voice", "skills", "memory", "notion"]
 
 
 def reply_for(payload: dict) -> str:
@@ -129,6 +129,7 @@ class ParserTests(unittest.TestCase):
             ["ask", "what is this?"],
             ["do", "open notepad"],
             ["ui"],
+            ["voice"],
         ):
             with self.subTest(argv=argv):
                 code, _, err = run_cli(argv)

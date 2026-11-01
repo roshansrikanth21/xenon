@@ -147,6 +147,80 @@ def _ui(args: argparse.Namespace) -> int:
     return 0
 
 
+def _voice(args: argparse.Namespace) -> int:
+    if not is_windows():
+        print("xenon voice requires Windows for speech and screen context", file=sys.stderr)
+        return 2
+
+    config = chat_config_from_env()
+    if config is None:
+        print(
+            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to answer by voice",
+            file=sys.stderr,
+        )
+        return 2
+
+    from xenon.audio import (
+        MicrophoneSource,
+        SapiSpeaker,
+        UtteranceDetector,
+        WhisperTranscriber,
+        listen_once,
+    )
+    from xenon.voice import VoiceLoop
+    from xenon.wake import WakeGate
+
+    wake_word = os.environ.get("XENON_WAKE_WORD", "xenon")
+    aliases = tuple(
+        part.strip()
+        for part in os.environ.get("XENON_WAKE_ALIASES", "").split(",")
+        if part.strip()
+    )
+    try:
+        speaker = SapiSpeaker()
+    except Exception as error:
+        print(f"speech output unavailable: {error}", file=sys.stderr)
+        return 1
+
+    source = MicrophoneSource()
+    detector = UtteranceDetector()
+    transcriber = WhisperTranscriber(
+        os.environ.get("XENON_WHISPER_MODEL", "base"),
+        os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
+        os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
+        initial_prompt=os.environ.get(
+            "XENON_WHISPER_PROMPT", f"{wake_word.capitalize()}."
+        ),
+    )
+
+    store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
+    assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
+
+    def handle(command: str) -> str:
+        answer = assistant.ask(command)
+        print(f"you: {command}")
+        print(f"xenon: {answer.text}")
+        return answer.text
+
+    loop = VoiceLoop(
+        gate=WakeGate(wake_word, aliases=aliases),
+        transcribe=lambda: listen_once(source, detector, transcriber),
+        speak=speaker.speak,
+        on_command=handle,
+    )
+
+    print(f"listening for {wake_word!r}; press Ctrl+C to stop", flush=True)
+    try:
+        while True:
+            loop.tick()
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        source.close()
+        store.close()
+    return 0
+
+
 def _do(args: argparse.Namespace) -> int:
     if not is_windows():
         print("xenon do requires Windows", file=sys.stderr)
@@ -337,6 +411,9 @@ def main(argv: list[str] | None = None) -> int:
         "--no-topmost", action="store_true", help="let other windows cover the box"
     )
     ui.set_defaults(handler=_ui)
+
+    voice = subparsers.add_parser("voice", help="listen for the wake word and answer aloud")
+    voice.set_defaults(handler=_voice)
 
     skills = subparsers.add_parser("skills", help="list or match Agent Skills")
     skill_commands = skills.add_subparsers(dest="skills_command", required=True)

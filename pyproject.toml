@@ -5,8 +5,9 @@ description = "Local-first screen-aware personal assistant"
 requires-python = ">=3.11"
 
 [project.optional-dependencies]
-uia = ["pywinauto>=0.6.9"]
+uia = ["pywinauto>=0.6.9", "pywin32>=306"]
 capture = ["mss>=9", "pillow>=10"]
+voice = ["sounddevice>=0.4", "faster-whisper>=1.0", "pywin32>=306"]
 dev = ["pytest>=8"]
 
 [build-system]

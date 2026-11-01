@@ -36,8 +36,10 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Test: every CLI command is registered and its handlers are reachable.
 - [x] Benchmark wake-to-command and command-to-first-response latency (gate + dispatch 0.001 ms; audio path still unmeasured).
 - [x] Add startup prewarm so the first request skips COM initialization (289 ms -> 32 ms).
-- [ ] Wire real VAD + STT + TTS adapters behind the voice loop.
+- [x] Wire real VAD + STT + TTS adapters behind the voice loop (energy endpointer, faster-whisper, SAPI).
+- [ ] Benchmark true wake-to-command latency with microphone capture in the loop.
 - [ ] Add a tray icon and a global hotkey for the command box.
+- [ ] Keep the service warm so the model, microphone, and screen adapter load once.
 
 ## Phase 3 — Memory (test first)
 
@@ -63,7 +65,8 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 
 ## Research decisions to validate
 
-- [ ] Evaluate Windows UI Automation as the default perception path.
+- [x] Evaluate Windows UI Automation as the default perception path (29 ms warm; falls back to vision when the tree is empty, as with slide decks and Electron apps).
 - [ ] Evaluate `screen-use` only as a reference or optional adapter; do not import its autonomous loop blindly.
-- [ ] Evaluate Mem0 concepts against a lean SQLite + FTS baseline before adding a memory framework.
-- [ ] Evaluate a local STT model and VAD under actual microphone conditions.
+- [x] Evaluate Mem0 concepts against a lean SQLite + FTS baseline before adding a memory framework (local retrieval is 0.1 ms median; no framework needed yet).
+- [x] Evaluate a local STT model and VAD: faster-whisper `base` in int8 transcribes 2.2 s of speech in 4–6 ms warm; an energy endpointer suffices indoors, and `initial_prompt` plus wake-word aliases are required for an invented name.
+- [ ] Evaluate the energy endpointer in a noisy room; replace with WebRTC VAD if false triggers appear.

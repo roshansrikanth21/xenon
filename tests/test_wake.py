@@ -60,5 +60,32 @@ class WakeGateTests(unittest.TestCase):
         self.assertIsNone(self.feed("   "))
 
 
+class WakeAliasTests(unittest.TestCase):
+    """Whisper does not always spell an invented name the way its owner does."""
+
+    def test_aliases_are_accepted(self) -> None:
+        gate = WakeGate("xenon", aliases=("zenon", "see none"))
+
+        self.assertEqual(gate.feed("Zenon, open notepad"), "open notepad")
+        self.assertEqual(gate.feed("See none open notepad"), "open notepad")
+
+    def test_the_primary_wake_word_still_works(self) -> None:
+        gate = WakeGate("xenon", aliases=("zenon",))
+
+        self.assertEqual(gate.feed("xenon open notepad"), "open notepad")
+
+    def test_blank_aliases_are_ignored(self) -> None:
+        gate = WakeGate("xenon", aliases=("", "   "))
+
+        self.assertIsNone(gate.feed("open notepad"))
+        self.assertEqual(gate.feed("xenon open notepad"), "open notepad")
+
+    def test_an_alias_only_arms_like_the_wake_word(self) -> None:
+        gate = WakeGate("xenon", aliases=("zenon",))
+
+        self.assertIsNone(gate.feed("zenon"))
+        self.assertEqual(gate.feed("summarize this"), "summarize this")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Callable
+from typing import Callable, Sequence
 
 DEFAULT_TTL_S = 8.0
 
@@ -30,9 +30,14 @@ class WakeGate:
         wake_word: str = "xenon",
         ttl_s: float = DEFAULT_TTL_S,
         clock: Callable[[], float] | None = None,
+        aliases: Sequence[str] = (),
     ) -> None:
         self._wake_word = wake_word.strip()
-        self._pattern = _wake_pattern(self._wake_word)
+        self._patterns = [
+            _wake_pattern(word)
+            for word in (self._wake_word, *aliases)
+            if word and word.strip()
+        ]
         self._ttl_s = ttl_s
         self._clock = clock if clock is not None else time.monotonic
         self._armed_at: float | None = None
@@ -60,7 +65,11 @@ class WakeGate:
         if not text:
             return None
 
-        match = self._pattern.match(text)
+        match = None
+        for pattern in self._patterns:
+            match = pattern.match(text)
+            if match is not None:
+                break
         if match is not None:
             command = match.group("rest").strip(" \t,.;:-")
             if command:
