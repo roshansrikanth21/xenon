@@ -72,6 +72,21 @@ class ScreenObserver:
         self._vision = vision
         self._capture = capture
 
+    def prewarm(self) -> None:
+        """Best-effort warm-up of the adapter, so the first request is not slow.
+
+        Cold pywinauto/COM initialization costs a few hundred milliseconds. A
+        long-running service calls this at startup; a wrong or missing prewarm
+        must never prevent observation.
+        """
+        warm = getattr(self._automation, "prewarm", None)
+        if warm is None:
+            return
+        try:
+            warm()
+        except Exception:
+            pass
+
     def observe(self) -> ScreenContext:
         snapshot = self._automation.foreground_window()
         content = self._readable_text(snapshot.controls)

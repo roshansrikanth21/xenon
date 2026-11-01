@@ -33,7 +33,9 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Test: speaking/audio playback cannot retrigger wake detection.
 - [x] Implement the wake gate and voice loop orchestration with injectable audio adapters.
 - [x] Implement the typed command box (`python -m xenon ui`).
-- [ ] Benchmark wake-to-command and command-to-first-response latency.
+- [x] Test: every CLI command is registered and its handlers are reachable.
+- [x] Benchmark wake-to-command and command-to-first-response latency (gate + dispatch 0.001 ms; audio path still unmeasured).
+- [x] Add startup prewarm so the first request skips COM initialization (460 ms -> 81 ms).
 - [ ] Wire real VAD + STT + TTS adapters behind the voice loop.
 - [ ] Add a tray icon and a global hotkey for the command box.
 
@@ -55,6 +57,7 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Scenario: user types “what is on this screen?” and Xenon answers from the foreground app (verified against a local stub model).
 - [x] Scenario: Xenon plans one step, runs it after approval, and reports `unverified` when no verifier is configured (verified live).
 - [x] Scenario: user asks a question whose answer is in a Claude export and Obsidian, and both are cited.
+- [x] Test: `ask` and `do --dry-run` run end-to-end against a local stub model.
 - [ ] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification.
 - [ ] Scenario: unplug network; local wake, screen context, and local memory still work.
 

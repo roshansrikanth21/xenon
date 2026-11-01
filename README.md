@@ -41,6 +41,8 @@ Implemented and covered by tests:
   `succeeded`, `denied`, `failed`, or `unverified` truthfully.
 - Windows actuator for open/focus/type/keys/click/write, plus a foreground-title
   verifier. Real actions require an explicit plan confirmation.
+- Startup prewarm for the screen adapter, so COM initialization costs 260 ms once
+  at launch instead of 460 ms on the first user request.
 - Wake gate: a bare wake word only arms the next utterance briefly, commands
   without the wake word are ignored, and detection is muted while Xenon speaks.
 - Voice loop orchestration with injectable transcribe/speak adapters, so a real
@@ -55,6 +57,8 @@ Implemented and covered by tests:
 - `python -m xenon memory ingest|import|search` and `python -m xenon notion ingest`.
 - `python -m xenon skills list|find`.
 - Latency benchmarks with budget gates for screen context and memory retrieval.
+- End-to-end CLI tests that drive the real HTTP request path against a local
+  OpenAI-compatible stub, so command wiring cannot silently break.
 
 Not built yet: the real microphone/VAD/STT/TTS adapters, a tray icon and global
 hotkey, and a wake-to-command latency benchmark.
@@ -90,6 +94,10 @@ python -m xenon do "open notepad and type my standup notes" --dry-run
 python -m xenon do "open notepad and type my standup notes" --expect-title Notepad
 ```
 
+`do` exits non-zero unless verification passes. Without `--expect-title` there is
+nothing to check afterwards, so it reports `status: unverified` and exits 1 even
+when every step ran. Pass `--expect-title` when you want a success exit code.
+
 Open the command box:
 
 ```powershell
@@ -104,6 +112,8 @@ Measure screen-context latency:
 
 ```powershell
 python -m benchmarks.screen_latency --samples 15
+python -m benchmarks.screen_latency --samples 15 --prewarm   # as a service would run
+python -m benchmarks.voice_latency --samples 500             # gate + dispatch only
 ```
 
 Mirror an Obsidian vault and query it:
@@ -139,14 +149,21 @@ files leave the index.
 
 ## Measured latency
 
-Local run on 30 Oct 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9, Opera in the foreground:
+Local run on 30 Oct–1 Nov 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9:
 
 | Path | Cold | Median | p95 | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| UIA-only observe (depth 4) | 322 ms | **29 ms** | 34 ms | 250 ms |
+| UIA-only observe (depth 4), no prewarm | 460 ms | **78 ms** | 90 ms | 250 ms |
+| UIA-only observe (depth 4), after `prewarm()` | 81 ms | **78 ms** | 90 ms | 250 ms |
 | Memory retrieval, 500 docs | ingest 264 ms | **0.1 ms** | 0.9 ms | 100 ms |
+| Wake gate + dispatch (no audio) | — | **0.001 ms** | 0.001 ms | 5 ms |
 
-Cold start is dominated by pywinauto/COM initialization. A long-running service must prewarm the adapter at startup so the first user request does not pay it.
+Cold start is dominated by pywinauto/COM initialization. `ScreenObserver.prewarm()`
+pays it once at startup (about 260 ms), which turns a 460 ms first request into
+81 ms. The CLI calls it before the first observation.
+
+The voice number excludes microphone capture, VAD, STT, and TTS, because those
+adapters do not exist yet; it isolates the orchestration overhead Xenon owns.
 
 ## Planned stack
 

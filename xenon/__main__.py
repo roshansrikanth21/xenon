@@ -36,12 +36,15 @@ class UnconfiguredVision:
 
 
 def _observer():
+    """Build the observer and pay the COM warm-up now, not on the first request."""
     from xenon.windows import WindowsUiAutomation
 
     automation = WindowsUiAutomation()
     config = config_from_env()
     vision = OpenAICompatibleVision(config) if config is not None else UnconfiguredVision()
-    return ScreenObserver(automation, vision, capture=automation)
+    observer = ScreenObserver(automation, vision, capture=automation)
+    observer.prewarm()
+    return observer
 
 
 def _screen(args: argparse.Namespace) -> int:

@@ -38,6 +38,11 @@ def main() -> int:
     parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--json", action="store_true", help="emit JSON only")
+    parser.add_argument(
+        "--prewarm",
+        action="store_true",
+        help="warm the adapter first, as a long-running service would at startup",
+    )
     args = parser.parse_args()
 
     if sys.platform != "win32":
@@ -49,6 +54,12 @@ def main() -> int:
         max_controls=args.limit,
     )
     observer = ScreenObserver(automation, NoVision())
+
+    prewarm_ms: float | None = None
+    if args.prewarm:
+        started = time.perf_counter()
+        observer.prewarm()
+        prewarm_ms = (time.perf_counter() - started) * 1000
 
     started = time.perf_counter()
     first = observer.observe()
@@ -72,6 +83,8 @@ def main() -> int:
         "budget_ms": args.budget_ms,
         "passed": median_ms <= args.budget_ms,
     }
+    if prewarm_ms is not None:
+        result["prewarm_ms"] = round(prewarm_ms, 1)
 
     if args.json:
         import json
@@ -80,6 +93,8 @@ def main() -> int:
     else:
         print(f"window: {result['app']} | {result['title']}")
         print(f"context: {result['context_chars']} chars, vision={result['used_vision']}")
+        if prewarm_ms is not None:
+            print(f"prewarm: {result['prewarm_ms']}ms")
         print(
             f"latency: cold={result['cold_ms']}ms median={result['median_ms']}ms "
             f"p95={result['p95_ms']}ms budget={args.budget_ms}ms"

@@ -261,6 +261,23 @@ class WindowsUiAutomation:
         self._controls = controls if controls is not None else default_control_reader()
         self._max_controls = max_controls
 
+    def prewarm(self) -> None:
+        """Pay the COM/pywinauto import cost before the first user request.
+
+        Building one desktop object and reading the foreground handle is enough
+        to initialize the UI Automation client. Failures are non-fatal.
+        """
+        try:
+            from pywinauto import Desktop
+
+            Desktop(backend="uia")
+        except Exception:
+            pass
+        try:
+            self._backend.foreground_handle()
+        except Exception:
+            pass
+
     def foreground_window(self) -> WindowSnapshot:
         handle = self._backend.foreground_handle()
         title = self._read_title(handle)

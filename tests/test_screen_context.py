@@ -206,5 +206,48 @@ class ScreenObserverTests(unittest.TestCase):
         self.assertEqual(vision.calls, 1)
 
 
+class PrewarmTests(unittest.TestCase):
+    def test_prewarm_delegates_to_the_adapter(self) -> None:
+        automation = PrewarmableAutomation()
+
+        ScreenObserver(automation, FakeVision()).prewarm()
+
+        self.assertEqual(automation.prewarms, 1)
+
+    def test_prewarm_is_optional_for_adapters_without_it(self) -> None:
+        automation = FakeUiAutomation(WindowSnapshot(app_name="App", title="t", controls=()))
+
+        ScreenObserver(automation, FakeVision()).prewarm()  # must not raise
+
+    def test_a_failing_prewarm_does_not_break_observe(self) -> None:
+        automation = PrewarmableAutomation(fail=True)
+        observer = ScreenObserver(automation, FakeVision())
+
+        observer.prewarm()
+        context = observer.observe()
+
+        self.assertEqual(context.title, "Editor")
+
+
+class PrewarmableAutomation(FakeUiAutomation):
+    def __init__(self, fail: bool = False) -> None:
+        super().__init__(
+            WindowSnapshot(
+                app_name="App",
+                title="Editor",
+                controls=(
+                    UiControl(role="text", name="x" * 200),
+                ),
+            )
+        )
+        self.prewarms = 0
+        self.fail = fail
+
+    def prewarm(self) -> None:
+        self.prewarms += 1
+        if self.fail:
+            raise RuntimeError("COM unavailable")
+
+
 if __name__ == "__main__":
     unittest.main()
