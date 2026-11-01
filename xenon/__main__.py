@@ -8,6 +8,7 @@ import sys
 from xenon.assistant import Assistant
 from xenon.chat import ChatUnavailable, OpenAICompatibleChat
 from xenon.chat import config_from_env as chat_config_from_env
+from xenon.exports import ExportFormatError, ingest_export
 from xenon.memory import MemoryStore
 from xenon.notion import (
     NotionClient,
@@ -126,6 +127,28 @@ def _memory(args: argparse.Namespace) -> int:
             )
             return 0
 
+        if args.memory_command == "import":
+            path = args.path or os.environ.get(
+                f"XENON_{args.kind.upper()}_EXPORT_DIR", ""
+            )
+            if not path:
+                print(
+                    f"pass --path or set XENON_{args.kind.upper()}_EXPORT_DIR",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                result = ingest_export(store, args.kind, path)
+            except (ExportFormatError, FileNotFoundError) as error:
+                print(f"import error: {error}", file=sys.stderr)
+                return 1
+            print(
+                f"source {result.source_id}: added={result.added} "
+                f"updated={result.updated} unchanged={result.unchanged} "
+                f"removed={result.removed}"
+            )
+            return 0
+
         hits = store.search(args.query, limit=args.limit)
         if not hits:
             print("no matches")
@@ -162,6 +185,13 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=5)
     search.set_defaults(handler=_memory)
+
+    import_command = memory_commands.add_parser(
+        "import", help="import a Claude or Codex export"
+    )
+    import_command.add_argument("--kind", required=True, help="claude or codex")
+    import_command.add_argument("--path", default="", help="export file or folder")
+    import_command.set_defaults(handler=_memory)
 
     notion = subparsers.add_parser("notion", help="sync a Notion page tree")
     notion_commands = notion.add_subparsers(dest="notion_command", required=True)
