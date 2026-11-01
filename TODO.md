@@ -28,11 +28,14 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Test: observe → plan → act → verify returns a truthful final state.
 - [x] Test: the planner may only propose permitted action kinds.
 - [x] Implement the approval runner, model planner, Windows actuator, and `do` command.
-- [ ] Test: wake word does not dispatch an action without a following command.
-- [ ] Test: wake word plus command dispatches exactly one task.
-- [ ] Test: speaking/audio playback cannot retrigger wake detection.
+- [x] Test: wake word does not dispatch an action without a following command.
+- [x] Test: wake word plus command dispatches exactly one task.
+- [x] Test: speaking/audio playback cannot retrigger wake detection.
+- [x] Implement the wake gate and voice loop orchestration with injectable audio adapters.
+- [x] Implement the typed command box (`python -m xenon ui`).
 - [ ] Benchmark wake-to-command and command-to-first-response latency.
-- [ ] Implement the voice and task orchestrator after these tests exist.
+- [ ] Wire real VAD + STT + TTS adapters behind the voice loop.
+- [ ] Add a tray icon and a global hotkey for the command box.
 
 ## Phase 3 — Memory (test first)
 
@@ -49,9 +52,10 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 
 ## Phase 4 — End-to-end validation
 
-- [ ] Scenario: user says “what is on this screen?” and Xenon answers from the foreground app.
+- [x] Scenario: user types “what is on this screen?” and Xenon answers from the foreground app (verified against a local stub model).
+- [x] Scenario: Xenon plans one step, runs it after approval, and reports `unverified` when no verifier is configured (verified live).
+- [x] Scenario: user asks a question whose answer is in a Claude export and Obsidian, and both are cited.
 - [ ] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification.
-- [ ] Scenario: user asks a question whose answer is in Obsidian/Notion and Xenon cites the source.
 - [ ] Scenario: unplug network; local wake, screen context, and local memory still work.
 
 ## Research decisions to validate

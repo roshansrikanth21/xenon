@@ -41,16 +41,23 @@ Implemented and covered by tests:
   `succeeded`, `denied`, `failed`, or `unverified` truthfully.
 - Windows actuator for open/focus/type/keys/click/write, plus a foreground-title
   verifier. Real actions require an explicit plan confirmation.
+- Wake gate: a bare wake word only arms the next utterance briefly, commands
+  without the wake word are ignored, and detection is muted while Xenon speaks.
+- Voice loop orchestration with injectable transcribe/speak adapters, so a real
+  STT and TTS engine can be dropped in without touching the gating logic.
+- Minimal always-on-top Tk command box with a testable presenter.
 - Typed assist loop: question + live screen + retrieved memory -> model answer
   with cited source paths.
 - `python -m xenon screen` prints what Xenon currently sees.
 - `python -m xenon ask "..." [--skill name]` answers from screen and memory.
 - `python -m xenon do "..." [--dry-run]` plans and runs an approved task.
+- `python -m xenon ui` opens the command box.
 - `python -m xenon memory ingest|import|search` and `python -m xenon notion ingest`.
 - `python -m xenon skills list|find`.
 - Latency benchmarks with budget gates for screen context and memory retrieval.
 
-Not built yet: wake word and voice loop, and the tray UI.
+Not built yet: the real microphone/VAD/STT/TTS adapters, a tray icon and global
+hotkey, and a wake-to-command latency benchmark.
 
 ## Quick start
 
@@ -82,6 +89,16 @@ Plan a desktop task before letting it act:
 python -m xenon do "open notepad and type my standup notes" --dry-run
 python -m xenon do "open notepad and type my standup notes" --expect-title Notepad
 ```
+
+Open the command box:
+
+```powershell
+python -m xenon ui
+python -m xenon ui --no-topmost   # let other windows cover it
+```
+
+The box keeps the same screen + memory context as `ask` and prints retrieval
+sources under each answer.
 
 Measure screen-context latency:
 
@@ -138,6 +155,6 @@ Cold start is dominated by pywinauto/COM initialization. A long-running service 
 - Local screen capture plus optional vision fallback
 - Wake word + VAD + local STT
 - SQLite + FTS for durable memory, with optional semantic retrieval
-- Small tray UI and typed command box
+- Tray icon, global hotkey, and the Tk command box
 
 See [TODO.md](TODO.md) for the acceptance tests and delivery order.

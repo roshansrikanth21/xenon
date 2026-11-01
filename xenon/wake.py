@@ -1,0 +1,78 @@
+"""Wake-word gating for the voice loop.
+
+This is the deterministic part of the voice path, kept separate from audio so
+it can be tested: a transcript becomes a command only when the wake word is
+present, a bare wake word arms the next utterance briefly, and anything heard
+while the assistant is speaking is discarded.
+"""
+from __future__ import annotations
+
+import re
+import time
+from typing import Callable
+
+DEFAULT_TTL_S = 8.0
+
+
+def _wake_pattern(wake_word: str) -> re.Pattern[str]:
+    words = r"\s+".join(re.escape(part) for part in wake_word.split())
+    return re.compile(
+        rf"^[^\w]*{words}\b[\s,.;:!?-]*(?P<rest>.*)$",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
+class WakeGate:
+    """Turns transcripts into commands, or nothing at all."""
+
+    def __init__(
+        self,
+        wake_word: str = "xenon",
+        ttl_s: float = DEFAULT_TTL_S,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._wake_word = wake_word.strip()
+        self._pattern = _wake_pattern(self._wake_word)
+        self._ttl_s = ttl_s
+        self._clock = clock if clock is not None else time.monotonic
+        self._armed_at: float | None = None
+        self._speaking = False
+
+    @property
+    def armed(self) -> bool:
+        return self._armed_at is not None
+
+    @property
+    def speaking(self) -> bool:
+        return self._speaking
+
+    def set_speaking(self, speaking: bool) -> None:
+        """Mute detection while the assistant's own audio is playing."""
+        self._speaking = speaking
+        if speaking:
+            self._armed_at = None
+
+    def feed(self, transcript: str) -> str | None:
+        if self._speaking:
+            return None
+
+        text = transcript.strip()
+        if not text:
+            return None
+
+        match = self._pattern.match(text)
+        if match is not None:
+            command = match.group("rest").strip(" \t,.;:-")
+            if command:
+                self._armed_at = None
+                return command
+            self._armed_at = self._clock()
+            return None
+
+        if self._armed_at is None:
+            return None
+        if self._clock() - self._armed_at > self._ttl_s:
+            self._armed_at = None
+            return None
+        self._armed_at = None
+        return text

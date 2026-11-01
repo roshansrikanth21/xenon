@@ -100,6 +100,41 @@ def _ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ui(args: argparse.Namespace) -> int:
+    if sys.platform != "win32":
+        print("xenon ui requires Windows", file=sys.stderr)
+        return 2
+
+    config = chat_config_from_env()
+    if config is None:
+        print(
+            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to use the command box",
+            file=sys.stderr,
+        )
+        return 2
+
+    from xenon.ui import CommandBox
+
+    store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
+    assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
+
+    def ask(question: str) -> str:
+        answer = assistant.ask(question)
+        text = answer.text
+        if answer.memories:
+            text += "\n\nsources:\n" + "\n".join(
+                f"- {memory.title} ({memory.source_kind}: {memory.path})"
+                for memory in answer.memories
+            )
+        return text
+
+    try:
+        CommandBox(ask, topmost=not args.no_topmost).run()
+    finally:
+        store.close()
+    return 0
+
+
 def _do(args: argparse.Namespace) -> int:
     if sys.platform != "win32":
         print("xenon do requires Windows", file=sys.stderr)
@@ -284,6 +319,12 @@ def main(argv: list[str] | None = None) -> int:
     do.add_argument("--yes", action="store_true", help="skip the plan confirmation")
     do.add_argument("--expect-title", default="", help="verify the foreground title contains this")
     do.set_defaults(handler=_do)
+
+    ui = subparsers.add_parser("ui", help="open the always-on-top command box")
+    ui.add_argument(
+        "--no-topmost", action="store_true", help="let other windows cover the box"
+    )
+    ui.set_defaults(handler=_ui)
 
     skills = subparsers.add_parser("skills", help="list or match Agent Skills")
     skill_commands = skills.add_subparsers(dest="skills_command", required=True)
