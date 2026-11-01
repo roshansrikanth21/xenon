@@ -33,15 +33,19 @@ Implemented and covered by tests:
 - Opt-in OpenAI-compatible vision client, injectable transport for offline tests.
 - Local SQLite + FTS5 memory: Obsidian Markdown ingestion, tags, source attribution,
   idempotent re-sync, per-file and per-source deletion, ranked retrieval.
+- Connectors: read-only Notion page trees, Claude `conversations.json`, Codex JSONL.
+- Agent Skills: metadata discovery at startup, instructions loaded only on use,
+  keyword matching, and three bundled skills under `skills/`.
 - Typed assist loop: question + live screen + retrieved memory -> model answer
   with cited source paths.
 - `python -m xenon screen` prints what Xenon currently sees.
-- `python -m xenon ask "..."` answers from screen and memory.
-- `python -m xenon memory ingest|search` mirrors a vault and queries it.
+- `python -m xenon ask "..." [--skill name]` answers from screen and memory.
+- `python -m xenon memory ingest|import|search` and `python -m xenon notion ingest`.
+- `python -m xenon skills list|find`.
 - Latency benchmarks with budget gates for screen context and memory retrieval.
 
-Not built yet: wake word and task orchestration, Notion and Claude/Codex connectors,
-answer synthesis, and the tray UI.
+Not built yet: wake word and task orchestration, approval-gated desktop actions,
+and the tray UI.
 
 ## Quick start
 
@@ -79,6 +83,25 @@ Mirror an Obsidian vault and query it:
 $env:XENON_DB_PATH = "memory/xenon.db"
 python -m xenon memory ingest --kind obsidian --root "C:\Users\you\vault"
 python -m xenon memory search "project deadline"
+```
+
+Sync Notion and import chat exports:
+
+```powershell
+$env:XENON_NOTION_TOKEN = "secret_..."
+$env:XENON_NOTION_ROOT_PAGE = "page-id"
+python -m xenon notion ingest
+
+python -m xenon memory import --kind claude --path "$env:USERPROFILE\Downloads\claude-export"
+python -m xenon memory import --kind codex --path "$env:USERPROFILE\.codex\sessions"
+```
+
+Inspect Agent Skills:
+
+```powershell
+python -m xenon skills list
+python -m xenon skills find "mirror my obsidian notes"
+python -m xenon ask --skill memory-sync "sync my vault"
 ```
 
 Hidden folders such as `.obsidian` and `.trash` are skipped. Re-running ingest is

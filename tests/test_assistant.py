@@ -1,9 +1,11 @@
 import json
 import unittest
+from pathlib import Path
 
 from xenon.assistant import Assistant
 from xenon.memory import MemoryHit
 from xenon.screen import ScreenContext
+from xenon.skills import Skill
 
 
 class FakeObserver:
@@ -124,6 +126,21 @@ class AssistantTests(unittest.TestCase):
         self.assertIn("UI Automation", prompt)
         self.assertNotIn("screenshot/vision", prompt)
         self.assertFalse(answer.used_vision)
+
+    def test_includes_a_loaded_skill_in_the_system_prompt(self) -> None:
+        skill = Skill(
+            name="screen-context",
+            description="Read the active window.",
+            directory=Path("skills/screen-context"),
+            instructions="Always cite the window title.",
+        )
+        model = FakeModel()
+
+        Assistant(FakeObserver(CONTEXT), None, model).ask("what is this?", skill=skill)
+
+        prompt = json.dumps(model.messages[0])
+        self.assertIn("Always cite the window title.", prompt)
+        self.assertIn("Skill: screen-context", prompt)
 
     def test_surfaces_screen_errors_in_the_prompt(self) -> None:
         context = ScreenContext(

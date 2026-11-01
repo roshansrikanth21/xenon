@@ -36,13 +36,14 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 
 - [x] Test: ingest an Obsidian Markdown fixture with path, tags, timestamps, and source attribution.
 - [x] Implement the local SQLite + FTS store and the Obsidian connector.
-- [ ] Test: ingest a Notion export/API fixture without duplicating unchanged content.
-- [ ] Test: ingest user-provided Claude/Codex memory exports without reading hidden application stores.
+- [x] Test: ingest a Notion export/API fixture without duplicating unchanged content.
+- [x] Test: ingest user-provided Claude/Codex memory exports without reading hidden application stores.
 - [x] Test: retrieve relevant memories while excluding unrelated sources and deleted records.
 - [x] Test: delete a source and all derived memories deterministically.
 - [x] Benchmark local memory retrieval below 100 ms for the initial corpus target (0.1 ms median at 500 documents).
-- [ ] Implement the Notion connector.
-- [ ] Implement the Claude/Codex export connector.
+- [x] Implement the Notion connector (read-only page tree, cited by URL).
+- [x] Implement the Claude/Codex export connector (JSON, JSONL, Markdown).
+- [x] Add Agent Skills discovery with progressive disclosure and bundled skills.
 
 ## Phase 4 — End-to-end validation
 

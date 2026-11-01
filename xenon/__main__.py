@@ -18,6 +18,7 @@ from xenon.notion import (
     sync_to_memory,
 )
 from xenon.screen import ScreenObserver
+from xenon.skills import SkillError, SkillRegistry
 from xenon.vision import OpenAICompatibleVision, VisionUnavailable, config_from_env
 
 DEFAULT_DB_PATH = "memory/xenon.db"
@@ -71,10 +72,18 @@ def _ask(args: argparse.Namespace) -> int:
         )
         return 2
 
+    skill = None
+    if args.skill:
+        try:
+            skill = SkillRegistry(_skills_root()).load(args.skill)
+        except SkillError as error:
+            print(f"skill error: {error}", file=sys.stderr)
+            return 2
+
     with MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH)) as store:
         assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
         try:
-            answer = assistant.ask(question)
+            answer = assistant.ask(question, skill=skill)
         except (ChatUnavailable, ValueError) as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
@@ -113,6 +122,30 @@ def _notion(args: argparse.Namespace) -> int:
         f"updated={result.updated} unchanged={result.unchanged} "
         f"removed={result.removed}"
     )
+    return 0
+
+
+def _skills_root() -> str:
+    return os.environ.get("XENON_SKILLS_DIR", "skills")
+
+
+def _skills(args: argparse.Namespace) -> int:
+    try:
+        registry = SkillRegistry(_skills_root())
+    except SkillError as error:
+        print(f"skill error: {error}", file=sys.stderr)
+        return 1
+
+    if args.skills_command == "find":
+        items = registry.find(" ".join(args.query))
+    else:
+        items = registry.catalog()
+
+    if not items:
+        print("no matching skills")
+        return 0
+    for metadata in items:
+        print(f"{metadata.name}: {metadata.description}")
     return 0
 
 
@@ -171,7 +204,16 @@ def main(argv: list[str] | None = None) -> int:
 
     ask = subparsers.add_parser("ask", help="answer a question from screen and memory")
     ask.add_argument("question", nargs="+")
+    ask.add_argument("--skill", default="", help="load one Agent Skill by name")
     ask.set_defaults(handler=_ask)
+
+    skills = subparsers.add_parser("skills", help="list or match Agent Skills")
+    skill_commands = skills.add_subparsers(dest="skills_command", required=True)
+    skill_list = skill_commands.add_parser("list", help="list skill metadata")
+    skill_list.set_defaults(handler=_skills)
+    skill_find = skill_commands.add_parser("find", help="match skills to a request")
+    skill_find.add_argument("query", nargs="+")
+    skill_find.set_defaults(handler=_skills)
 
     memory = subparsers.add_parser("memory", help="ingest and search local memory")
     memory_commands = memory.add_subparsers(dest="memory_command", required=True)

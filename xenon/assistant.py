@@ -11,6 +11,7 @@ from typing import Protocol
 
 from xenon.memory import MemoryHit
 from xenon.screen import ScreenContext
+from xenon.skills import Skill
 
 SYSTEM_PROMPT = (
     "You are Xenon, a concise personal assistant working beside the user on "
@@ -59,7 +60,7 @@ class Assistant:
         self._max_memories = max_memories
         self._max_context_chars = max_context_chars
 
-    def ask(self, question: str) -> Answer:
+    def ask(self, question: str, skill: Skill | None = None) -> Answer:
         question = question.strip()
         if not question:
             raise ValueError("question must not be empty")
@@ -70,8 +71,14 @@ class Assistant:
         if self._memory is not None:
             memories = tuple(self._memory.search(question, self._max_memories))
 
+        system = SYSTEM_PROMPT
+        if skill is not None:
+            system = (
+                f"{SYSTEM_PROMPT}\n\n## Skill: {skill.name}\n\n{skill.instructions}"
+            )
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": self._user_message(question, context, memories)},
         ]
         text = self._model.complete(messages)
