@@ -139,7 +139,7 @@ class ParserTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("XENON_MODEL_API_KEY", None)
             os.environ.pop("XENON_MODEL_NAME", None)
-            with mock.patch.object(cli.sys, "platform", "win32"):
+            with mock.patch.object(cli, "is_windows", lambda: True):
                 code, _, err = run_cli(["ask", "anything"])
 
         self.assertEqual(code, 2)
@@ -181,7 +181,7 @@ class AssistAcceptanceTests(unittest.TestCase):
     def test_ask_answers_from_the_screen(self) -> None:
         with stub_model() as base_url, mock.patch.dict(
             os.environ, self.env(base_url), clear=False
-        ), mock.patch.object(cli.sys, "platform", "win32"), mock.patch.object(
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch.object(
             cli, "_observer", lambda: self.observer
         ):
             code, out, err = run_cli(["ask", "what is on my screen?"])
@@ -212,7 +212,7 @@ class AssistAcceptanceTests(unittest.TestCase):
 
         with stub_model() as base_url, mock.patch.dict(
             os.environ, self.env(base_url), clear=False
-        ), mock.patch.object(cli.sys, "platform", "win32"), mock.patch.object(
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch.object(
             cli, "_observer", lambda: self.observer
         ):
             code, out, err = run_cli(["ask", "when is the assignment due?"])
@@ -234,7 +234,7 @@ class AssistAcceptanceTests(unittest.TestCase):
         with stub_model() as base_url, mock.patch.dict(
             os.environ, dict(env, XENON_MODEL_BASE_URL=base_url), clear=False
         ), mock.patch.object(
-            cli.sys, "platform", "win32"
+            cli, "is_windows", lambda: True
         ), mock.patch.object(cli, "_observer", lambda: self.observer):
             code, out, err = run_cli(["ask", "--skill", "screen-context", "hi"])
 
@@ -245,7 +245,7 @@ class AssistAcceptanceTests(unittest.TestCase):
         env = self.env("http://127.0.0.1:1/v1")
         env["XENON_SKILLS_DIR"] = str(Path(self.tmp.name) / "nope")
         with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
-            cli.sys, "platform", "win32"
+            cli, "is_windows", lambda: True
         ):
             code, _, err = run_cli(["ask", "--skill", "missing", "hi"])
 
@@ -255,7 +255,7 @@ class AssistAcceptanceTests(unittest.TestCase):
     def test_do_dry_run_prints_the_plan_and_does_nothing(self) -> None:
         with stub_model() as base_url, mock.patch.dict(
             os.environ, self.env(base_url), clear=False
-        ), mock.patch.object(cli.sys, "platform", "win32"), mock.patch.object(
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch.object(
             cli, "_observer", lambda: self.observer
         ):
             code, out, err = run_cli(["do", "check the window", "--dry-run"])
@@ -269,7 +269,7 @@ class AssistAcceptanceTests(unittest.TestCase):
         backend = FakeActionBackend()
         with stub_model() as base_url, mock.patch.dict(
             os.environ, self.env(base_url), clear=False
-        ), mock.patch.object(cli.sys, "platform", "win32"), mock.patch.object(
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch.object(
             cli, "_observer", lambda: self.observer
         ), mock.patch(
             "xenon.windows_actions.WindowsActionBackend", lambda: backend
@@ -287,7 +287,7 @@ class AssistAcceptanceTests(unittest.TestCase):
         backend = FakeActionBackend()
         with stub_model() as base_url, mock.patch.dict(
             os.environ, self.env(base_url), clear=False
-        ), mock.patch.object(cli.sys, "platform", "win32"), mock.patch.object(
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch.object(
             cli, "_observer", lambda: self.observer
         ), mock.patch(
             "xenon.windows_actions.WindowsActionBackend", lambda: backend
@@ -301,7 +301,7 @@ class AssistAcceptanceTests(unittest.TestCase):
     def test_model_failure_surfaces_as_a_clear_error(self) -> None:
         with mock.patch.dict(
             os.environ, self.env("http://127.0.0.1:1/v1"), clear=False
-        ), mock.patch.object(cli.sys, "platform", "win32"), mock.patch.object(
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch.object(
             cli, "_observer", lambda: self.observer
         ):
             code, _, err = run_cli(["ask", "hello"])

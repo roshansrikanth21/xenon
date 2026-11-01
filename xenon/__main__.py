@@ -26,6 +26,15 @@ from xenon.vision import OpenAICompatibleVision, VisionUnavailable, config_from_
 DEFAULT_DB_PATH = "memory/xenon.db"
 
 
+def is_windows() -> bool:
+    """Platform guard, separate from ``sys`` so tests can patch just this.
+
+    Patching ``sys.platform`` globally would make stdlib modules such as ``ssl``
+    take a Windows code path on Linux, which is a real bug, not a test detail.
+    """
+    return sys.platform == "win32"
+
+
 class UnconfiguredVision:
     """Vision provider that explains how to enable the fallback."""
 
@@ -48,7 +57,7 @@ def _observer():
 
 
 def _screen(args: argparse.Namespace) -> int:
-    if sys.platform != "win32":
+    if not is_windows():
         print("xenon screen requires Windows", file=sys.stderr)
         return 2
     context = _observer().observe()
@@ -64,7 +73,7 @@ def _screen(args: argparse.Namespace) -> int:
 
 
 def _ask(args: argparse.Namespace) -> int:
-    if sys.platform != "win32":
+    if not is_windows():
         print("xenon ask requires Windows for screen context", file=sys.stderr)
         return 2
 
@@ -104,7 +113,7 @@ def _ask(args: argparse.Namespace) -> int:
 
 
 def _ui(args: argparse.Namespace) -> int:
-    if sys.platform != "win32":
+    if not is_windows():
         print("xenon ui requires Windows", file=sys.stderr)
         return 2
 
@@ -139,7 +148,7 @@ def _ui(args: argparse.Namespace) -> int:
 
 
 def _do(args: argparse.Namespace) -> int:
-    if sys.platform != "win32":
+    if not is_windows():
         print("xenon do requires Windows", file=sys.stderr)
         return 2
 
