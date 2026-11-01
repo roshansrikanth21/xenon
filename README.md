@@ -69,6 +69,39 @@ Implemented and covered by tests:
 Not built yet: a tray icon and global hotkey, and an always-listening service
 that keeps the microphone and screen adapter warm between commands.
 
+## Daily use
+
+Pick the entry point that matches how you want to interact:
+
+| I want to | Run | First response |
+| --- | --- | --- |
+| Ask about what is on screen | `python -m xenon ask "..."` | ~0.8 s, mostly interpreter startup |
+| Ask repeatedly without waiting | `python -m xenon ui` | ~0.2 s per question |
+| Talk to it | `python -m xenon voice` | wake word, then ~0.2 s |
+| Change the desktop | `python -m xenon do "..." --dry-run` first | plan printed, nothing run |
+
+`ui` and `voice` are long-lived processes, which is how the latency numbers stay
+low: the model, microphone, and screen adapter load once instead of per command.
+
+## What runs offline
+
+Screen context, memory ingest/search, wake detection, speech-to-text, and speech
+output never touch the network. Only `ask`, `do`, and the vision fallback call a
+model, and that endpoint can be local: point `XENON_MODEL_BASE_URL` at Ollama or
+any OpenAI-compatible server on `localhost`.
+
+## Known limitations
+
+- UI Automation is empty in some apps (slide decks, Electron, canvas views), which
+  forces the slower vision path. That is the main remaining latency cost.
+- The energy-based endpointer is tuned for a quiet room; a noisy room will need
+  a real VAD such as WebRTC.
+- `focus_window` matches on window titles, so two windows of the same app with the
+  same title are ambiguous. Xenon refuses to type if focus moved after the focus
+  step, but it cannot tell two identically titled windows apart.
+- There is no tray icon or global hotkey yet; start `ui` or `voice` from a terminal.
+- This has only run on one Windows 11 machine, with an English wake word.
+
 ## Quick start
 
 ```powershell
