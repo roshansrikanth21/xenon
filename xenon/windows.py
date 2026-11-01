@@ -262,10 +262,12 @@ class WindowsUiAutomation:
         self._max_controls = max_controls
 
     def prewarm(self) -> None:
-        """Pay the COM/pywinauto import cost before the first user request.
+        """Pay the COM/pywinauto cost before the first user request.
 
-        Building one desktop object and reading the foreground handle is enough
-        to initialize the UI Automation client. Failures are non-fatal.
+        Constructing a ``Desktop`` object is not enough: the expensive part is
+        wrapping a real window and walking its tree. So prewarm performs one
+        complete foreground read and throws the result away. Failures are
+        non-fatal by design.
         """
         try:
             from pywinauto import Desktop
@@ -274,7 +276,7 @@ class WindowsUiAutomation:
         except Exception:
             pass
         try:
-            self._backend.foreground_handle()
+            self.foreground_window()
         except Exception:
             pass
 

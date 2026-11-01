@@ -35,7 +35,7 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Implement the typed command box (`python -m xenon ui`).
 - [x] Test: every CLI command is registered and its handlers are reachable.
 - [x] Benchmark wake-to-command and command-to-first-response latency (gate + dispatch 0.001 ms; audio path still unmeasured).
-- [x] Add startup prewarm so the first request skips COM initialization (460 ms -> 81 ms).
+- [x] Add startup prewarm so the first request skips COM initialization (289 ms -> 32 ms).
 - [ ] Wire real VAD + STT + TTS adapters behind the voice loop.
 - [ ] Add a tray icon and a global hotkey for the command box.
 

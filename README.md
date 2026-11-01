@@ -41,8 +41,8 @@ Implemented and covered by tests:
   `succeeded`, `denied`, `failed`, or `unverified` truthfully.
 - Windows actuator for open/focus/type/keys/click/write, plus a foreground-title
   verifier. Real actions require an explicit plan confirmation.
-- Startup prewarm for the screen adapter, so COM initialization costs 260 ms once
-  at launch instead of 460 ms on the first user request.
+- Startup prewarm for the screen adapter: one throwaway foreground read drops the
+  first real observation from 289 ms to 32 ms.
 - Wake gate: a bare wake word only arms the next utterance briefly, commands
   without the wake word are ignored, and detection is muted while Xenon speaks.
 - Voice loop orchestration with injectable transcribe/speak adapters, so a real
@@ -153,14 +153,20 @@ Local run on 30 Oct–1 Nov 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9:
 
 | Path | Cold | Median | p95 | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| UIA-only observe (depth 4), no prewarm | 460 ms | **78 ms** | 90 ms | 250 ms |
-| UIA-only observe (depth 4), after `prewarm()` | 81 ms | **78 ms** | 90 ms | 250 ms |
+| UIA-only observe (depth 4), no prewarm | 289 ms | **24 ms** | 28 ms | 250 ms |
+| UIA-only observe (depth 4), after `prewarm()` | 32 ms | **24 ms** | 28 ms | 250 ms |
+| Full `ask` without vision, end to end | — | **210 ms** | — | — |
 | Memory retrieval, 500 docs | ingest 264 ms | **0.1 ms** | 0.9 ms | 100 ms |
 | Wake gate + dispatch (no audio) | — | **0.001 ms** | 0.001 ms | 5 ms |
 
 Cold start is dominated by pywinauto/COM initialization. `ScreenObserver.prewarm()`
-pays it once at startup (about 260 ms), which turns a 460 ms first request into
-81 ms. The CLI calls it before the first observation.
+pays it once at startup (about 335 ms) and reads one real window so the UIA tree
+walk is warm too; the first user request drops from 289 ms to 32 ms. The CLI calls
+it before its first observation.
+
+The 210 ms `ask` figure excludes the model round trip (it was measured against a
+local stub that answers in about 3 ms) and excludes Python interpreter startup,
+which adds roughly 0.5 s to a cold `python -m xenon` invocation.
 
 The voice number excludes microphone capture, VAD, STT, and TTS, because those
 adapters do not exist yet; it isolates the orchestration overhead Xenon owns.

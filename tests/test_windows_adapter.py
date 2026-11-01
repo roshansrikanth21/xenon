@@ -140,6 +140,35 @@ class WindowsAdapterTests(unittest.TestCase):
                 self.assertEqual(image.size, (640, 480))
 
 
+class PrewarmTests(unittest.TestCase):
+    """Prewarm must exercise the real read path, not just object construction."""
+
+    def test_prewarm_reads_the_foreground_window(self) -> None:
+        reader = FakeControlReader()
+        automation = WindowsUiAutomation(FakeBackend(handle=77), reader)
+
+        automation.prewarm()
+
+        self.assertEqual(len(reader.calls), 1)
+        self.assertEqual(reader.calls[0][0], 77)
+
+    def test_prewarm_never_raises(self) -> None:
+        class BrokenBackend(FakeBackend):
+            def foreground_handle(self) -> int:
+                raise OSError("desktop session locked")
+
+        WindowsUiAutomation(BrokenBackend(), FakeControlReader(error=RuntimeError("uia down"))).prewarm()
+
+    def test_observe_still_works_after_a_failed_prewarm(self) -> None:
+        automation = WindowsUiAutomation(
+            FakeBackend(), FakeControlReader(error=RuntimeError("uia down"))
+        )
+
+        automation.prewarm()
+
+        self.assertEqual(automation.foreground_window().title, "notes.md - Notepad")
+
+
 class FakeInfo:
     def __init__(self, role: str, name: str, is_password: bool = False) -> None:
         self.control_type = role
