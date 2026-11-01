@@ -9,6 +9,13 @@ from xenon.assistant import Assistant
 from xenon.chat import ChatUnavailable, OpenAICompatibleChat
 from xenon.chat import config_from_env as chat_config_from_env
 from xenon.memory import MemoryStore
+from xenon.notion import (
+    NotionClient,
+    NotionConfig,
+    NotionUnavailable,
+    config_from_env as notion_config_from_env,
+    sync_to_memory,
+)
 from xenon.screen import ScreenObserver
 from xenon.vision import OpenAICompatibleVision, VisionUnavailable, config_from_env
 
@@ -81,6 +88,33 @@ def _ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _notion(args: argparse.Namespace) -> int:
+    env_config = notion_config_from_env()
+    token = os.environ.get("XENON_NOTION_TOKEN", "")
+    page = args.page or (env_config.root_page_id if env_config is not None else "")
+    if not token or not page:
+        print(
+            "set XENON_NOTION_TOKEN and pass --page (or set XENON_NOTION_ROOT_PAGE)",
+            file=sys.stderr,
+        )
+        return 2
+
+    config = NotionConfig(token=token, root_page_id=page)
+    with MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH)) as store:
+        try:
+            result = sync_to_memory(NotionClient(config), store, page)
+        except NotionUnavailable as error:
+            print(f"notion error: {error}", file=sys.stderr)
+            return 1
+
+    print(
+        f"source {result.source_id}: added={result.added} "
+        f"updated={result.updated} unchanged={result.unchanged} "
+        f"removed={result.removed}"
+    )
+    return 0
+
+
 def _memory(args: argparse.Namespace) -> int:
     with MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH)) as store:
         if args.memory_command == "ingest":
@@ -128,6 +162,12 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=5)
     search.set_defaults(handler=_memory)
+
+    notion = subparsers.add_parser("notion", help="sync a Notion page tree")
+    notion_commands = notion.add_subparsers(dest="notion_command", required=True)
+    notion_ingest = notion_commands.add_parser("ingest", help="read-only page sync")
+    notion_ingest.add_argument("--page", default="", help="root page id or URL id")
+    notion_ingest.set_defaults(handler=_notion)
 
     args = parser.parse_args(argv)
     return args.handler(args)
