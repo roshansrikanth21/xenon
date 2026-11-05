@@ -83,7 +83,11 @@ class OpenAICompatibleChat:
                 self._config.timeout_s,
             )
         except Exception as error:
-            raise ChatUnavailable(str(error)) from error
+            raise ChatUnavailable(
+                f"could not reach the model at {url}: {error}. Start the "
+                "server (for example `ollama serve`) or run "
+                "`python -m xenon doctor` to check the configuration."
+            ) from error
 
         try:
             content = response["choices"][0]["message"]["content"]

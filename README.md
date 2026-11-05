@@ -86,9 +86,9 @@ Pick the entry point that matches how you want to interact:
 | I want to | Run | First response |
 | --- | --- | --- |
 | Check why something is broken | `python -m xenon doctor` | full report in ~1–2 s |
-| Ask about what is on screen | `python -m xenon ask "..."` | ~0.8 s, mostly interpreter startup |
-| Ask repeatedly without waiting | `python -m xenon ui` | ~0.2 s per question |
-| Talk to it | `python -m xenon voice` | wake word, then ~0.2 s |
+| Ask about what is on screen | `python -m xenon ask "..."` | ~1 s start, then model time |
+| Ask repeatedly without waiting | `python -m xenon ui` | model stays warm between questions |
+| Talk to it | `python -m xenon voice` | wake word, then model time |
 | Change the desktop | `python -m xenon do "..." --dry-run` first | plan printed, nothing run |
 | Look something up | `python -m xenon search "..."` | ~1 s, top five results |
 

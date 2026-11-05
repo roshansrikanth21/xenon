@@ -49,8 +49,13 @@ class ChatClientTests(unittest.TestCase):
             transport=FakeTransport(error=TimeoutError("slow")),
         )
 
-        with self.assertRaises(ChatUnavailable):
+        with self.assertRaises(ChatUnavailable) as raised:
             client.complete(MESSAGES)
+
+        message = str(raised.exception)
+        self.assertIn("https://models.example/v1", message)
+        self.assertIn("doctor", message)
+        self.assertIn("slow", message)
 
     def test_rejects_empty_responses(self) -> None:
         client = OpenAICompatibleChat(
