@@ -38,6 +38,7 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Add microphone selection (`--mic`, `XENON_MIC_DEVICE`), a VAD threshold knob, and ignored-utterance feedback.
 - [x] Make answers task-oriented: lead with a concrete next step instead of narrating the window.
 - [x] Add `search` (DuckDuckGo, no key) and fix `open_app`/`focus_window` races so real desktop actions complete.
+- [x] Add `doctor`: one read-only report for screen, model reachability, memory, voice deps, microphone, and skills.
 - [x] Implement the typed command box (`python -m xenon ui`).
 - [x] Test: every CLI command is registered and its handlers are reachable.
 - [x] Benchmark wake-to-command and command-to-first-response latency (gate + dispatch 0.001 ms; audio path still unmeasured).

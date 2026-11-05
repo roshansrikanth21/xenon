@@ -20,7 +20,7 @@ from unittest import mock
 from xenon import __main__ as cli
 from xenon.screen import ScreenContext
 
-COMMANDS = ["screen", "ask", "do", "ui", "voice", "search", "skills", "memory", "notion"]
+COMMANDS = ["screen", "doctor", "ask", "do", "ui", "voice", "search", "skills", "memory", "notion"]
 
 
 def reply_for(payload: dict) -> str:

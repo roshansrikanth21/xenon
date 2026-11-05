@@ -74,6 +74,27 @@ def _observer():
     return observer
 
 
+def _doctor(args: argparse.Namespace) -> int:
+    from xenon.doctor import exit_code, run_checks
+
+    observe = None
+    if is_windows():
+        observe = lambda: _observer().observe()
+
+    checks = run_checks(
+        observe,
+        chat_config_from_env(),
+        os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH),
+        _skills_root(),
+    )
+    for check in checks:
+        print(f"{check.status.upper():4}  {check.name:18} {check.detail}")
+    failed = sum(1 for check in checks if check.status == "fail")
+    warned = sum(1 for check in checks if check.status == "warn")
+    print(f"\n{len(checks) - failed - warned} ok, {warned} warning(s), {failed} failure(s)")
+    return exit_code(checks)
+
+
 def _screen(args: argparse.Namespace) -> int:
     if not is_windows():
         print("xenon screen requires Windows", file=sys.stderr)
@@ -639,6 +660,11 @@ def main(argv: list[str] | None = None) -> int:
 
     screen = subparsers.add_parser("screen", help="describe the active window")
     screen.set_defaults(handler=_screen)
+
+    doctor = subparsers.add_parser(
+        "doctor", help="check screen, model, memory, voice, and skills"
+    )
+    doctor.set_defaults(handler=_doctor)
 
     ask = subparsers.add_parser("ask", help="answer a question from screen and memory")
     ask.add_argument("question", nargs="+")

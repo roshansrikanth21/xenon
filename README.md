@@ -64,6 +64,7 @@ Implemented and covered by tests:
 - Task-oriented assist loop: question + live screen + retrieved memory -> model
   answer that leads with concrete next steps instead of describing the window.
 - `python -m xenon screen` prints what Xenon currently sees.
+- `python -m xenon doctor` checks screen, model reachability, memory, voice dependencies, microphone, and skills in one report.
 - `python -m xenon ask "..." [--skill name]` answers from screen and memory.
 - `python -m xenon do "..." [--dry-run]` plans and runs an approved task.
 - `python -m xenon ui` opens the command box.
@@ -84,6 +85,7 @@ Pick the entry point that matches how you want to interact:
 
 | I want to | Run | First response |
 | --- | --- | --- |
+| Check why something is broken | `python -m xenon doctor` | full report in ~1–2 s |
 | Ask about what is on screen | `python -m xenon ask "..."` | ~0.8 s, mostly interpreter startup |
 | Ask repeatedly without waiting | `python -m xenon ui` | ~0.2 s per question |
 | Talk to it | `python -m xenon voice` | wake word, then ~0.2 s |
@@ -99,6 +101,24 @@ Screen context, local OCR, memory ingest/search, wake detection, speech-to-text,
 and speech output never touch the network. Only `ask`, `do`, the optional vision
 fallback, and `search` call out; the model endpoint can be local, so point
 `XENON_MODEL_BASE_URL` at Ollama or any OpenAI-compatible server on `localhost`.
+
+## If something is not working
+
+Run the doctor first; it names the failing layer instead of leaving you to guess:
+
+```powershell
+python -m xenon doctor
+```
+
+Typical results:
+
+- `FAIL model` — the model server is not running. Start `ollama serve`, then confirm
+  with `python -m xenon doctor` again.
+- `WARN screen ... limited` — UI Automation had no text and OCR could not read the
+  window either. Bring the target window to the front and retry; if it is a picture,
+  configure a vision model.
+- `WARN voice:sounddevice` — reinstall the voice extras: `pip install -e ".[voice]"`.
+- `WARN microphone` — no input device was found; check Windows sound settings.
 
 ## Known limitations
 
@@ -124,6 +144,7 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev,capture,uia]"
 python -m pytest -q
+python -m xenon doctor
 python -m xenon screen
 ```
 

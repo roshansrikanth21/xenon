@@ -199,6 +199,13 @@ class MemoryStore:
     def close(self) -> None:
         self._connection.close()
 
+    def count_documents(self) -> int:
+        """Number of stored documents, for health checks and status output."""
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS total FROM documents"
+        ).fetchone()
+        return int(row["total"]) if row is not None else 0
+
     def __enter__(self) -> "MemoryStore":
         return self
 
