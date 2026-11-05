@@ -89,6 +89,8 @@ class VisionClientTests(unittest.TestCase):
         keys = [
             "XENON_VISION_API_KEY",
             "XENON_MODEL_API_KEY",
+            "XENON_MODEL_NAME",
+            "XENON_MODEL_BASE_URL",
             "XENON_VISION_MODEL",
             "XENON_VISION_BASE_URL",
         ]
@@ -101,6 +103,47 @@ class VisionClientTests(unittest.TestCase):
             self.assertIsNotNone(config)
             self.assertEqual(config.model, "vision-small")
             self.assertEqual(config.base_url, "https://api.openai.com/v1")
+        finally:
+            for key in keys:
+                os.environ.pop(key, None)
+                if original[key] is not None:
+                    os.environ[key] = original[key]
+
+    def test_model_credentials_alone_do_not_enable_vision(self) -> None:
+        keys = [
+            "XENON_VISION_API_KEY",
+            "XENON_VISION_MODEL",
+            "XENON_MODEL_API_KEY",
+            "XENON_MODEL_NAME",
+        ]
+        original = {key: os.environ.pop(key, None) for key in keys}
+        try:
+            os.environ["XENON_MODEL_API_KEY"] = "ollama"
+            os.environ["XENON_MODEL_NAME"] = "qwen2.5:7b"
+            self.assertIsNone(config_from_env())
+        finally:
+            for key in keys:
+                os.environ.pop(key, None)
+                if original[key] is not None:
+                    os.environ[key] = original[key]
+
+    def test_vision_inherits_the_local_model_endpoint(self) -> None:
+        keys = [
+            "XENON_VISION_API_KEY",
+            "XENON_VISION_MODEL",
+            "XENON_VISION_BASE_URL",
+            "XENON_MODEL_API_KEY",
+            "XENON_MODEL_BASE_URL",
+        ]
+        original = {key: os.environ.pop(key, None) for key in keys}
+        try:
+            os.environ["XENON_MODEL_API_KEY"] = "ollama"
+            os.environ["XENON_MODEL_BASE_URL"] = "http://127.0.0.1:11434/v1"
+            os.environ["XENON_VISION_MODEL"] = "llava"
+            config = config_from_env()
+            self.assertIsNotNone(config)
+            self.assertEqual(config.api_key, "ollama")
+            self.assertEqual(config.base_url, "http://127.0.0.1:11434/v1")
         finally:
             for key in keys:
                 os.environ.pop(key, None)

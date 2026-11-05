@@ -33,6 +33,7 @@ class WakeGate:
         aliases: Sequence[str] = (),
     ) -> None:
         self._wake_word = wake_word.strip()
+        self._aliases = tuple(aliases)
         self._patterns = [
             _wake_pattern(word)
             for word in (self._wake_word, *aliases)
@@ -72,11 +73,15 @@ class WakeGate:
                 break
         if match is not None:
             command = match.group("rest").strip(" \t,.;:-")
-            if command:
-                self._armed_at = None
-                return command
-            self._armed_at = self._clock()
-            return None
+            lowered = command.lower()
+            # A transcript that is just the wake word or one of its aliases (with
+            # no real command after it) arms the next utterance instead of being
+            # dispatched as a command.
+            if not command or lowered in {w.lower() for w in (self._wake_word, *self._aliases) if w.strip()}:
+                self._armed_at = self._clock()
+                return None
+            self._armed_at = None
+            return command
 
         if self._armed_at is None:
             return None

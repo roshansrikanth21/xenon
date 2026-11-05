@@ -43,13 +43,27 @@ Transport = Callable[[str, dict, bytes, float], dict]
 
 
 def config_from_env() -> VisionConfig | None:
-    api_key = os.environ.get("XENON_VISION_API_KEY") or os.environ.get(
-        "XENON_MODEL_API_KEY", ""
+    """Return a vision config only when vision is deliberately switched on.
+
+    The chat model's credentials are *not* enough on their own: doing that
+    silently sends an Ollama key to OpenAI whenever the text model is set, and
+    a failed vision call then looks like a broken screen. Set at least one
+    ``XENON_VISION_*`` variable to opt in. Shared credentials and base URL are
+    inherited from the model environment when present, so a local vision model
+    on the same server needs only ``XENON_VISION_MODEL``.
+    """
+    vision_key = os.environ.get("XENON_VISION_API_KEY", "")
+    vision_model = os.environ.get("XENON_VISION_MODEL", "")
+    if not vision_key and not vision_model:
+        return None
+
+    api_key = vision_key or os.environ.get("XENON_MODEL_API_KEY", "")
+    model = vision_model or os.environ.get("XENON_MODEL_NAME", "")
+    base_url = (
+        os.environ.get("XENON_VISION_BASE_URL")
+        or os.environ.get("XENON_MODEL_BASE_URL")
+        or DEFAULT_BASE_URL
     )
-    model = os.environ.get("XENON_VISION_MODEL") or os.environ.get(
-        "XENON_MODEL_NAME", ""
-    )
-    base_url = os.environ.get("XENON_VISION_BASE_URL", DEFAULT_BASE_URL)
     if not api_key or not model:
         return None
     try:

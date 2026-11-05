@@ -98,6 +98,10 @@ class ScreenObserver:
                 used_vision=False,
             )
 
+        # Keep whatever the accessible tree did expose as a weak fallback. A
+        # browser or Electron window often has useful landmarks even when it
+        # has no readable page body; throwing that away leaves the assistant
+        # with nothing but an error to work from.
         frame = None
         if self._capture is not None:
             try:
@@ -106,9 +110,13 @@ class ScreenObserver:
                 return ScreenContext(
                     app_name=snapshot.app_name,
                     title=snapshot.title,
-                    text="",
-                    used_vision=True,
-                    error=f"screen capture failed: {error}",
+                    text=content,
+                    used_vision=False,
+                    error=(
+                        "could not read the screen pixels "
+                        f"({type(error).__name__}: {error}); only window "
+                        "identity and limited accessible text are available"
+                    ),
                 )
 
         try:
@@ -117,9 +125,27 @@ class ScreenObserver:
             return ScreenContext(
                 app_name=snapshot.app_name,
                 title=snapshot.title,
-                text="",
-                used_vision=True,
-                error=f"vision unavailable: {error}",
+                text=content,
+                used_vision=False,
+                error=(
+                    "no fallback could read the screen "
+                    f"({error}); only window identity and limited accessible "
+                    "text are available"
+                ),
+            )
+
+        # Some providers explain *why* they could not read the image instead
+        # of returning a description. Do not pass that off as screen content.
+        if not description.strip():
+            return ScreenContext(
+                app_name=snapshot.app_name,
+                title=snapshot.title,
+                text=content,
+                used_vision=False,
+                error=(
+                    "the fallback returned no description; only window "
+                    "identity and limited accessible text are available"
+                ),
             )
 
         return ScreenContext(

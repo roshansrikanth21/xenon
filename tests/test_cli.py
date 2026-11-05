@@ -20,7 +20,7 @@ from unittest import mock
 from xenon import __main__ as cli
 from xenon.screen import ScreenContext
 
-COMMANDS = ["screen", "ask", "do", "ui", "voice", "skills", "memory", "notion"]
+COMMANDS = ["screen", "ask", "do", "ui", "voice", "search", "skills", "memory", "notion"]
 
 
 def reply_for(payload: dict) -> str:
@@ -189,6 +189,18 @@ class AssistAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(code, 0, err)
         self.assertIn("Intro - Opera", out)
+
+    def test_ocr_is_the_default_fallback_and_can_be_disabled(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XENON_VISION_API_KEY", None)
+            os.environ.pop("XENON_VISION_MODEL", None)
+            os.environ["XENON_OCR"] = "1"
+            self.assertEqual(type(cli._vision_provider()).__name__, "VisionChain")
+
+            os.environ["XENON_OCR"] = "off"
+            self.assertEqual(
+                type(cli._vision_provider()).__name__, "UnconfiguredVision"
+            )
 
     def test_observer_is_prewarmed_before_the_first_request(self) -> None:
         automation = mock.MagicMock()

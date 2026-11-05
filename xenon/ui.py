@@ -5,6 +5,7 @@ thin and only handles layout and thread hops.
 """
 from __future__ import annotations
 
+import queue
 import threading
 import tkinter as tk
 from typing import Callable
@@ -82,4 +83,85 @@ class CommandBox:
         self._output.config(state="disabled")
 
     def run(self) -> None:
+        self.root.mainloop()
+
+
+class VoiceStatusModel:
+    """Testable state for the voice indicator (no Tk)."""
+
+    COLORS = {
+        "idle": "#9ca3af",
+        "listening": "#22c55e",
+        "heard": "#3b82f6",
+        "working": "#f59e0b",
+        "speaking": "#a855f7",
+        "error": "#ef4444",
+    }
+
+    def __init__(self) -> None:
+        self.state = "idle"
+        self.detail = ""
+
+    def set(self, state: str, detail: str = "") -> None:
+        self.state = state
+        self.detail = detail
+
+    @property
+    def color(self) -> str:
+        return self.COLORS.get(self.state, "#9ca3af")
+
+
+class VoiceIndicator:
+    """Small always-on-top window showing whether Xenon is listening/working."""
+
+    def __init__(self, title: str = "Xenon voice", topmost: bool = True) -> None:
+        self.model = VoiceStatusModel()
+        self._queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.root.geometry("420x200+750+420")
+        self.root.attributes("-topmost", bool(topmost))
+        self.root.resizable(False, False)
+        self.root.configure(bg="#111827")
+
+        row = tk.Frame(self.root)
+        row.pack(fill="x", padx=10, pady=(10, 4))
+        self._dot = tk.Label(row, text="\u25cf", font=("Segoe UI", 22), fg=self.model.color, bg="#111827")
+        self._dot.pack(side="left")
+        self._state = tk.Label(row, text=self.model.state, font=("Segoe UI", 13, "bold"), fg="#f9fafb", bg="#111827")
+        self._state.pack(side="left", padx=(8, 0))
+
+        self._detail = tk.Label(self.root, text="waiting for wake word", anchor="w", wraplength=390, justify="left", fg="#d1d5db", bg="#111827")
+        self._detail.pack(fill="x", padx=10, pady=(0, 8))
+
+        tk.Button(self.root, text="Stop", command=self._on_close).pack(pady=(0, 8))
+
+        self._poll()
+
+    def set(self, state: str, detail: str = "") -> None:
+        """Thread-safe state update."""
+        self._queue.put((state, detail))
+
+    def _poll(self) -> None:
+        changed = False
+        while not self._queue.empty():
+            state, detail = self._queue.get()
+            self.model.set(state, detail)
+            changed = True
+        if changed:
+            self._dot.config(fg=self.model.color)
+            self._state.config(text=self.model.state)
+            self._detail.config(text=self.model.detail)
+        try:
+            self.root.after(100, self._poll)
+        except tk.TclError:
+            pass
+
+    def _on_close(self) -> None:
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def run_mainloop(self) -> None:
         self.root.mainloop()

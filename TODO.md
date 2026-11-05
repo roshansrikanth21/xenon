@@ -17,6 +17,9 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Test: redact configured sensitive fields before screen context reaches a model.
 - [x] Test: answer a context question from UIA-only input without a screenshot.
 - [x] Test: invoke screenshot/vision fallback only when UIA confidence is insufficient.
+- [x] Test: when vision is unavailable, keep the accessible text and tell the model plainly that pixels could not be read instead of presenting an error as content.
+- [x] Implement a local OCR fallback using Windows' built-in OCR, with a provider chain and an `XENON_OCR` off switch.
+- [x] Test: no image leaves the machine and no vision key is required for OCR; text-model credentials alone never enable the cloud vision client.
 - [x] Test: capture-to-structured-context median latency stays below 250 ms for UIA-only screens (measured 35 ms warm; 337 ms cold).
 - [x] Implement the screen observer and live Windows adapter.
 
@@ -32,12 +35,16 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Test: wake word plus command dispatches exactly one task.
 - [x] Test: speaking/audio playback cannot retrigger wake detection.
 - [x] Implement the wake gate and voice loop orchestration with injectable audio adapters.
+- [x] Add microphone selection (`--mic`, `XENON_MIC_DEVICE`), a VAD threshold knob, and ignored-utterance feedback.
+- [x] Make answers task-oriented: lead with a concrete next step instead of narrating the window.
+- [x] Add `search` (DuckDuckGo, no key) and fix `open_app`/`focus_window` races so real desktop actions complete.
 - [x] Implement the typed command box (`python -m xenon ui`).
 - [x] Test: every CLI command is registered and its handlers are reachable.
 - [x] Benchmark wake-to-command and command-to-first-response latency (gate + dispatch 0.001 ms; audio path still unmeasured).
 - [x] Add startup prewarm so the first request skips COM initialization (289 ms -> 32 ms).
 - [x] Wire real VAD + STT + TTS adapters behind the voice loop (energy endpointer, faster-whisper, SAPI).
 - [ ] Benchmark true wake-to-command latency with microphone capture in the loop.
+- [x] Add a floating voice status indicator (listening/heard/working/speaking).
 - [ ] Add a tray icon and a global hotkey for the command box.
 - [ ] Keep the service warm so the model, microphone, and screen adapter load once.
 
@@ -62,6 +69,7 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Test: `ask` and `do --dry-run` run end-to-end against a local stub model.
 - [x] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification (verified live: write + file-content verification, exit 0).
 - [x] Scenario: real desktop actuation opens an app and verifies the foreground title (verified live).
+- [x] Scenario: `ask` reads an Electron window with empty UI Automation through local OCR and returns a next step (verified live against Ollama `qwen2.5:7b`: 10.7 s, `screen via vision`).
 - [ ] Scenario: unplug network; local wake, screen context, and local memory still work.
 
 ## Research decisions to validate

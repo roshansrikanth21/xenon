@@ -176,6 +176,7 @@ class WhisperTranscriber:
         compute_type: str = "int8",
         language: str = "en",
         initial_prompt: str = "",
+        beam_size: int = 1,
         model_factory: Callable[[str, str, str], object] | None = None,
     ) -> None:
         self._model_name = model_name
@@ -183,6 +184,7 @@ class WhisperTranscriber:
         self._compute_type = compute_type
         self._language = language
         self._initial_prompt = initial_prompt
+        self._beam_size = max(1, int(beam_size))
         self._factory = model_factory or _default_whisper_factory
         self._model: object | None = None
 
@@ -198,7 +200,7 @@ class WhisperTranscriber:
         audio = _pcm_to_float(resample_pcm16(pcm, sample_rate, TARGET_SAMPLE_RATE))
         options = {
             "language": self._language,
-            "beam_size": 1,
+            "beam_size": self._beam_size,
             "vad_filter": False,
             "condition_on_previous_text": False,
         }
@@ -258,17 +260,26 @@ class MicrophoneSource:
         self,
         sample_rate: int = 16000,
         frame_ms: int = 30,
+        device: object = None,
         stream_factory: Callable[[int, int], object] | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_ms = frame_ms
+        self.device = device
         self._frame_samples = int(sample_rate * frame_ms / 1000)
         self._factory = stream_factory or _default_stream_factory
         self._stream = None
 
     def _open(self):
         if self._stream is None:
-            self._stream = self._factory(self.sample_rate, self._frame_samples)
+            # Custom factories keep the old two-argument contract; the default
+            # factory also accepts a device selector.
+            if self._factory is _default_stream_factory:
+                self._stream = self._factory(
+                    self.sample_rate, self._frame_samples, self.device
+                )
+            else:
+                self._stream = self._factory(self.sample_rate, self._frame_samples)
         return self._stream
 
     def read_frame(self) -> list[float]:
@@ -287,15 +298,18 @@ class MicrophoneSource:
                 self._stream = None
 
 
-def _default_stream_factory(sample_rate: int, frame_samples: int):
+def _default_stream_factory(sample_rate: int, frame_samples: int, device=None):
     import sounddevice as sd
 
-    return sd.InputStream(
+    kwargs = dict(
         samplerate=sample_rate,
         blocksize=frame_samples,
         channels=1,
         dtype="float32",
-    ).__enter__()
+    )
+    if device is not None:
+        kwargs["device"] = device
+    return sd.InputStream(**kwargs).__enter__()
 
 
 def listen_once(source, detector: UtteranceDetector, transcriber: Transcriber) -> str | None:

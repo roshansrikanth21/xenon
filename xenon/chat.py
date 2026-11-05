@@ -64,7 +64,11 @@ class OpenAICompatibleChat:
             "model": self._config.model,
             "messages": messages,
             "temperature": 0.2,
-            "max_completion_tokens": 800,
+            # ``max_tokens`` is understood by Ollama, LM Studio, vLLM and the
+            # OpenAI chat models. The newer ``max_completion_tokens`` spelling
+            # is ignored by local servers, which lets a 7B model ramble for
+            # half a minute on a long screen dump.
+            "max_tokens": 400,
         }
         headers = {
             "Authorization": f"Bearer {self._config.api_key}",

@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import html
 import os
+import re
 import sys
+import urllib.parse
+import urllib.request
 
 from xenon.actions import ApprovalPolicy, TaskRunner
 from xenon.assistant import Assistant
@@ -40,8 +44,24 @@ class UnconfiguredVision:
 
     def describe(self, frame, snapshot) -> str:
         raise VisionUnavailable(
-            "set XENON_VISION_API_KEY and XENON_VISION_MODEL to enable vision fallback"
+            "local OCR is disabled and no vision model is configured; set "
+            "XENON_OCR=1, or set XENON_VISION_API_KEY and XENON_VISION_MODEL"
         )
+
+
+def _vision_provider():
+    """Build the fallback chain: local OCR first, then a configured model."""
+    from xenon.ocr import VisionChain, WindowsOcr, local_ocr_enabled
+
+    providers: list[object] = []
+    if local_ocr_enabled():
+        providers.append(WindowsOcr())
+    config = config_from_env()
+    if config is not None:
+        providers.append(OpenAICompatibleVision(config))
+    if not providers:
+        return UnconfiguredVision()
+    return VisionChain(providers)
 
 
 def _observer():
@@ -49,9 +69,7 @@ def _observer():
     from xenon.windows import WindowsUiAutomation
 
     automation = WindowsUiAutomation()
-    config = config_from_env()
-    vision = OpenAICompatibleVision(config) if config is not None else UnconfiguredVision()
-    observer = ScreenObserver(automation, vision, capture=automation)
+    observer = ScreenObserver(automation, _vision_provider(), capture=automation)
     observer.prewarm()
     return observer
 
@@ -63,7 +81,8 @@ def _screen(args: argparse.Namespace) -> int:
     context = _observer().observe()
     print(f"app: {context.app_name}")
     print(f"title: {context.title}")
-    print(f"source: {'vision' if context.used_vision else 'ui-automation'}")
+    print(f"source: {'vision' if context.used_vision else 'ui-automation'}"
+          + (" (limited)" if context.error else ""))
     if context.error:
         print(f"warning: {context.error}")
     if context.text:
@@ -108,6 +127,8 @@ def _ask(args: argparse.Namespace) -> int:
         for memory in answer.memories:
             print(f"- {memory.title} ({memory.source_kind}: {memory.path})")
     source = "vision" if answer.used_vision else "ui-automation"
+    if answer.screen_error:
+        source += " (limited)"
     print(f"\n[{answer.latency_ms:.0f} ms, screen via {source}]")
     return 0
 
@@ -152,6 +173,17 @@ def _voice(args: argparse.Namespace) -> int:
         print("xenon voice requires Windows for speech and screen context", file=sys.stderr)
         return 2
 
+    if getattr(args, "list_mics", False):
+        try:
+            import sounddevice as sd
+        except Exception as error:
+            print(f"sounddevice unavailable: {error}", file=sys.stderr)
+            return 1
+        for index, device in enumerate(sd.query_devices()):
+            if int(device.get("max_input_channels", 0)) > 0:
+                print(f"{index}: {device.get('name')} (inputs={device.get('max_input_channels')})")
+        return 0
+
     config = chat_config_from_env()
     if config is None:
         print(
@@ -159,6 +191,34 @@ def _voice(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    mic_device = getattr(args, "mic", None)
+    if mic_device is None:
+        mic_device = os.environ.get("XENON_MIC_DEVICE")
+    if mic_device is not None:
+        try:
+            mic_device = int(mic_device)
+        except (TypeError, ValueError):
+            pass
+
+    vad_threshold = getattr(args, "threshold", None)
+    if vad_threshold is None:
+        raw_threshold = os.environ.get("XENON_VAD_THRESHOLD")
+        if raw_threshold is not None:
+            try:
+                vad_threshold = float(raw_threshold)
+            except (TypeError, ValueError):
+                vad_threshold = None
+    if vad_threshold is None:
+        vad_threshold = 0.015
+
+    beam_size = 3
+    raw_beam = os.environ.get("XENON_WHISPER_BEAM")
+    if raw_beam is not None:
+        try:
+            beam_size = int(raw_beam)
+        except (TypeError, ValueError):
+            pass
 
     from xenon.audio import (
         MicrophoneSource,
@@ -176,48 +236,230 @@ def _voice(args: argparse.Namespace) -> int:
         for part in os.environ.get("XENON_WAKE_ALIASES", "").split(",")
         if part.strip()
     )
+
+    # Build the floating indicator first so the user gets immediate feedback.
+    indicator = None
     try:
-        speaker = SapiSpeaker()
+        from xenon.ui import VoiceIndicator
+
+        indicator = VoiceIndicator()
+        indicator.root.deiconify()
+        indicator.root.lift()
+        indicator.root.attributes("-topmost", True)
+        indicator.root.focus_force()
+        print("status window opened", flush=True)
+    except Exception as error:  # pragma: no cover - environment dependent
+        print(f"voice indicator unavailable: {error}", file=sys.stderr)
+
+    _voice_state: dict = {"indicator": indicator}
+
+    def _ind() -> object | None:
+        return _voice_state["indicator"]
+
+    import threading
+
+    stop_event = threading.Event()
+
+    # Terminal-only fallback when Tk is unavailable: everything stays on this thread.
+    if indicator is None:
+        try:
+            speaker = SapiSpeaker()
+        except Exception as error:
+            print(f"speech output unavailable: {error}", file=sys.stderr)
+            return 1
+        source = MicrophoneSource(device=mic_device)
+        detector = UtteranceDetector(threshold=vad_threshold, min_speech_ms=300)
+        transcriber = WhisperTranscriber(
+            os.environ.get("XENON_WHISPER_MODEL", "base"),
+            os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
+            os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
+            initial_prompt=os.environ.get(
+                "XENON_WHISPER_PROMPT",
+                f"{wake_word.capitalize()}, {', '.join(aliases)}.",
+            ),
+            beam_size=beam_size,
+        )
+        store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
+        assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
+
+        def handle(command: str) -> str:
+            answer = assistant.ask(command)
+            print(f"you: {command}")
+            print(f"xenon: {answer.text}")
+            return answer.text
+
+        def transcribe() -> str | None:
+            text = listen_once(source, detector, transcriber)
+            if text:
+                print(f"heard: {text!r}", flush=True)
+            return text
+
+        loop = VoiceLoop(
+            gate=WakeGate(wake_word, aliases=aliases),
+            transcribe=transcribe,
+            speak=speaker.speak,
+            on_command=handle,
+        )
+        print(f"listening for {wake_word!r}; press Ctrl+C to stop", flush=True)
+        try:
+            while True:
+                loop.tick()
+        except KeyboardInterrupt:
+            print("\nstopped")
+        finally:
+            source.close()
+            store.close()
+        return 0
+
+    # GUI path: run the whole audio stack inside the worker thread so the SQLite
+    # connection and COM objects stay on one thread.
+    def worker() -> None:
+        _worker_state: dict = {"last_transcript": None}
+        # expose via closure scope
+        globals()["_worker_state"] = _worker_state
+        try:
+            speaker = SapiSpeaker()
+        except Exception as error:
+            if indicator is not None:
+                indicator.set("error", str(error))
+            print(f"speech output unavailable: {error}", file=sys.stderr)
+            stop_event.set()
+            return
+        source = MicrophoneSource(device=mic_device)
+        detector = UtteranceDetector(threshold=vad_threshold, min_speech_ms=300)
+        transcriber = WhisperTranscriber(
+            os.environ.get("XENON_WHISPER_MODEL", "base"),
+            os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
+            os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
+            initial_prompt=os.environ.get(
+                "XENON_WHISPER_PROMPT",
+                f"{wake_word.capitalize()}, {', '.join(aliases)}.",
+            ),
+            beam_size=beam_size,
+        )
+        store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
+        assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
+
+        def handle(command: str) -> str:
+            ind = _ind()
+            if ind is not None:
+                ind.set("working", command)
+            answer = assistant.ask(command)
+            print(f"you: {command}")
+            print(f"xenon: {answer.text}")
+            ind = _ind()
+            if ind is not None:
+                ind.set("speaking", answer.text[:120])
+            return answer.text
+
+        def transcribe() -> str | None:
+            ind = _ind()
+            if ind is not None:
+                ind.set("listening", "")
+            text = listen_once(source, detector, transcriber)
+            if text:
+                print(f"heard: {text!r}", flush=True)
+                ind = _ind()
+                if ind is not None:
+                    ind.set("heard", text)
+                lowered = text.lower()
+                wake_words = [wake_word, *aliases]
+                if not any(lowered.startswith(word.lower()) for word in wake_words if word):
+                    print(f"ignored (no wake word): {text!r}", flush=True)
+            return text
+
+        def speak(text: str) -> None:
+            ind = _ind()
+            if ind is not None:
+                ind.set("speaking", text[:120])
+            speaker.speak(text)
+
+        loop = VoiceLoop(
+            gate=WakeGate(wake_word, aliases=aliases),
+            transcribe=transcribe,
+            speak=speak,
+            on_command=handle,
+        )
+
+        if indicator is not None:
+            indicator.set("listening", f"wake word: {wake_word}")
+        print(f"listening for {wake_word!r}; close the status window to stop", flush=True)
+        try:
+            while not stop_event.is_set():
+                loop.tick()
+        except Exception as error:
+            if indicator is not None:
+                indicator.set("error", str(error))
+            print(f"voice loop error: {error}", file=sys.stderr)
+        finally:
+            source.close()
+            store.close()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    try:
+        indicator.run_mainloop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        thread.join(timeout=5)
+    print("stopped")
+    return 0
+
+
+def _search(args: argparse.Namespace) -> int:
+    query = " ".join(args.query).strip()
+    if not query:
+        print("search needs a query", file=sys.stderr)
+        return 2
+
+    url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query)
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "Xenon/1.0 (local assistant)"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            page = response.read().decode("utf-8", errors="replace")
     except Exception as error:
-        print(f"speech output unavailable: {error}", file=sys.stderr)
+        print(f"search failed: {error}", file=sys.stderr)
         return 1
 
-    source = MicrophoneSource()
-    detector = UtteranceDetector()
-    transcriber = WhisperTranscriber(
-        os.environ.get("XENON_WHISPER_MODEL", "base"),
-        os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
-        os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
-        initial_prompt=os.environ.get(
-            "XENON_WHISPER_PROMPT", f"{wake_word.capitalize()}."
-        ),
+    # DuckDuckGo's HTML results are simple enough to parse without a parser.
+    link_tags = re.findall(
+        r"<a\b[^>]*class=['\"]result-link['\"][^>]*>.*?</a>",
+        page,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    snippet_matches = re.findall(
+        r"<td[^>]*class=['\"]result-snippet['\"][^>]*>(.*?)</td>",
+        page,
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
-    store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
-    assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
+    results = []
+    for index, tag in enumerate(link_tags[:5]):
+        href_match = re.search(r"href=['\"]([^'\"]+)['\"]", tag, flags=re.IGNORECASE)
+        title_match = re.search(r">(.*)</a>", tag, flags=re.IGNORECASE | re.DOTALL)
+        href = href_match.group(1) if href_match else ""
+        title = re.sub(r"<[^>]+>", "", title_match.group(1) if title_match else "").strip()
+        snippet = ""
+        if index < len(snippet_matches):
+            snippet = re.sub(r"<[^>]+>", "", snippet_matches[index]).strip()
+        parsed = urllib.parse.urlparse(href)
+        params = urllib.parse.parse_qs(parsed.query)
+        if "uddg" in params:
+            href = params["uddg"][0]
+        results.append((title, href, snippet))
 
-    def handle(command: str) -> str:
-        answer = assistant.ask(command)
-        print(f"you: {command}")
-        print(f"xenon: {answer.text}")
-        return answer.text
-
-    loop = VoiceLoop(
-        gate=WakeGate(wake_word, aliases=aliases),
-        transcribe=lambda: listen_once(source, detector, transcriber),
-        speak=speaker.speak,
-        on_command=handle,
-    )
-
-    print(f"listening for {wake_word!r}; press Ctrl+C to stop", flush=True)
-    try:
-        while True:
-            loop.tick()
-    except KeyboardInterrupt:
-        print("\nstopped")
-    finally:
-        source.close()
-        store.close()
+    if not results:
+        print("no results")
+        return 0
+    for index, (title, href, snippet) in enumerate(results, 1):
+        print(f"{index}. {html.unescape(title)}")
+        print(f"   {href}")
+        if snippet:
+            print(f"   {html.unescape(snippet)}")
     return 0
 
 
@@ -419,7 +661,14 @@ def main(argv: list[str] | None = None) -> int:
     ui.set_defaults(handler=_ui)
 
     voice = subparsers.add_parser("voice", help="listen for the wake word and answer aloud")
+    voice.add_argument("--mic", default=None, help="input device index or name (or set XENON_MIC_DEVICE)")
+    voice.add_argument("--threshold", type=float, default=None, help="VAD energy threshold (or set XENON_VAD_THRESHOLD)")
+    voice.add_argument("--list-mics", action="store_true", help="list input devices and exit")
     voice.set_defaults(handler=_voice)
+
+    search = subparsers.add_parser("search", help="search the web (DuckDuckGo)")
+    search.add_argument("query", nargs="+")
+    search.set_defaults(handler=_search)
 
     skills = subparsers.add_parser("skills", help="list or match Agent Skills")
     skill_commands = skills.add_subparsers(dest="skills_command", required=True)

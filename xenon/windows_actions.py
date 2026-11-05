@@ -186,6 +186,21 @@ class WindowsActionBackend:
             os.startfile(str(path) if path.exists() else target)
         else:
             subprocess.Popen([target], shell=False)
+
+        # Give the process a moment to create its window, so a following
+        # focus_window step does not race the launcher.
+        deadline = time.monotonic() + 5.0
+        needle = Path(target).stem.lower() or target.lower()
+        while time.monotonic() < deadline:
+            try:
+                desktop = self._desktop_factory()
+                for window in desktop.windows():
+                    title = (getattr(window, "window_text", lambda: "")() or "").lower()
+                    if needle and needle in title:
+                        return ActionResult(True, f"opened {target}")
+            except Exception:
+                pass
+            time.sleep(0.25)
         return ActionResult(True, f"opened {target}")
 
     def _do_focus_window(self, action: Action) -> ActionResult:
@@ -195,20 +210,33 @@ class WindowsActionBackend:
 
         self._focused_title = None
         desktop = self._desktop_factory()
+        needle = target.lower()
         window = None
-        # Exact title first: a substring match is how a test once typed into the
-        # wrong Notepad document.
-        for build in (
-            lambda: desktop.window(title=target),
-            lambda: desktop.window(title_re=f".*{re.escape(target)}.*"),
-        ):
-            try:
-                candidate = build()
-                candidate.set_focus()
-            except Exception:
-                continue
-            window = candidate
-            break
+
+        windows_method = getattr(desktop, "windows", None)
+        if callable(windows_method):
+            for candidate in windows_method():
+                title = (getattr(candidate, "window_text", lambda: "")() or "").lower()
+                if needle not in title:
+                    continue
+                try:
+                    candidate.set_focus()
+                except Exception:
+                    continue
+                window = candidate
+                break
+        else:
+            for build in (
+                lambda: desktop.window(title=target),
+                lambda: desktop.window(title_re=f"(?i).*{re.escape(target)}.*"),
+            ):
+                try:
+                    candidate = build()
+                    candidate.set_focus()
+                except Exception:
+                    continue
+                window = candidate
+                break
 
         if window is None:
             return ActionResult(False, f"no window matching {target!r}")

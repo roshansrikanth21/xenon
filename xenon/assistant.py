@@ -14,12 +14,25 @@ from xenon.screen import ScreenContext
 from xenon.skills import Skill
 
 SYSTEM_PROMPT = (
-    "You are Xenon, a concise personal assistant working beside the user on "
-    "their Windows desktop. Use the screen context as what the user is looking "
-    "at right now. Use retrieved memory only when it is relevant, and cite the "
-    "source path in square brackets. If neither the screen nor memory supports "
-    "an answer, say what is missing instead of guessing. Never invent screen "
-    "contents or remembered facts."
+    "You are Xenon, a personal assistant working beside the user on their "
+    "Windows desktop. The screen context is what the user is looking at right "
+    "now. Your job is to help them move their current task forward, not to "
+    "narrate the window.\n\n"
+    "Answer like this by default:\n"
+    "Next step: <one concrete action the user can take now>\n"
+    "Why: <one sentence tied to the screen>\n"
+    "Try: <the exact Xenon command, only when one would help>\n\n"
+    "Add a second or third next step only if the first one clearly depends on "
+    "it. Do not open with a summary of the screen and do not list files or "
+    "controls unless the user asked what is visible. Keep the whole answer "
+    "under 120 words.\n\n"
+    "Use retrieved memory only when it is relevant and cite its source path in "
+    "square brackets; use your own knowledge for general guidance. When the "
+    "screen section says the pixels could not be read, do not guess at page "
+    "contents or claim to see anything: work from the app and window title, "
+    "give what help the question itself allows, and ask one focused question "
+    "about what is actually on screen. Never invent screen contents or "
+    "remembered facts."
 )
 
 
@@ -29,6 +42,7 @@ class Answer:
     used_vision: bool
     memories: tuple[MemoryHit, ...]
     latency_ms: float
+    screen_error: str = ""
 
 
 class Observer(Protocol):
@@ -88,6 +102,7 @@ class Assistant:
             used_vision=context.used_vision,
             memories=memories,
             latency_ms=elapsed_ms,
+            screen_error=context.error,
         )
 
     def _user_message(
@@ -96,17 +111,32 @@ class Assistant:
         context: ScreenContext,
         memories: tuple[MemoryHit, ...],
     ) -> str:
-        screen = context.text.strip() or "(no readable content)"
+        screen = context.text.strip()
+        has_content = bool(screen)
+        if context.used_vision and has_content:
+            source = "screenshot/vision"
+        elif has_content:
+            source = "UI Automation (limited: window chrome only)"
+        else:
+            source = "window identity only"
+
         lines = [
             "## Current screen",
             f"App: {context.app_name}",
             f"Window: {context.title}",
-            f"Source: {'screenshot/vision' if context.used_vision else 'UI Automation'}",
+            f"Source: {source}",
         ]
         if context.error:
-            lines.append(f"Capture warning: {context.error}")
+            lines.append(
+                "Screen limits: the pixels could not be read (" + context.error + ")."
+            )
+            lines.append(
+                "Do not describe or invent visible content. Use only the app and "
+                "window title above, and ask the user what is on screen if that "
+                "would change your answer."
+            )
         lines.append("")
-        lines.append(screen[: self._max_context_chars])
+        lines.append(screen[: self._max_context_chars] if has_content else "(no readable content)")
 
         lines.extend(["", "## Retrieved memory"])
         if not memories:

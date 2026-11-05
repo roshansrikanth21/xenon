@@ -156,6 +156,42 @@ class AssistantTests(unittest.TestCase):
 
         prompt = json.dumps(model.messages[0])
         self.assertIn("vision unavailable: offline", prompt)
+        self.assertIn("Screen limits", prompt)
+        self.assertNotIn("Capture warning", prompt)
+        self.assertIn("Do not describe or invent", prompt)
+
+    def test_marks_limited_ui_automation_when_pixels_are_unreadable(self) -> None:
+        context = ScreenContext(
+            app_name="opera",
+            title="deck.pptx - Opera",
+            text="Speed Dial",
+            used_vision=False,
+            error="vision fallback is not available",
+        )
+        model = FakeModel()
+
+        answer = Assistant(FakeObserver(context), None, model).ask("next step?")
+
+        prompt = json.dumps(model.messages[0])
+        self.assertIn("UI Automation (limited", prompt)
+        self.assertIn("deck.pptx - Opera", prompt)
+        self.assertEqual(answer.screen_error, "vision fallback is not available")
+
+    def test_says_window_identity_only_when_nothing_is_readable(self) -> None:
+        context = ScreenContext(
+            app_name="Opera",
+            title="Xenon - GitHub",
+            text="",
+            used_vision=False,
+        )
+        model = FakeModel()
+
+        Assistant(FakeObserver(context), None, model).ask("what now?")
+
+        prompt = json.dumps(model.messages[0])
+        self.assertIn("window identity only", prompt)
+        self.assertIn("Xenon - GitHub", prompt)
+        self.assertIn("(no readable content)", prompt)
 
 
 if __name__ == "__main__":

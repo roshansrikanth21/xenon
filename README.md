@@ -29,13 +29,17 @@ Implemented and covered by tests:
 
 - Read-only foreground window adapter: app, title, bounded UI Automation controls.
 - Duplicate-node collapsing, password redaction, and a 6000-character context cap.
+- Local OCR fallback: when a window exposes no readable text (Electron, canvas,
+  slide decks), Windows' built-in OCR reads the screenshot through PowerShell.
+  No image leaves the machine and no API key is required; `XENON_OCR=off`
+  disables it.
 - Screenshot capture of the active window, used only when UIA has too little content.
 - Opt-in OpenAI-compatible vision client, injectable transport for offline tests.
 - Local SQLite + FTS5 memory: Obsidian Markdown ingestion, tags, source attribution,
   idempotent re-sync, per-file and per-source deletion, ranked retrieval.
 - Connectors: read-only Notion page trees, Claude `conversations.json`, Codex JSONL.
 - Agent Skills: metadata discovery at startup, instructions loaded only on use,
-  keyword matching, and three bundled skills under `skills/`.
+  keyword matching, and four bundled skills under `skills/`.
 - Approval-gated desktop tasks: model planner limited to permitted actions, a
   policy that refuses shell/destructive kinds, and a runner that reports
   `succeeded`, `denied`, `failed`, or `unverified` truthfully.
@@ -43,7 +47,8 @@ Implemented and covered by tests:
   file verifiers. Real actions require an explicit plan confirmation.
 - Focus safety: `focus_window` confirms the title it actually reached, and
   `type_text`/`press_keys` refuse to run if the foreground window changed since
-  that focus step.
+  that focus step. `open_app` waits for the new window so a following focus step
+  does not race the launcher.
 - Startup prewarm for the screen adapter: one throwaway foreground read drops the
   first real observation from 289 ms to 32 ms.
 - Wake gate: a bare wake word only arms the next utterance briefly, commands
@@ -52,14 +57,18 @@ Implemented and covered by tests:
   STT and TTS engine can be dropped in without touching the gating logic.
 - Working local voice path: energy endpointer over the microphone, faster-whisper
   speech-to-text, and Windows SAPI speech output. No audio leaves the machine.
+- Voice usability controls: `voice --list-mics`, `voice --mic <index|name>`,
+  `voice --threshold`, plus environment equivalents, a floating status window,
+  and "ignored (no wake word)" feedback for background speech.
 - Minimal always-on-top Tk command box with a testable presenter.
-- Typed assist loop: question + live screen + retrieved memory -> model answer
-  with cited source paths.
+- Task-oriented assist loop: question + live screen + retrieved memory -> model
+  answer that leads with concrete next steps instead of describing the window.
 - `python -m xenon screen` prints what Xenon currently sees.
 - `python -m xenon ask "..." [--skill name]` answers from screen and memory.
 - `python -m xenon do "..." [--dry-run]` plans and runs an approved task.
 - `python -m xenon ui` opens the command box.
 - `python -m xenon voice` listens for the wake word and answers aloud.
+- `python -m xenon search "..."` searches the web without an API key.
 - `python -m xenon memory ingest|import|search` and `python -m xenon notion ingest`.
 - `python -m xenon skills list|find`.
 - Latency benchmarks with budget gates for screen context and memory retrieval.
@@ -79,27 +88,33 @@ Pick the entry point that matches how you want to interact:
 | Ask repeatedly without waiting | `python -m xenon ui` | ~0.2 s per question |
 | Talk to it | `python -m xenon voice` | wake word, then ~0.2 s |
 | Change the desktop | `python -m xenon do "..." --dry-run` first | plan printed, nothing run |
+| Look something up | `python -m xenon search "..."` | ~1 s, top five results |
 
 `ui` and `voice` are long-lived processes, which is how the latency numbers stay
 low: the model, microphone, and screen adapter load once instead of per command.
 
 ## What runs offline
 
-Screen context, memory ingest/search, wake detection, speech-to-text, and speech
-output never touch the network. Only `ask`, `do`, and the vision fallback call a
-model, and that endpoint can be local: point `XENON_MODEL_BASE_URL` at Ollama or
-any OpenAI-compatible server on `localhost`.
+Screen context, local OCR, memory ingest/search, wake detection, speech-to-text,
+and speech output never touch the network. Only `ask`, `do`, the optional vision
+fallback, and `search` call out; the model endpoint can be local, so point
+`XENON_MODEL_BASE_URL` at Ollama or any OpenAI-compatible server on `localhost`.
 
 ## Known limitations
 
-- UI Automation is empty in some apps (slide decks, Electron, canvas views), which
-  forces the slower vision path. That is the main remaining latency cost.
+- UI Automation is empty in some apps (slide decks, Electron, canvas views). Xenon
+  first tries Windows' built-in OCR on a screenshot, which costs roughly 0.5–2 s
+  and reads text only — it cannot describe a chart or a photo. A configured vision
+  model is better for those.
+- OCR output is lossy on small or unusual fonts, so treat its text as a clue, not
+  a transcript. Like any screenshot path, it reads whatever is visible; unlike UI
+  Automation, it cannot apply the password-field redaction.
 - The energy-based endpointer is tuned for a quiet room; a noisy room will need
   a real VAD such as WebRTC.
 - `focus_window` matches on window titles, so two windows of the same app with the
   same title are ambiguous. Xenon refuses to type if focus moved after the focus
   step, but it cannot tell two identically titled windows apart.
-- There is no tray icon or global hotkey yet; start `ui` or `voice` from a terminal.
+- `voice` now opens a small always-on-top status window (listening / heard / working / speaking); there is still no tray icon or global hotkey, so start it from a terminal.
 - This has only run on one Windows 11 machine, with an English wake word.
 
 ## Quick start
@@ -121,15 +136,24 @@ pip install -e ".[voice]"
 Enable answers and the vision fallback only if you want requests sent to a model:
 
 ```powershell
-$env:XENON_MODEL_API_KEY = "..."
-$env:XENON_MODEL_NAME = "your-chat-model"
-# optional: $env:XENON_MODEL_BASE_URL = "http://localhost:11434/v1"
-
-$env:XENON_VISION_API_KEY = "..."
-$env:XENON_VISION_MODEL = "your-vision-model"
-# optional: $env:XENON_VISION_BASE_URL = "http://localhost:11434/v1"
+# Local model (no cloud, no key beyond Ollama's placeholder)
+$env:XENON_MODEL_API_KEY = "ollama"
+$env:XENON_MODEL_NAME = "qwen2.5:7b"
+$env:XENON_MODEL_BASE_URL = "http://127.0.0.1:11434/v1"
 
 python -m xenon ask "what does this screen mean for my deadline?"
+python -m xenon search "python asyncio tutorial"
+```
+
+Local OCR is on by default and needs no configuration. To switch it off, or to
+add a real vision model for diagrams and photos:
+
+```powershell
+$env:XENON_OCR = "off"
+
+$env:XENON_VISION_API_KEY = "..."          # opt-in; a text-model key is not reused
+$env:XENON_VISION_MODEL = "your-vision-model"
+# optional: $env:XENON_VISION_BASE_URL = "http://localhost:11434/v1"
 ```
 
 Plan a desktop task before letting it act:
@@ -157,9 +181,15 @@ sources under each answer.
 Talk to Xenon locally (microphone, no cloud speech services):
 
 ```powershell
-python -m xenon voice
+python -m xenon voice --list-mics       # find your input device
+python -m xenon voice --mic 2           # index or a name substring
 # then say: "Xenon, what is on my screen?"
 ```
+
+If Xenon hears speech but ignores it, the log and the floating window show
+`ignored (no wake word): '...'`. If it triggers on room noise, raise the energy
+threshold (`--threshold 0.02`, default `0.015`). Speech recognition accuracy can
+be improved with `XENON_WHISPER_BEAM=5` or `XENON_WHISPER_MODEL=small`.
 
 Speech output uses Windows SAPI and speech input uses faster-whisper, so audio
 never leaves the machine. The first run downloads the Whisper model (about 75 MB
@@ -218,7 +248,9 @@ Local run on 30 Oct–1 Nov 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9:
 | --- | ---: | ---: | ---: | ---: |
 | UIA-only observe (depth 4), no prewarm | 289 ms | **24 ms** | 28 ms | 250 ms |
 | UIA-only observe (depth 4), after `prewarm()` | 32 ms | **24 ms** | 28 ms | 250 ms |
+| Local OCR observe, Electron window (no UIA text) | — | **~0.7 s** | — | — |
 | Full `ask` without vision, end to end | — | **210 ms** | — | — |
+| Full `ask` with Ollama `qwen2.5:7b` and OCR context | — | **10.7 s** | — | — |
 | Memory retrieval, 500 docs | ingest 264 ms | **0.1 ms** | 0.9 ms | 100 ms |
 | Wake gate + dispatch (no audio) | — | **0.001 ms** | 0.001 ms | 5 ms |
 | Voice: 2.2 s of speech, warm Whisper `base` | model load 1.9 s | **4–6 ms** | 6 ms | — |
@@ -230,7 +262,9 @@ it before its first observation.
 
 The 210 ms `ask` figure excludes the model round trip (it was measured against a
 local stub that answers in about 3 ms) and excludes Python interpreter startup,
-which adds roughly 0.5 s to a cold `python -m xenon` invocation.
+which adds roughly 0.5 s to a cold `python -m xenon` invocation. The 10.7 s
+figure is a real 7B model on CPU with OCR text from an Electron window; most of it
+is model generation, not perception.
 
 The voice number excludes microphone capture, VAD, STT, and TTS, because those
 adapters do not exist yet; it isolates the orchestration overhead Xenon owns.

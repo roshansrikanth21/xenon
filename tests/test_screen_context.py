@@ -189,9 +189,65 @@ class ScreenObserverTests(unittest.TestCase):
 
         context = ScreenObserver(automation, FailingVision(), capture=FakeCapture(frame)).observe()
 
-        self.assertTrue(context.used_vision)
+        self.assertFalse(context.used_vision)
+        self.assertEqual(context.app_name, "CanvasApp")
+        self.assertIn("no fallback could read", context.error)
+        self.assertIn("model offline", context.error)
+
+    def test_keeps_accessible_text_when_vision_fails(self) -> None:
+        frame = CapturedFrame(image=b"png", width=1, height=1)
+        automation = FakeUiAutomation(
+            WindowSnapshot(
+                app_name="opera",
+                title="deck.pptx - Opera",
+                controls=(
+                    UiControl(role="Document", name="Speed Dial"),
+                    UiControl(role="Pane", name="deck.pptx - Opera"),
+                    UiControl(role="Group", name="Browser client"),
+                ),
+            )
+        )
+
+        context = ScreenObserver(automation, FailingVision(), capture=FakeCapture(frame)).observe()
+
+        # The thin UIA trail is still useful context; it must not be replaced
+        # by an error message.
+        self.assertIn("deck.pptx - Opera", context.text)
+        self.assertFalse(context.used_vision)
+        self.assertIn("no fallback could read", context.error)
+
+    def test_keeps_accessible_text_when_capture_fails(self) -> None:
+        automation = FakeUiAutomation(
+            WindowSnapshot(
+                app_name="Editor",
+                title="main.py - Code",
+                controls=(UiControl(role="Pane", name="Explorer"),),
+            )
+        )
+
+        class FailingCapture:
+            def capture_foreground(self) -> CapturedFrame:
+                raise RuntimeError("display asleep")
+
+        context = ScreenObserver(
+            automation, FakeVision(), capture=FailingCapture()
+        ).observe()
+
+        self.assertEqual(context.text, "Explorer")
+        self.assertFalse(context.used_vision)
+        self.assertIn("display asleep", context.error)
+        self.assertIn("pixels", context.error)
+
+    def test_empty_vision_description_is_not_treated_as_content(self) -> None:
+        automation = FakeUiAutomation(
+            WindowSnapshot(app_name="App", title="Window", controls=())
+        )
+
+        context = ScreenObserver(automation, FakeVision("   ")).observe()
+
         self.assertEqual(context.text, "")
-        self.assertIn("vision", context.error)
+        self.assertFalse(context.used_vision)
+        self.assertIn("no description", context.error)
 
     def test_uses_vision_only_when_automation_has_no_readable_content(self) -> None:
         automation = FakeUiAutomation(
