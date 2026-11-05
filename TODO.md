@@ -70,7 +70,7 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Test: `ask` and `do --dry-run` run end-to-end against a local stub model.
 - [x] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification (verified live: write + file-content verification, exit 0).
 - [x] Scenario: real desktop actuation opens an app and verifies the foreground title (verified live).
-- [x] Scenario: `ask` reads an Electron window with empty UI Automation through local OCR and returns a next step (verified live against Ollama `qwen2.5:7b`: 10.7 s, `screen via vision`).
+- [x] Scenario: `ask` reads an Electron window with empty UI Automation through local OCR and returns a next step (verified live against Ollama `qwen2.5:7b`: ~11 s, `screen via screenshot`).
 - [ ] Scenario: unplug network; local wake, screen context, and local memory still work.
 
 ## Research decisions to validate

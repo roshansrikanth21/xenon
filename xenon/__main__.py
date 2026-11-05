@@ -102,7 +102,7 @@ def _screen(args: argparse.Namespace) -> int:
     context = _observer().observe()
     print(f"app: {context.app_name}")
     print(f"title: {context.title}")
-    print(f"source: {'vision' if context.used_vision else 'ui-automation'}"
+    print(f"source: {'screenshot' if context.used_vision else 'ui-automation'}"
           + (" (limited)" if context.error else ""))
     if context.error:
         print(f"warning: {context.error}")
@@ -147,7 +147,7 @@ def _ask(args: argparse.Namespace) -> int:
         print("\nsources:")
         for memory in answer.memories:
             print(f"- {memory.title} ({memory.source_kind}: {memory.path})")
-    source = "vision" if answer.used_vision else "ui-automation"
+    source = "screenshot" if answer.used_vision else "ui-automation"
     if answer.screen_error:
         source += " (limited)"
     print(f"\n[{answer.latency_ms:.0f} ms, screen via {source}]")
