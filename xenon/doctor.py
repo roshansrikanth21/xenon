@@ -136,6 +136,13 @@ def check_voice() -> list[Check]:
         )
 
     if importlib.util.find_spec("sounddevice") is None:
+        checks.append(
+            _check(
+                "microphone",
+                WARN,
+                "not checked; install the voice extras to list input devices",
+            )
+        )
         return checks
     try:
         import sounddevice

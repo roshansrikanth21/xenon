@@ -15,6 +15,7 @@ from xenon.doctor import (
     check_python,
     check_screen,
     check_skills,
+    check_voice,
     exit_code,
     run_checks,
 )
@@ -151,6 +152,15 @@ class DoctorCheckTests(unittest.TestCase):
 
         self.assertEqual(check.status, PASS)
         self.assertIn("1 skills", check.detail)
+
+    def test_voice_checks_degrade_when_dependencies_are_missing(self) -> None:
+        with mock.patch("xenon.doctor.importlib.util.find_spec", return_value=None):
+            checks = check_voice()
+
+        names = [check.name for check in checks]
+        self.assertIn("voice:sounddevice", names)
+        self.assertIn("microphone", names)
+        self.assertTrue(all(check.status == WARN for check in checks))
 
     def test_exit_code_is_failure_only_for_failures(self) -> None:
         self.assertEqual(exit_code([]), 0)
