@@ -177,6 +177,22 @@ class AssistantTests(unittest.TestCase):
         self.assertIn("deck.pptx - Opera", prompt)
         self.assertEqual(answer.screen_error, "vision fallback is not available")
 
+    def test_brief_mode_asks_for_short_spoken_language(self) -> None:
+        model = FakeModel("Open the last changed file first.")
+
+        answer = Assistant(FakeObserver(CONTEXT), FakeMemory([hit()]), model).ask(
+            "what next?", brief=True
+        )
+
+        prompt = json.dumps(model.messages[0])
+        self.assertIn("speaking out loud", prompt)
+        self.assertIn("under 45 words", prompt)
+        self.assertNotIn("Try: <the exact Xenon command", prompt)
+        # Spoken answers name the memory instead of reading a file path.
+        self.assertIn("Xenon plan", prompt)
+        self.assertNotIn("xenon.md", prompt)
+        self.assertEqual(answer.text, "Open the last changed file first.")
+
     def test_says_window_identity_only_when_nothing_is_readable(self) -> None:
         context = ScreenContext(
             app_name="Opera",

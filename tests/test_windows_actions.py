@@ -3,6 +3,7 @@ import unittest
 
 from xenon.actions import Action
 from xenon.windows_actions import (
+    DesktopTitleVerifier,
     ForegroundTitleVerifier,
     WindowsActionBackend,
     parse_keys,
@@ -57,6 +58,42 @@ class VerifierTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn("excel", result.detail)
+
+
+class WindowText:
+    def __init__(self, title: str) -> None:
+        self._title = title
+
+    def window_text(self) -> str:
+        return self._title
+
+
+class WindowListDesktop:
+    def __init__(self, titles: list[str]) -> None:
+        self._titles = titles
+
+    def windows(self) -> list[WindowText]:
+        return [WindowText(title) for title in self._titles]
+
+
+class DesktopTitleVerifierTests(unittest.TestCase):
+    def test_accepts_a_window_that_is_not_in_the_foreground(self) -> None:
+        desktop = WindowListDesktop(["scratch - File Explorer", "notes.md - Notepad"])
+        verifier = DesktopTitleVerifier("Notepad", desktop_factory=lambda: desktop)
+
+        result = verifier.verify("open notepad")
+
+        self.assertTrue(result.ok)
+        self.assertIn("Notepad", result.detail)
+
+    def test_rejects_a_missing_window(self) -> None:
+        desktop = WindowListDesktop(["scratch - File Explorer"])
+        verifier = DesktopTitleVerifier("Notepad", desktop_factory=lambda: desktop)
+
+        result = verifier.verify("open notepad")
+
+        self.assertFalse(result.ok)
+        self.assertIn("Notepad", result.detail)
 
 
 class BackendSafetyTests(unittest.TestCase):

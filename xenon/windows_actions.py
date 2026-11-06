@@ -185,12 +185,18 @@ class WindowsActionBackend:
         if path.exists() or "://" in target:
             os.startfile(str(path) if path.exists() else target)
         else:
-            subprocess.Popen([target], shell=False)
+            # ShellExecute resolves Start-menu app names and App Paths entries
+            # that a bare Popen cannot find. Fall back for executables on PATH.
+            try:
+                os.startfile(target)
+            except OSError:
+                subprocess.Popen([target], shell=False)
 
         # Give the process a moment to create its window, so a following
-        # focus_window step does not race the launcher.
+        # focus_window step does not race the launcher. ``value`` can carry the
+        # expected title fragment (for example "Calculator" for ``calc``).
         deadline = time.monotonic() + 5.0
-        needle = Path(target).stem.lower() or target.lower()
+        needle = (action.value or Path(target).stem or target).lower()
         while time.monotonic() < deadline:
             try:
                 desktop = self._desktop_factory()
@@ -328,6 +334,33 @@ class WindowsActionBackend:
         sent = self.user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
         if sent != len(events):
             raise OSError(ctypes.get_last_error(), "SendInput did not send every event")
+
+
+class DesktopTitleVerifier:
+    """Considers a task verified when any desktop window title matches.
+
+    Launching an app does not always bring it to the foreground (Windows may
+    open it behind the current window), so ``open_app`` verifies against the
+    whole desktop rather than only the foreground window.
+    """
+
+    def __init__(self, expected: str, desktop_factory=None) -> None:
+        self.expected = expected
+        self._desktop_factory = (
+            desktop_factory if desktop_factory is not None else _default_desktop
+        )
+
+    def verify(self, goal: str) -> Verification:
+        try:
+            desktop = self._desktop_factory()
+            windows = desktop.windows()
+            for window in windows:
+                title = (getattr(window, "window_text", lambda: "")() or "")
+                if self.expected.lower() in title.lower():
+                    return Verification(True, f"window {title!r} exists")
+        except Exception as error:
+            return Verification(False, f"could not list desktop windows: {error}")
+        return Verification(False, f"no window title contains {self.expected!r}")
 
 
 class ForegroundTitleVerifier:

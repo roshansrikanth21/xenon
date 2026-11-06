@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import html
 import os
 import re
 import sys
-import urllib.parse
-import urllib.request
 
+from xenon import fastpath, websearch
 from xenon.actions import ApprovalPolicy, TaskRunner
 from xenon.assistant import Assistant
 from xenon.chat import ChatUnavailable, OpenAICompatibleChat
@@ -300,14 +298,31 @@ def _voice(args: argparse.Namespace) -> int:
             ),
             beam_size=beam_size,
         )
+        model = OpenAICompatibleChat(config)
+        print("warming the model so the first answer is not a cold start...", flush=True)
+        if not model.warm_up():
+            print(
+                "model warm-up failed; the first answer may be slow or fail",
+                file=sys.stderr,
+            )
         store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
-        assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
+        assistant = Assistant(
+            _observer(),
+            store,
+            model,
+            max_memories=3,
+            max_context_chars=2500,
+        )
 
         def handle(command: str) -> str:
-            answer = assistant.ask(command)
             print(f"you: {command}")
+            fast_reply = _voice_fast_reply(command)
+            if fast_reply is not None:
+                print(f"xenon (fast path): {fast_reply}")
+                return _speakable(fast_reply)
+            answer = assistant.ask(command, brief=True)
             print(f"xenon: {answer.text}")
-            return answer.text
+            return _speakable(answer.text)
 
         def transcribe() -> str | None:
             text = listen_once(source, detector, transcriber)
@@ -358,20 +373,42 @@ def _voice(args: argparse.Namespace) -> int:
             ),
             beam_size=beam_size,
         )
+        model = OpenAICompatibleChat(config)
+        ind = _ind()
+        if ind is not None:
+            ind.set("working", "warming model")
+        print("warming the model so the first answer is not a cold start...", flush=True)
+        if model.warm_up():
+            print("model warm", flush=True)
+        else:
+            print(
+                "model warm-up failed; the first answer may be slow or fail",
+                file=sys.stderr,
+            )
         store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
-        assistant = Assistant(_observer(), store, OpenAICompatibleChat(config))
+        assistant = Assistant(
+            _observer(),
+            store,
+            model,
+            max_memories=3,
+            max_context_chars=2500,
+        )
 
         def handle(command: str) -> str:
             ind = _ind()
             if ind is not None:
                 ind.set("working", command)
-            answer = assistant.ask(command)
             print(f"you: {command}")
+            fast_reply = _voice_fast_reply(command)
+            if fast_reply is not None:
+                print(f"xenon (fast path): {fast_reply}")
+                return _speakable(fast_reply)
+            answer = assistant.ask(command, brief=True)
             print(f"xenon: {answer.text}")
             ind = _ind()
             if ind is not None:
                 ind.set("speaking", answer.text[:120])
-            return answer.text
+            return _speakable(answer.text)
 
         def transcribe() -> str | None:
             ind = _ind()
@@ -393,7 +430,7 @@ def _voice(args: argparse.Namespace) -> int:
             ind = _ind()
             if ind is not None:
                 ind.set("speaking", text[:120])
-            speaker.speak(text)
+            speaker.speak(_speakable(text))
 
         loop = VoiceLoop(
             gate=WakeGate(wake_word, aliases=aliases),
@@ -429,86 +466,35 @@ def _voice(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_search(query: str) -> int:
+    try:
+        results = websearch.search(query, limit=5)
+    except (websearch.SearchUnavailable, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+    if not results:
+        print("no results")
+        return 0
+    for index, result in enumerate(results, 1):
+        print(f"{index}. {result.title}")
+        print(f"   {result.url}")
+        if result.snippet:
+            print(f"   {result.snippet}")
+    return 0
+
+
 def _search(args: argparse.Namespace) -> int:
     query = " ".join(args.query).strip()
     if not query:
         print("search needs a query", file=sys.stderr)
         return 2
-
-    url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query)
-    request = urllib.request.Request(
-        url, headers={"User-Agent": "Xenon/1.0 (local assistant)"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            page = response.read().decode("utf-8", errors="replace")
-    except Exception as error:
-        print(f"search failed: {error}", file=sys.stderr)
-        return 1
-
-    # DuckDuckGo's HTML results are simple enough to parse without a parser.
-    link_tags = re.findall(
-        r"<a\b[^>]*class=['\"]result-link['\"][^>]*>.*?</a>",
-        page,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    snippet_matches = re.findall(
-        r"<td[^>]*class=['\"]result-snippet['\"][^>]*>(.*?)</td>",
-        page,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-    results = []
-    for index, tag in enumerate(link_tags[:5]):
-        href_match = re.search(r"href=['\"]([^'\"]+)['\"]", tag, flags=re.IGNORECASE)
-        title_match = re.search(r">(.*)</a>", tag, flags=re.IGNORECASE | re.DOTALL)
-        href = href_match.group(1) if href_match else ""
-        title = re.sub(r"<[^>]+>", "", title_match.group(1) if title_match else "").strip()
-        snippet = ""
-        if index < len(snippet_matches):
-            snippet = re.sub(r"<[^>]+>", "", snippet_matches[index]).strip()
-        parsed = urllib.parse.urlparse(href)
-        params = urllib.parse.parse_qs(parsed.query)
-        if "uddg" in params:
-            href = params["uddg"][0]
-        results.append((title, href, snippet))
-
-    if not results:
-        print("no results")
-        return 0
-    for index, (title, href, snippet) in enumerate(results, 1):
-        print(f"{index}. {html.unescape(title)}")
-        print(f"   {href}")
-        if snippet:
-            print(f"   {html.unescape(snippet)}")
-    return 0
+    return _render_search(query)
 
 
-def _do(args: argparse.Namespace) -> int:
-    if not is_windows():
-        print("xenon do requires Windows", file=sys.stderr)
-        return 2
-
-    config = chat_config_from_env()
-    if config is None:
-        print(
-            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to plan tasks",
-            file=sys.stderr,
-        )
-        return 2
-
-    goal = " ".join(args.goal).strip()
-    context = _observer().observe()
-    screen = f"{context.title}\n{context.text}"[:4000]
-    planner = ModelPlanner(OpenAICompatibleChat(config))
-    try:
-        plan = planner.plan(goal, screen)
-    except (ChatUnavailable, PlannerError) as error:
-        print(f"planning error: {error}", file=sys.stderr)
-        return 1
-
+def _print_plan(goal: str, actions) -> None:
     print(f"plan for: {goal}")
-    for index, action in enumerate(plan.actions, start=1):
+    for index, action in enumerate(actions, start=1):
         detail = " ".join(
             part
             for part in (
@@ -520,18 +506,18 @@ def _do(args: argparse.Namespace) -> int:
         note = f"  # {action.reason}" if action.reason else ""
         print(f"  {index}. {action.kind} {detail}{note}")
 
-    if args.dry_run:
-        return 0
 
-    if not args.yes:
-        try:
-            reply = input("Run this plan? [y/N] ").strip().lower()
-        except EOFError:
-            reply = ""
-        if reply not in {"y", "yes"}:
-            print("cancelled")
-            return 1
+def _confirmed(args: argparse.Namespace) -> bool:
+    if args.yes:
+        return True
+    try:
+        reply = input("Run this plan? [y/N] ").strip().lower()
+    except EOFError:
+        reply = ""
+    return reply in {"y", "yes"}
 
+
+def _run_actions(goal: str, actions, args: argparse.Namespace, verifier=None) -> int:
     from xenon.actions import FileVerifier
     from xenon.windows_actions import ForegroundTitleVerifier, WindowsActionBackend
 
@@ -539,14 +525,13 @@ def _do(args: argparse.Namespace) -> int:
         verifier = ForegroundTitleVerifier(args.expect_title)
     elif args.expect_file:
         verifier = FileVerifier(args.expect_file, args.expect_text)
-    else:
-        verifier = None
+
     outcome = TaskRunner(
         ApprovalPolicy(),
         WindowsActionBackend(),
         approver=lambda action: True,
         verifier=verifier,
-    ).run(goal, plan.actions)
+    ).run(goal, actions)
 
     print(f"status: {outcome.status}")
     for step in outcome.steps:
@@ -555,6 +540,126 @@ def _do(args: argparse.Namespace) -> int:
     if outcome.detail:
         print(f"detail: {outcome.detail}")
     return 0 if outcome.status == "succeeded" else 1
+
+
+def _voice_fast_reply(command: str, backend=None, search_fn=None) -> str | None:
+    """Run open/focus/search without a model, or return None for other tasks.
+
+    Only these three deterministic intents auto-approve. Typing, key presses,
+    and file writes still go through the normal approval path (or the model).
+    """
+    fast = fastpath.parse(command)
+    if fast is None:
+        return None
+
+    if fast.kind == "search":
+        fetch = search_fn or websearch.search
+        try:
+            results = fetch(fast.target, limit=1)
+        except (websearch.SearchUnavailable, ValueError):
+            return "Search is unavailable right now."
+        if not results:
+            return f"I found nothing for {fast.target}."
+        top = results[0]
+        snippet = re.sub(r"\s+", " ", top.snippet).strip()
+        reply = f"Top result: {top.title}."
+        if snippet:
+            reply += f" {snippet}"
+        return reply[:260]
+
+    action = fast.action()
+    if action is None:
+        return None
+
+    if backend is None:
+        from xenon.windows_actions import WindowsActionBackend
+
+        backend = WindowsActionBackend()
+    outcome = TaskRunner(
+        ApprovalPolicy(), backend, approver=lambda _: True
+    ).run(command, [action])
+
+    ok = bool(outcome.steps) and all(
+        step.result is not None and step.result.ok for step in outcome.steps
+    )
+    if ok:
+        if fast.kind == "open_app":
+            return f"Opened {fast.label or fast.target}."
+        return f"Switched to {fast.target}."
+    return f"Couldn't do that: {outcome.detail or 'the action failed'}"
+
+
+def _speakable(text: str) -> str:
+    """Drop markdown punctuation that sounds wrong through SAPI."""
+    cleaned = re.sub(r"[`*_#>|~]", " ", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _do(args: argparse.Namespace) -> int:
+    if not is_windows():
+        print("xenon do requires Windows", file=sys.stderr)
+        return 2
+
+    goal = " ".join(args.goal).strip()
+    if not goal:
+        print("do needs a goal", file=sys.stderr)
+        return 2
+
+    # Common commands skip the model entirely: no cold start, no planning
+    # round trip. The same approval/verification rules still apply.
+    fast = fastpath.parse(goal)
+    if fast is not None and fast.kind == "search":
+        print(f"fast path: {goal}")
+        if args.dry_run:
+            return 0
+        return _render_search(fast.target)
+
+    if fast is not None and fast.kind in {"open_app", "focus_window"}:
+        action = fast.action()
+        assert action is not None
+        print(f"fast path: {goal}")
+        _print_plan(goal, [action])
+        if args.dry_run:
+            return 0
+        if not _confirmed(args):
+            print("cancelled")
+            return 1
+        default_title = fast.label if fast.kind == "open_app" else fast.target
+        if fast.kind == "open_app":
+            from xenon.windows_actions import DesktopTitleVerifier
+
+            verifier = DesktopTitleVerifier(default_title)
+        else:
+            from xenon.windows_actions import ForegroundTitleVerifier
+
+            verifier = ForegroundTitleVerifier(default_title)
+
+        return _run_actions(goal, [action], args, verifier=verifier)
+
+    config = chat_config_from_env()
+    if config is None:
+        print(
+            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to plan tasks",
+            file=sys.stderr,
+        )
+        return 2
+
+    context = _observer().observe()
+    screen = f"{context.title}\n{context.text}"[:4000]
+    planner = ModelPlanner(OpenAICompatibleChat(config))
+    try:
+        plan = planner.plan(goal, screen)
+    except (ChatUnavailable, PlannerError) as error:
+        print(f"planning error: {error}", file=sys.stderr)
+        return 1
+
+    _print_plan(goal, plan.actions)
+    if args.dry_run:
+        return 0
+    if not _confirmed(args):
+        print("cancelled")
+        return 1
+    return _run_actions(goal, plan.actions, args)
 
 
 def _notion(args: argparse.Namespace) -> int:

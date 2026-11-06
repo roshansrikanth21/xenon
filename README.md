@@ -43,6 +43,15 @@ Implemented and covered by tests:
 - Approval-gated desktop tasks: model planner limited to permitted actions, a
   policy that refuses shell/destructive kinds, and a runner that reports
   `succeeded`, `denied`, `failed`, or `unverified` truthfully.
+- Deterministic fast path for "open/launch", "switch/focus", and "search/look up".
+  These skip the model entirely, so a common command starts immediately. Voice
+  auto-runs only open, focus, and search; typing, key presses, and file writes
+  still require explicit approval.
+- Model latency controls: `XENON_MAX_TOKENS` (default 220), an Ollama `keep_alive`
+  of `2h` on loopback endpoints, and a model warm-up at voice startup. The first
+  request after an idle Ollama unload was ~16 s; warm answers are ~1–3 s.
+- Spoken answers use a short brief prompt (under 45 words) so speech does not read
+  markdown, headings, or file paths aloud.
 - Windows actuator for open/focus/type/keys/click/write, plus foreground-title and
   file verifiers. Real actions require an explicit plan confirmation.
 - Focus safety: `focus_window` confirms the title it actually reached, and
@@ -89,6 +98,7 @@ Pick the entry point that matches how you want to interact:
 | Ask about what is on screen | `python -m xenon ask "..."` | ~1 s start, then model time |
 | Ask repeatedly without waiting | `python -m xenon ui` | model stays warm between questions |
 | Talk to it | `python -m xenon voice` | wake word, then model time |
+| Open an app or switch windows | `python -m xenon do "open notepad" --yes` | deterministic, no model |
 | Change the desktop | `python -m xenon do "..." --dry-run` first | plan printed, nothing run |
 | Look something up | `python -m xenon search "..."` | ~1 s, top five results |
 
@@ -129,6 +139,10 @@ Typical results:
 - OCR output is lossy on small or unusual fonts, so treat its text as a clue, not
   a transcript. Like any screenshot path, it reads whatever is visible; unlike UI
   Automation, it cannot apply the password-field redaction.
+- The fast path recognises a fixed app table plus single executable-looking names.
+  Anything else falls through to the model planner. "Open", "focus", and "search"
+  auto-run by voice; typing, key presses, and file writes still go through the
+  approval path.
 - The energy-based endpointer is tuned for a quiet room; a noisy room will need
   a real VAD such as WebRTC.
 - `focus_window` matches on window titles, so two windows of the same app with the
@@ -161,10 +175,16 @@ Enable answers and the vision fallback only if you want requests sent to a model
 $env:XENON_MODEL_API_KEY = "ollama"
 $env:XENON_MODEL_NAME = "qwen2.5:7b"
 $env:XENON_MODEL_BASE_URL = "http://127.0.0.1:11434/v1"
+$env:XENON_MAX_TOKENS = "220"      # optional; lower is faster
+$env:XENON_KEEP_ALIVE = "2h"       # optional; local Ollama stays loaded
 
 python -m xenon ask "what does this screen mean for my deadline?"
 python -m xenon search "python asyncio tutorial"
 ```
+
+`XENON_KEEP_ALIVE` is only sent to loopback model endpoints. Set it to `off`
+if you would rather let Ollama unload the model when idle; the next request
+will then pay a cold-load cost of roughly 16 s.
 
 Local OCR is on by default and needs no configuration. To switch it off, or to
 add a real vision model for diagrams and photos:
@@ -188,6 +208,19 @@ python -m xenon do "save my notes to C:\notes\today.md" --expect-file C:\notes\t
 `do` exits non-zero unless verification passes. Without `--expect-title`,
 `--expect-file`, or `--expect-text` there is nothing to check afterwards, so it
 reports `status: unverified` and exits 1 even when every step ran.
+
+The common deterministic commands skip the model and its latency:
+
+```powershell
+python -m xenon do "open notepad" --yes
+python -m xenon do "switch to chrome" --yes
+python -m xenon do "search for python asyncio"
+```
+
+`open` is verified against the whole desktop (Windows may open a new app behind
+the current window) and `focus` against the foreground title. The same commands
+by voice auto-run; anything else spoken still uses the model and its approval
+rules.
 
 Open the command box:
 
@@ -271,7 +304,11 @@ Local run on 30 Oct–1 Nov 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9:
 | UIA-only observe (depth 4), after `prewarm()` | 32 ms | **24 ms** | 28 ms | 250 ms |
 | Local OCR observe, Electron window (no UIA text) | — | **~0.7 s** | — | — |
 | Full `ask` without vision, end to end | — | **210 ms** | — | — |
-| Full `ask` with Ollama `qwen2.5:7b` and OCR context | — | **10.7 s** | — | — |
+| Full `ask` with Ollama `qwen2.5:7b` and a live screen context, 220-token cap | — | **3.9–5.3 s** | — | — |
+| Ollama `qwen2.5:7b`, first request after an idle unload | **15.9 s** | — | — | — |
+| Ollama `qwen2.5:7b`, warm with `keep_alive: "2h"` | — | **1.1 s** | — | — |
+| Deterministic `do "open notepad"` (no model) | — | **0.80 s** | — | — |
+| Deterministic `do "switch to notepad"` (no model) | — | **0.13 s** | — | — |
 | Memory retrieval, 500 docs | ingest 264 ms | **0.1 ms** | 0.9 ms | 100 ms |
 | Wake gate + dispatch (no audio) | — | **0.001 ms** | 0.001 ms | 5 ms |
 | Voice: 2.2 s of speech, warm Whisper `base` | model load 1.9 s | **4–6 ms** | 6 ms | — |
@@ -283,12 +320,14 @@ it before its first observation.
 
 The 210 ms `ask` figure excludes the model round trip (it was measured against a
 local stub that answers in about 3 ms) and excludes Python interpreter startup,
-which adds roughly 0.5 s to a cold `python -m xenon` invocation. The 10.7 s
-figure is a real 7B model on CPU with OCR text from an Electron window; most of it
-is model generation, not perception.
+which adds roughly 0.5 s to a cold `python -m xenon` invocation. The 3.9–5.3 s
+figures are a real 7B model on CPU with a live screen context; the 15.9 s figure
+is the same model after Ollama had unloaded it. `keep_alive` is what removes that
+cold load, and the 220-token cap stops long rambling answers.
 
-The voice number excludes microphone capture, VAD, STT, and TTS, because those
-adapters do not exist yet; it isolates the orchestration overhead Xenon owns.
+The 0.001 ms voice figure is gate + dispatch only; it excludes microphone capture,
+VAD, STT, and TTS. Those adapters now exist, but true wake-to-command latency with
+a microphone in a real room is still unmeasured.
 
 ## Planned stack
 

@@ -88,14 +88,28 @@ class FakeObserver:
 class FakeActionBackend:
     """Never touches the desktop."""
 
-    def __init__(self) -> None:
+    def __init__(self, ok: bool = True, detail: str = "") -> None:
         self.calls: list[str] = []
+        self.ok = ok
+        self.detail = detail
 
     def execute(self, action):
         self.calls.append(action.kind)
         from xenon.actions import ActionResult
 
-        return ActionResult(True, f"ran {action.kind}")
+        return ActionResult(self.ok, self.detail or f"ran {action.kind}")
+
+
+class FakeVerifier:
+    """Succeeds without reading the real foreground window."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def verify(self, goal: str):
+        from xenon.actions import Verification
+
+        return Verification(True, "fake verification")
 
 
 def run_cli(argv: list[str]) -> tuple[int, str, str]:
@@ -311,6 +325,55 @@ class AssistAcceptanceTests(unittest.TestCase):
         self.assertEqual(backend.calls, [])
         self.assertIn("cancelled", out)
 
+    def test_do_fast_path_opens_an_app_without_a_model(self) -> None:
+        backend = FakeActionBackend()
+        with mock.patch.dict(
+            os.environ, {"XENON_DB_PATH": self.db}, clear=True
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch(
+            "xenon.windows_actions.WindowsActionBackend", lambda: backend
+        ), mock.patch(
+            "xenon.windows_actions.ForegroundTitleVerifier", FakeVerifier
+        ), mock.patch(
+            "xenon.windows_actions.DesktopTitleVerifier", FakeVerifier
+        ):
+            code, out, err = run_cli(["do", "open", "notepad", "--yes"])
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("fast path: open notepad", out)
+        self.assertIn("target='notepad'", out)
+        self.assertIn("status: succeeded", out)
+        self.assertEqual(backend.calls, ["open_app"])
+
+    def test_do_fast_path_dry_run_runs_nothing(self) -> None:
+        backend = FakeActionBackend()
+        with mock.patch.dict(
+            os.environ, {"XENON_DB_PATH": self.db}, clear=True
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch(
+            "xenon.windows_actions.WindowsActionBackend", lambda: backend
+        ):
+            code, out, err = run_cli(["do", "open", "notepad", "--dry-run"])
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("fast path:", out)
+        self.assertEqual(backend.calls, [])
+
+    def test_do_fast_path_searches_without_a_model(self) -> None:
+        from xenon.websearch import SearchResult
+
+        def fake_search(query: str, limit: int = 5):
+            return [SearchResult("Python docs", "https://docs.python.org/3/", "Tutorial.")]
+
+        with mock.patch.dict(
+            os.environ, {"XENON_DB_PATH": self.db}, clear=True
+        ), mock.patch.object(cli, "is_windows", lambda: True), mock.patch.object(
+            cli.websearch, "search", fake_search
+        ):
+            code, out, err = run_cli(["do", "search", "for", "python", "asyncio"])
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("fast path:", out)
+        self.assertIn("Python docs", out)
+
     def test_model_failure_surfaces_as_a_clear_error(self) -> None:
         with mock.patch.dict(
             os.environ, self.env("http://127.0.0.1:1/v1"), clear=False
@@ -321,6 +384,46 @@ class AssistAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("error:", err)
+
+
+class VoiceFastPathTests(unittest.TestCase):
+    def test_open_and_focus_auto_run_with_an_injected_backend(self) -> None:
+        backend = FakeActionBackend()
+
+        self.assertEqual(
+            cli._voice_fast_reply("open calculator", backend=backend),
+            "Opened Calculator.",
+        )
+        self.assertEqual(
+            cli._voice_fast_reply("switch to chrome", backend=backend),
+            "Switched to chrome.",
+        )
+        self.assertEqual(backend.calls, ["open_app", "focus_window"])
+
+    def test_a_failed_action_is_reported_plainly(self) -> None:
+        backend = FakeActionBackend(ok=False, detail="no window matching 'chrome'")
+
+        reply = cli._voice_fast_reply("switch to chrome", backend=backend)
+
+        self.assertIn("Couldn't", reply)
+        self.assertIn("chrome", reply)
+
+    def test_search_speaks_the_top_result(self) -> None:
+        from xenon.websearch import SearchResult
+
+        def fake_search(query: str, limit: int = 1):
+            self.assertEqual(query, "example")
+            return [SearchResult("Example", "https://example.com", "A useful page.")]
+
+        reply = cli._voice_fast_reply("google example", search_fn=fake_search)
+
+        self.assertIn("Example", reply)
+        self.assertIn("A useful page.", reply)
+
+    def test_a_model_question_is_not_a_fast_path(self) -> None:
+        self.assertIsNone(
+            cli._voice_fast_reply("write a short summary", backend=FakeActionBackend())
+        )
 
 
 if __name__ == "__main__":

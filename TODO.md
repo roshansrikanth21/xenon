@@ -38,6 +38,10 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Add microphone selection (`--mic`, `XENON_MIC_DEVICE`), a VAD threshold knob, and ignored-utterance feedback.
 - [x] Make answers task-oriented: lead with a concrete next step instead of narrating the window.
 - [x] Add `search` (DuckDuckGo, no key) and fix `open_app`/`focus_window` races so real desktop actions complete.
+- [x] Add a deterministic fast path for open/focus/search so common commands skip the model entirely.
+- [x] Auto-run deterministic open/focus/search by voice; keep typing, key presses, and file writes approval-bound.
+- [x] Cap output tokens (`XENON_MAX_TOKENS`, default 220), send `keep_alive` to local Ollama, and warm the model at voice startup.
+- [x] Add brief spoken answers (under 45 words, no markdown or file paths read aloud).
 - [x] Add `doctor`: one read-only report for screen, model reachability, memory, voice deps, microphone, and skills.
 - [x] Implement the typed command box (`python -m xenon ui`).
 - [x] Test: every CLI command is registered and its handlers are reachable.
@@ -47,7 +51,7 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [ ] Benchmark true wake-to-command latency with microphone capture in the loop.
 - [x] Add a floating voice status indicator (listening/heard/working/speaking).
 - [ ] Add a tray icon and a global hotkey for the command box.
-- [ ] Keep the service warm so the model, microphone, and screen adapter load once.
+- [x] Keep the voice process warm: model loaded with `keep_alive`, microphone open, screen adapter prewarmed.
 
 ## Phase 3 — Memory (test first)
 
@@ -70,6 +74,7 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Test: `ask` and `do --dry-run` run end-to-end against a local stub model.
 - [x] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification (verified live: write + file-content verification, exit 0).
 - [x] Scenario: real desktop actuation opens an app and verifies the foreground title (verified live).
+- [x] Scenario: "open notepad" and "switch to notepad" run without a model and verify truthfully (verified live: 0.80 s open, 0.13 s focus).
 - [x] Scenario: `ask` reads an Electron window with empty UI Automation through local OCR and returns a next step (verified live against Ollama `qwen2.5:7b`: ~11 s, `screen via screenshot`).
 - [ ] Scenario: unplug network; local wake, screen context, and local memory still work.
 
