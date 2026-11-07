@@ -330,7 +330,8 @@ def launch(
     spawn: Callable[[list[str]], object] | None = None,
 ) -> str:
     """Start a resolved app. Returns a short human-readable detail."""
-    startfile = startfile or os.startfile
+    # Resolve ``os.startfile`` lazily: it does not exist on non-Windows, and
+    # app-id launches never need it.
     if resolved.app_id:
         command = ["explorer.exe", f"shell:AppsFolder\\{resolved.app_id}"]
         if spawn is not None:
@@ -338,11 +339,14 @@ def launch(
         else:
             subprocess.Popen(command, creationflags=_creation_flags())
         return f"launched {resolved.name} via its Start-menu app id"
+    if startfile is None and not hasattr(os, "startfile"):
+        raise OSError("os.startfile is Windows-only")
+    start = startfile or os.startfile
     if resolved.path:
-        startfile(resolved.path)
+        start(resolved.path)
         return f"launched {resolved.path}"
     if resolved.target:
-        startfile(resolved.target)
+        start(resolved.target)
         return f"launched {resolved.target}"
     raise OSError("nothing to launch")
 
