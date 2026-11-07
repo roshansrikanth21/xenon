@@ -90,7 +90,7 @@ class DoctorCheckTests(unittest.TestCase):
         check = check_model(None)
 
         self.assertEqual(check.status, WARN)
-        self.assertIn("XENON_MODEL_API_KEY", check.detail)
+        self.assertIn("GROQ_API_KEY", check.detail)
 
     def test_model_check_passes_when_the_model_is_listed(self) -> None:
         config = ChatConfig("http://127.0.0.1:11434/v1", "qwen2.5:7b", "ollama")

@@ -23,6 +23,11 @@ class ProviderPreset:
     note: str
     free: bool = True
     signup: str = ""
+    # Reasoning models (gpt-oss, Gemini 3.x) spend hidden "thinking" tokens out
+    # of the same max_tokens budget as the answer. With a short spoken-answer
+    # cap they can use it all up and return empty content, so the preset asks
+    # for the lowest effort the provider accepts. Empty means "do not send".
+    reasoning_effort: str = ""
 
 
 # Model names are the provider's current free-tier defaults at the time this
@@ -36,6 +41,7 @@ PROVIDER_PRESETS: dict[str, ProviderPreset] = {
         key_envs=("GROQ_API_KEY", "XENON_MODEL_API_KEY"),
         note="Fastest free tier for voice; low time-to-first-token.",
         signup="https://console.groq.com/keys",
+        reasoning_effort="low",
     ),
     "gemini": ProviderPreset(
         name="gemini",
@@ -44,13 +50,15 @@ PROVIDER_PRESETS: dict[str, ProviderPreset] = {
         key_envs=("GEMINI_API_KEY", "GOOGLE_API_KEY", "XENON_MODEL_API_KEY"),
         note="Strong free model and vision; generous developer tier.",
         signup="https://aistudio.google.com/apikey",
+        # Gemini 3 models cannot switch thinking off; "low" keeps it short.
+        reasoning_effort="low",
     ),
     "cerebras": ProviderPreset(
         name="cerebras",
         base_url="https://api.cerebras.ai/v1",
         model="qwen-3.8-27b",
         key_envs=("CEREBRAS_API_KEY", "XENON_MODEL_API_KEY"),
-        note="Very fast inference; free tier with rate limits.",
+        note="Very fast inference; trial credit, then paid. Check the model list.",
         signup="https://cloud.cerebras.ai",
     ),
     "openrouter": ProviderPreset(
@@ -78,6 +86,21 @@ class ModelSettings:
     model: str
     api_key: str
     provider: str = "custom"
+    reasoning_effort: str = ""
+
+
+_EFFORT_OFF = {"off", "0", "false", "no"}
+
+
+def _reasoning_effort(values: Mapping[str, str], default: str) -> str:
+    """XENON_REASONING_EFFORT overrides the preset; ``off`` sends nothing."""
+    raw = values.get("XENON_REASONING_EFFORT")
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in _EFFORT_OFF:
+        return ""
+    return value or default
 
 
 def settings_from_env(env: Mapping[str, str] | None = None) -> ModelSettings | None:
@@ -101,7 +124,11 @@ def settings_from_env(env: Mapping[str, str] | None = None) -> ModelSettings | N
     if not provider_name:
         if api_key and model:
             return ModelSettings(
-                base_url or DEFAULT_OPENAI_BASE_URL, model, api_key, "custom"
+                base_url or DEFAULT_OPENAI_BASE_URL,
+                model,
+                api_key,
+                "custom",
+                _reasoning_effort(values, ""),
             )
         return None
 
@@ -110,7 +137,11 @@ def settings_from_env(env: Mapping[str, str] | None = None) -> ModelSettings | N
         # An unlisted OpenAI-compatible endpoint is fine when fully specified.
         if api_key and model:
             return ModelSettings(
-                base_url or DEFAULT_OPENAI_BASE_URL, model, api_key, provider_name
+                base_url or DEFAULT_OPENAI_BASE_URL,
+                model,
+                api_key,
+                provider_name,
+                _reasoning_effort(values, ""),
             )
         return None
 
@@ -128,7 +159,12 @@ def settings_from_env(env: Mapping[str, str] | None = None) -> ModelSettings | N
         base_url = preset.base_url
     if not api_key or not model:
         return None
-    return ModelSettings(base_url, model, api_key, preset.name)
+    # A user who picks a non-reasoning model on a reasoning provider (for
+    # example llama-3.3-70b on Groq) would get a 400 for the effort field.
+    effort = preset.reasoning_effort if model == preset.model else ""
+    return ModelSettings(
+        base_url, model, api_key, preset.name, _reasoning_effort(values, effort)
+    )
 
 
 def key_is_set(preset: ProviderPreset, env: Mapping[str, str] | None = None) -> bool:

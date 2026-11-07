@@ -152,13 +152,25 @@ class ParserTests(unittest.TestCase):
 
     def test_missing_config_is_reported_clearly(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("XENON_MODEL_API_KEY", None)
-            os.environ.pop("XENON_MODEL_NAME", None)
+            # Auto-detection reads provider keys too, so a developer machine
+            # with GROQ_API_KEY exported must not make this test pass a config.
+            for name in (
+                "XENON_MODEL_API_KEY",
+                "XENON_MODEL_NAME",
+                "XENON_MODEL_PROVIDER",
+                "GROQ_API_KEY",
+                "GEMINI_API_KEY",
+                "GOOGLE_API_KEY",
+                "CEREBRAS_API_KEY",
+                "OPENROUTER_API_KEY",
+            ):
+                os.environ.pop(name, None)
             with mock.patch.object(cli, "is_windows", lambda: True):
                 code, _, err = run_cli(["ask", "anything"])
 
         self.assertEqual(code, 2)
-        self.assertIn("XENON_MODEL_API_KEY", err)
+        self.assertIn("GROQ_API_KEY", err)
+        self.assertIn("xenon providers", err)
 
     def test_unconfigured_notion_ingest_is_reported_clearly(self) -> None:
         env = {

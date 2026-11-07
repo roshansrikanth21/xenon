@@ -119,7 +119,7 @@ def _ask(args: argparse.Namespace) -> int:
     config = chat_config_from_env()
     if config is None:
         print(
-            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to enable answers",
+            "no model configured; export GROQ_API_KEY or GEMINI_API_KEY (or set XENON_MODEL_PROVIDER=ollama) to enable answers. See `python -m xenon providers`.",
             file=sys.stderr,
         )
         return 2
@@ -160,7 +160,7 @@ def _ui(args: argparse.Namespace) -> int:
     config = chat_config_from_env()
     if config is None:
         print(
-            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to use the command box",
+            "no model configured; export GROQ_API_KEY or GEMINI_API_KEY (or set XENON_MODEL_PROVIDER=ollama) to use the command box. See `python -m xenon providers`.",
             file=sys.stderr,
         )
         return 2
@@ -206,7 +206,7 @@ def _voice(args: argparse.Namespace) -> int:
     config = chat_config_from_env()
     if config is None:
         print(
-            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to answer by voice",
+            "no model configured; export GROQ_API_KEY or GEMINI_API_KEY (or set XENON_MODEL_PROVIDER=ollama) to answer by voice. See `python -m xenon providers`.",
             file=sys.stderr,
         )
         return 2
@@ -680,7 +680,7 @@ def _do(args: argparse.Namespace) -> int:
     config = chat_config_from_env()
     if config is None:
         print(
-            "set XENON_MODEL_API_KEY and XENON_MODEL_NAME to plan tasks",
+            "no model configured; export GROQ_API_KEY or GEMINI_API_KEY (or set XENON_MODEL_PROVIDER=ollama) to plan tasks. See `python -m xenon providers`.",
             file=sys.stderr,
         )
         return 2
@@ -722,7 +722,13 @@ def _providers(args: argparse.Namespace) -> int:
             "GROQ_API_KEY=... (or export just GROQ_API_KEY)."
         )
     else:
-        print(f"\nactive: {settings.provider} / {settings.model}")
+        effort = (
+            f" (reasoning effort: {settings.reasoning_effort})"
+            if settings.reasoning_effort
+            else ""
+        )
+        print(f"\nactive: {settings.provider} / {settings.model}{effort}")
+        print("run `python -m xenon doctor` to confirm the key and model name work")
     return 0
 
 

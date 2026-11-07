@@ -61,6 +61,13 @@ Implemented and covered by tests:
   free tier), Gemini (strongest free model), Cerebras, OpenRouter `:free`
   variants, plus local Ollama. Set `XENON_MODEL_PROVIDER` or export just the
   provider key (e.g. `GROQ_API_KEY`). GitHub Models was retired on 2026-07-30.
+  Groq's `gpt-oss-20b` and Gemini 3.x Flash are reasoning models whose hidden
+  thinking counts against `max_tokens`, so those presets send
+  `reasoning_effort: "low"` plus 1024 tokens of headroom; without it a 220-token
+  cap can come back empty. Override with `XENON_REASONING_EFFORT` (`off` to omit).
+  A short 429 is retried once; longer rate limits, bad keys, and unknown model
+  names are reported by name. `doctor` suggests a listed model when a preset
+  default has been renamed.
 - Model latency controls: `XENON_MAX_TOKENS` (default 220), an Ollama `keep_alive`
   of `2h` on loopback endpoints, and a model warm-up at voice startup. The first
   request after an idle Ollama unload was ~16 s; warm answers are ~1–3 s.

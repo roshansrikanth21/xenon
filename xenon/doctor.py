@@ -11,6 +11,7 @@ import importlib.util
 import json
 import platform
 import sys
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,16 +75,30 @@ def check_model(config: ChatConfig | None, timeout_s: float = 5.0) -> Check:
         return _check(
             "model",
             WARN,
-            "answers are disabled; set XENON_MODEL_API_KEY and XENON_MODEL_NAME",
+            "answers are disabled; export a free key such as GROQ_API_KEY or "
+            "GEMINI_API_KEY, or set XENON_MODEL_PROVIDER=ollama "
+            "(see `python -m xenon providers`)",
         )
 
     url = config.base_url.rstrip("/") + "/models"
     request = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {config.api_key}"}
+        url,
+        headers={
+            "Authorization": f"Bearer {config.api_key}",
+            "User-Agent": "xenon-assistant/0.1",
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            hint = "the API key was rejected; check the key for this provider"
+        elif error.code == 429:
+            hint = "the provider is rate limiting; try again in a moment"
+        else:
+            hint = "the endpoint answered with an error; check XENON_MODEL_BASE_URL"
+        return _check("model", FAIL, f"{url} returned HTTP {error.code}: {hint}")
     except Exception as error:
         return _check(
             "model",
@@ -94,16 +109,21 @@ def check_model(config: ChatConfig | None, timeout_s: float = 5.0) -> Check:
 
     models = payload.get("data") if isinstance(payload, dict) else None
     ids = [
-        item.get("id")
+        # Gemini's OpenAI-compatible listing prefixes ids with "models/".
+        str(item.get("id")).removeprefix("models/")
         for item in (models or [])
         if isinstance(item, dict) and item.get("id")
     ]
-    if ids and config.model not in ids:
+    if ids and config.model.removeprefix("models/") not in ids:
+        # Free-tier defaults get renamed or retired; suggest the closest names.
+        family = config.model.split("-")[0].split("/")[-1].lower()
+        similar = [model_id for model_id in ids if family and family in model_id.lower()]
+        shown = (similar or ids)[:6]
         return _check(
             "model",
             WARN,
-            f"{url} is reachable but {config.model!r} is not listed "
-            f"(available: {', '.join(ids[:5])})",
+            f"{url} is reachable but {config.model!r} is not listed; set "
+            f"XENON_MODEL_NAME to one of: {', '.join(shown)}",
         )
     return _check("model", PASS, f"{config.model} via {config.base_url}")
 
