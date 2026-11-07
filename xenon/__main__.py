@@ -811,12 +811,21 @@ def _run_actions(goal: str, actions, args: argparse.Namespace, verifier=None) ->
     return 0 if outcome.status == "succeeded" else 1
 
 
-def _voice_fast_reply(command: str, backend=None, search_fn=None) -> str | None:
-    """Run open/focus/search without a model, or return None for other tasks.
+def _voice_fast_reply(
+    command: str, backend=None, search_fn=None, music_controller=None
+) -> str | None:
+    """Run open/focus/search/music without a model, or return None otherwise.
 
-    Only these three deterministic intents auto-approve. Typing, key presses,
-    and file writes still go through the normal approval path (or the model).
+    Only these deterministic intents auto-approve. Typing, key presses, and
+    file writes still go through the normal approval path (or the model).
     """
+    from xenon import music
+
+    music_command = music.parse(command)
+    if music_command is not None:
+        controller = music_controller or music.MusicController.from_env()
+        return controller.run(music_command)
+
     fast = fastpath.parse(command)
     if fast is None:
         return None
@@ -876,6 +885,16 @@ def _do(args: argparse.Namespace) -> int:
 
     # Common commands skip the model entirely: no cold start, no planning
     # round trip. The same approval/verification rules still apply.
+    from xenon import music
+
+    music_command = music.parse(goal)
+    if music_command is not None:
+        print(f"fast path (music): {music_command.kind} {music_command.query}".rstrip())
+        if args.dry_run:
+            return 0
+        print(music.MusicController.from_env().run(music_command))
+        return 0
+
     fast = fastpath.parse(goal)
     if fast is not None and fast.kind == "search":
         print(f"fast path: {goal}")
@@ -929,6 +948,57 @@ def _do(args: argparse.Namespace) -> int:
         print("cancelled")
         return 1
     return _run_actions(goal, plan.actions, args)
+
+
+def _spotify(args: argparse.Namespace) -> int:
+    from xenon import music
+
+    if args.spotify_command == "logout":
+        print("logged out" if music.forget_tokens() else "was not logged in")
+        return 0
+    if args.spotify_command == "status":
+        tokens = music.load_tokens()
+        if tokens is None:
+            print("not logged in; run `python -m xenon spotify login`")
+            print("without a login, pause/next/previous still work through media keys")
+            return 1
+        try:
+            devices = music.SpotifyClient(tokens).devices()
+        except Exception as error:
+            print(f"logged in, but Spotify did not answer: {error}", file=sys.stderr)
+            return 1
+        print(f"logged in ({music.token_path()})")
+        if devices:
+            for device in devices:
+                marker = "*" if device.get("is_active") else " "
+                print(f"{marker} {device.get('name')} ({device.get('type')})")
+        else:
+            print("no open Spotify devices; Xenon starts the desktop app when you play")
+        return 0
+
+    client_id = (args.client_id or os.environ.get("XENON_SPOTIFY_CLIENT_ID", "")).strip()
+    redirect = os.environ.get("XENON_SPOTIFY_REDIRECT_URI", music.DEFAULT_REDIRECT)
+    if not client_id:
+        print(
+            "Spotify needs your own (free) app id once:\n"
+            "  1. Open https://developer.spotify.com/dashboard and create an app.\n"
+            f"  2. Add this Redirect URI exactly: {redirect}\n"
+            "  3. Tick 'Web API', save, and copy the Client ID.\n"
+            "  4. Run: python -m xenon spotify login --client-id <id>\n"
+            "     (or set XENON_SPOTIFY_CLIENT_ID).\n"
+            "Playback control through the API needs Spotify Premium.",
+            file=sys.stderr,
+        )
+        return 2
+    print("opening the Spotify login page in your browser...", flush=True)
+    try:
+        music.login(client_id, redirect)
+    except Exception as error:
+        print(f"login failed: {error}", file=sys.stderr)
+        return 1
+    print(f"connected. Tokens saved to {music.token_path()} (delete with `xenon spotify logout`).")
+    print('try: python -m xenon do "play my liked songs"')
+    return 0
 
 
 def _providers(args: argparse.Namespace) -> int:
@@ -1137,6 +1207,14 @@ def main(argv: list[str] | None = None) -> int:
     search = subparsers.add_parser("search", help="search the web (DuckDuckGo)")
     search.add_argument("query", nargs="+")
     search.set_defaults(handler=_search)
+
+    spotify = subparsers.add_parser("spotify", help="connect Spotify for music control")
+    spotify_commands = spotify.add_subparsers(dest="spotify_command", required=True)
+    spotify_login = spotify_commands.add_parser("login", help="one-time browser login")
+    spotify_login.add_argument("--client-id", help="your app's Client ID")
+    spotify_login.set_defaults(handler=_spotify)
+    spotify_commands.add_parser("status", help="show login and devices").set_defaults(handler=_spotify)
+    spotify_commands.add_parser("logout", help="delete saved tokens").set_defaults(handler=_spotify)
 
     providers = subparsers.add_parser(
         "providers", help="show free model providers and the active one"

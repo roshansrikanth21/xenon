@@ -284,6 +284,32 @@ sentence** — "xenon open chrome", "play my liked music xenon", "can you, xenon
 open notepad" — and saying just "Xenon" chimes and listens for the next 8 s.
 `XENON_CHIME=off` silences the chimes.
 
+### Music and Spotify
+
+Say or type it like you would to a smart speaker: "play my liked songs xenon",
+"xenon play drake", "play my gym playlist", "play some jazz", "skip", "pause",
+"what's playing". These run on the fast path, with no model involved.
+
+- **Without setup**, pause/resume/next/previous use Windows media keys, so they
+  work with Spotify or any player. "Play my liked songs" opens Liked Songs in
+  the Spotify app, but you have to press play yourself.
+- **With a one-time login**, Xenon picks *what* plays through Spotify's
+  official Web API (the same one smart speakers use):
+
+```powershell
+# 1. https://developer.spotify.com/dashboard -> Create app
+#    Redirect URI: http://127.0.0.1:8888/callback   APIs: Web API
+python -m xenon spotify login --client-id <your Client ID>
+python -m xenon spotify status
+python -m xenon do "play my liked songs"
+```
+
+Spotify only lets **Premium** accounts be controlled this way; on a free
+account Xenon says so and falls back to media keys. If no Spotify device is
+open, Xenon starts the desktop app and plays there. The tokens are stored in
+`%APPDATA%\xenon\spotify.json`; `xenon spotify logout` deletes them. The login
+uses PKCE, so there is no client secret to leak.
+
 Open the command box:
 
 ```powershell
