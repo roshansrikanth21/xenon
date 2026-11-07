@@ -262,6 +262,11 @@ takes focus, so **Screen** and **Ask** read the window you were actually using.
   screen — Ask, Voice, Screen, Search, Expand (chat history), Close.
 - **Click** the orb to ask; **right-click** toggles voice; **drag** to move
   (the position is remembered in `%APPDATA%\xenon\orb.json`).
+- **Hotkeys** from anywhere: **Ctrl+Alt+X** opens Ask, **Ctrl+Alt+V** toggles
+  voice. If another app owns a combo, the terminal says so.
+- **Start at sign-in** with no console window: `python -m xenon orb --startup on`
+  (`off` removes it). The startup copy only sees keys saved with `setx`, for
+  example `setx GROQ_API_KEY "gsk_..."`, not ones set in a single terminal.
 - Ask runs the fast path first, so "open chrome" works without a model.
 
 Each state has its own motion, not just its own colour, so you can tell what it

@@ -323,5 +323,72 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(shorten("one two three four", 10), "one two…")
 
 
+def _can_open_orb() -> bool:
+    import sys
+
+    return Worker is not None and sys.platform == "win32"
+
+
+@unittest.skipUnless(_can_open_orb(), "needs a Windows desktop")
+class OrbAppTests(unittest.TestCase):
+    """Drives the real window with fake backends (no model, no network)."""
+
+    def make(self, backend):
+        import time as _time
+
+        from xenon import orb
+
+        import tkinter
+
+        try:
+            app = orb.OrbApp(lambda: backend, None)
+        except tkinter.TclError as error:  # no interactive desktop
+            self.skipTest(f"Tk unavailable: {error}")
+        if app._hotkeys is not None:  # don't fight a running orb for the keys
+            app._hotkeys.stop()
+            app._hotkeys = None
+
+        def pump(seconds=1.0):
+            end = _time.time() + seconds
+            while _time.time() < end:
+                app.root.update()
+                _time.sleep(0.02)
+
+        self.addCleanup(lambda: (app._worker.stop(1), app.window.close(), app.root.destroy()))
+        return app, pump
+
+    def test_a_failing_job_shows_an_error_card_with_the_reason(self) -> None:
+        class Broken:
+            def screen(self):
+                raise RuntimeError("No model configured. test")
+
+            def close(self):
+                pass
+
+        app, pump = self.make(Broken())
+        app._run_screen()
+        pump(1.0)
+        self.assertEqual(app.model.state, "error")
+        self.assertTrue(app.panel.visible)
+        self.assertIn("No model configured", app.panel.text.get("1.0", "end"))
+
+    def test_search_results_render_as_links(self) -> None:
+        class Searcher:
+            def search(self, query):
+                return [OrbLinkType("Result one", "https://example.com/1", "snippet")]
+
+            def close(self):
+                pass
+
+        from xenon.orb import OrbLink as OrbLinkType
+
+        app, pump = self.make(Searcher())
+        app._run_search("anything")
+        pump(1.0)
+        self.assertTrue(app.panel.visible)
+        self.assertIn("Result one", app.panel.text.get("1.0", "end"))
+        self.assertIn(app.model.state, {"idle", "searching"})
+
+
 if __name__ == "__main__":
     unittest.main()

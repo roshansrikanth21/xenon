@@ -57,7 +57,9 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Add a floating voice status indicator (listening/heard/working/speaking).
 - [x] Add the floating orb (`xenon orb`): layered window, hover fan, per-state motion, chimes.
 - [x] Accept the wake word anywhere in the sentence ("play my liked music xenon").
-- [ ] Add a tray icon and a global hotkey for the command box.
+- [x] Add global hotkeys (Ctrl+Alt+X ask, Ctrl+Alt+V voice) and start-at-sign-in for the orb.
+- [x] Add music control: media keys plus the official Spotify Web API (`xenon spotify login`).
+- [ ] Add a tray icon.
 - [x] Keep the voice process warm: model loaded with `keep_alive`, microphone open, screen adapter prewarmed.
 
 ## Phase 3 — Memory (test first)

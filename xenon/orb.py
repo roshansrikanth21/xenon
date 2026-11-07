@@ -28,7 +28,15 @@ from ctypes import wintypes
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
-from xenon.orb_model import CENTER, WINDOW, OrbModel, fan_direction
+from xenon.orb_model import (
+    CENTER,
+    ORB_RADIUS,
+    SATELLITE_DISTANCE,
+    SATELLITE_RADIUS,
+    WINDOW,
+    OrbModel,
+    fan_direction,
+)
 from xenon.orb_render import OrbRenderer, premultiplied_bgra
 
 # ----------------------------------------------------------------- Win32 --
@@ -294,9 +302,74 @@ class Worker:
             except Exception:
                 pass
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 3.0) -> None:
         self._jobs.put(None)
-        self._thread.join(timeout=3)
+        self._thread.join(timeout=timeout)
+
+
+# ---------------------------------------------------------------- hotkeys --
+
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_NOREPEAT = 0x4000
+WM_HOTKEY = 0x0312
+WM_QUIT = 0x0012
+# Ctrl+Alt+X summons Ask, Ctrl+Alt+V toggles voice.
+DEFAULT_HOTKEYS: dict[str, tuple[int, int]] = {
+    "ask": (MOD_CONTROL | MOD_ALT, ord("X")),
+    "voice": (MOD_CONTROL | MOD_ALT, ord("V")),
+}
+
+
+class GlobalHotkeys:
+    """System-wide hotkeys on their own thread (RegisterHotKey + a message loop).
+
+    ``on_press(key)`` runs on that thread, so callers should hop to Tk with
+    ``OrbApp.post``. Keys another program already owns are reported in
+    ``failed`` instead of raising.
+    """
+
+    def __init__(self, on_press: Callable[[str], None],
+                 keys: dict[str, tuple[int, int]] | None = None) -> None:
+        self._on_press = on_press
+        self._keys = dict(keys or DEFAULT_HOTKEYS)
+        self.failed: list[str] = []
+        self._thread_id = 0
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="xenon-hotkeys")
+        self._thread.start()
+        self._ready.wait(2)
+
+    def _run(self) -> None:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+        user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+        self._thread_id = kernel32.GetCurrentThreadId()
+        ids: dict[int, str] = {}
+        for index, (name, (mods, vk)) in enumerate(self._keys.items(), start=1):
+            if user32.RegisterHotKey(None, index, mods | MOD_NOREPEAT, vk):
+                ids[index] = name
+            else:
+                self.failed.append(name)
+        self._ready.set()
+        message = wintypes.MSG()
+        try:
+            while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+                if message.message == WM_HOTKEY and message.wParam in ids:
+                    try:
+                        self._on_press(ids[message.wParam])
+                    except Exception:
+                        pass
+        finally:
+            for index in ids:
+                user32.UnregisterHotKey(None, index)
+
+    def stop(self) -> None:
+        if self._thread_id:
+            ctypes.windll.user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+            self._thread.join(timeout=1)
 
 
 # ---------------------------------------------------------------- panels --
@@ -599,8 +672,31 @@ class OrbApp:
         self.root.bind("<ButtonRelease-1>", self._on_release)
         self.root.bind("<Button-3>", lambda _e: self._action("voice"))
         self.root.report_callback_exception = self._callback_error
+        self._closing = False
+        self._hotkeys: GlobalHotkeys | None = None
+        try:
+            self._hotkeys = GlobalHotkeys(lambda key: self.post(lambda: self._hotkey(key)))
+            if self._hotkeys.failed:
+                print(
+                    "hotkeys already taken by another app: " + ", ".join(self._hotkeys.failed),
+                    file=sys.stderr, flush=True,
+                )
+        except Exception as error:
+            print(f"global hotkeys unavailable: {error}", file=sys.stderr, flush=True)
         self._last = time.perf_counter()
         self._tick()
+
+    def _hotkey(self, key: str) -> None:
+        """Ctrl+Alt+X toggles the Ask pill; Ctrl+Alt+V toggles voice."""
+        if key == "ask":
+            if self.pill.visible:
+                self.pill.hide()
+                self._return_focus()
+            else:
+                self._track_foreground()  # remember the window you were in
+                self._action("ask")
+        elif key == "voice":
+            self._action("voice")
 
     def _callback_error(self, kind, value, traceback) -> None:
         # Ctrl+C in the terminal lands inside whichever Tk callback is running.
@@ -628,11 +724,16 @@ class OrbApp:
     def _accent(self) -> str:
         return _hex(self.model.colors()[1])
 
-    def _side_position(self, width: int, height: int) -> tuple[int, int]:
-        """Place a panel beside the orb, on the side facing the screen centre."""
+    def _side_position(self, width: int, height: int, clear_fan: bool = False) -> tuple[int, int]:
+        """Place a panel beside the orb, on the side facing the screen centre.
+
+        ``clear_fan`` keeps it outside the satellites' reach, so a card that
+        stays open never covers the options it shares a side with.
+        """
         orb_cx = self.x + self.size / 2
         orb_cy = self.y + self.size / 2
-        gap = int((48 + 14) * self.scale)  # orb radius + breathing room
+        reach = SATELLITE_DISTANCE + SATELLITE_RADIUS + 10 if clear_fan else ORB_RADIUS + 18
+        gap = int(reach * self.scale)
         if orb_cx > self.screen_w / 2:
             x = orb_cx - gap - width
         else:
@@ -676,6 +777,7 @@ class OrbApp:
                 callback()
             except Exception as error:
                 self.model.set_state("error", str(error))
+                print(f"orb callback failed: {error!r}", file=sys.stderr, flush=True)
 
         self._frame += 1
         if self._frame % 6 == 0:
@@ -791,7 +893,7 @@ class OrbApp:
         self.model.fold()
         self.panel.fit()
         width, height = self.panel.size()
-        self.panel.show_at(*self._side_position(width, height))
+        self.panel.show_at(*self._side_position(width, height, clear_fan=True))
 
     def _show_reply(self, title: str, question: str, reply: OrbReply, started: float) -> None:
         self._history.append((question, reply.text))
@@ -820,7 +922,7 @@ class OrbApp:
             try:
                 reply = backend.ask(text)
             except Exception as error:
-                self.post(lambda: self._show_error(str(error)))
+                self.post(lambda message=str(error): self._show_error(message))
                 return
             self.post(lambda: self._show_reply("Xenon", text, reply, started))
 
@@ -835,7 +937,7 @@ class OrbApp:
             try:
                 reply = backend.screen()
             except Exception as error:
-                self.post(lambda: self._show_error(str(error)))
+                self.post(lambda message=str(error): self._show_error(message))
                 return
             self.post(lambda: self._show_reply("On your screen", "(screen)", reply, started))
 
@@ -850,7 +952,7 @@ class OrbApp:
             try:
                 results = backend.search(query)
             except Exception as error:
-                self.post(lambda: self._show_error(str(error)))
+                self.post(lambda message=str(error): self._show_error(message))
                 return
             self.post(lambda: self._show_results(query, results, started))
 
@@ -947,10 +1049,20 @@ class OrbApp:
     # ----- lifecycle ----------------------------------------------------
 
     def quit(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         if self._voice_stop is not None:
             self._voice_stop.set()
+        if self._hotkeys is not None:
+            self._hotkeys.stop()
         save_position(self.x, self.y)
-        self._worker.stop()
+        # Vanish first, then clean up: closing should feel instant.
+        try:
+            self.root.withdraw()
+        except tk.TclError:
+            pass
+        self._worker.stop(timeout=1.0)
         self.window.close()
         try:
             self.root.destroy()
