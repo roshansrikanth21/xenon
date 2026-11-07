@@ -151,6 +151,47 @@ class WakeWordAnywhereTests(unittest.TestCase):
     def test_said_twice_reaches_the_model_once(self) -> None:
         self.assertEqual(self.gate.feed("xenon open chrome xenon"), "open chrome")
 
+    def test_echoed_aliases_never_become_a_command(self) -> None:
+        # Whisper can write its spelling hint back on a short clip.
+        self.assertIsNone(self.gate.feed("Xenon, zenon."))
+        self.assertTrue(self.gate.armed)
+        gate = WakeGate("xenon", aliases=("zenon", "see none"))
+        self.assertIsNone(gate.feed("zenon, zenon, zenon, see none."))
+
+
+class TrailingWakeWordTests(unittest.TestCase):
+    """The pause before a trailing name splits it into its own utterance."""
+
+    def setUp(self) -> None:
+        self.now = 0.0
+        self.gate = WakeGate("xenon", clock=lambda: self.now, lookback_s=2.5)
+
+    def test_name_right_after_a_sentence_claims_it(self) -> None:
+        self.assertIsNone(self.gate.feed("Play my liked songs."))
+        self.now += 0.8
+        self.assertEqual(self.gate.feed("Xenon."), "Play my liked songs.")
+        self.assertFalse(self.gate.armed)
+
+    def test_an_old_sentence_is_not_claimed(self) -> None:
+        self.assertIsNone(self.gate.feed("the weather is nice"))
+        self.now += 10
+        self.assertIsNone(self.gate.feed("Xenon."))
+        self.assertTrue(self.gate.armed)  # waits for the next sentence instead
+
+    def test_a_sentence_is_claimed_only_once(self) -> None:
+        self.gate.feed("pause the music")
+        self.now += 0.5
+        self.assertEqual(self.gate.feed("xenon"), "pause the music")
+        self.now += 0.5
+        self.assertIsNone(self.gate.feed("xenon"))
+
+    def test_nothing_heard_while_speaking_is_claimed(self) -> None:
+        self.gate.feed("background chatter")
+        self.gate.set_speaking(True)
+        self.gate.set_speaking(False)
+        self.now += 0.5
+        self.assertIsNone(self.gate.feed("xenon"))
+
 
 if __name__ == "__main__":
     unittest.main()

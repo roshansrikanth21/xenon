@@ -12,6 +12,8 @@ import time
 from typing import Callable, Sequence
 
 DEFAULT_TTL_S = 8.0
+# A bare wake word this soon after an ignored sentence claims that sentence.
+DEFAULT_LOOKBACK_S = 2.5
 
 
 _EDGE = " \t\r\n,.;:!?-\"'"
@@ -43,12 +45,28 @@ def split_wake_word(text: str, patterns: Sequence[re.Pattern[str]]) -> str | Non
         after = text[match.end() :].lstrip(_EDGE).rstrip()
         if not after.strip(_EDGE):
             after = ""
-        # Strip a second mention ("xenon ... xenon") so it never reaches the model.
-        after = pattern.sub("", after).strip(" ,")
-        before = pattern.sub("", before).strip(_EDGE)
+        # Strip every other mention of any wake name. Whisper sometimes echoes
+        # its spelling hint ("Xenon, zenon, see none") on a short clip, and
+        # none of that may reach the model as a command.
+        for name in patterns:
+            after = name.sub("", after)
+            before = name.sub("", before)
+        after = re.sub(r"^[\s,.;:!?-]+", "", after).rstrip()
+        if not after.strip(_EDGE):
+            after = ""
+        before = before.strip(_EDGE)
         joined = " ".join(part for part in (before, after) if part)
-        return re.sub(r"\s{2,}", " ", joined)
+        joined = re.sub(r"\s+([,.;:!?])", r"\1", joined)
+        joined = re.sub(r"(?:,\s*){2,}", ", ", joined)
+        return re.sub(r"\s{2,}", " ", joined).strip(" ,")
     return None
+
+
+def strip_wake_word(text: str, wake_word: str = "xenon", aliases: Sequence[str] = ()) -> str:
+    """Typed or spoken, "play my liked songs xenon" means "play my liked songs"."""
+    patterns = [_wake_pattern(word) for word in (wake_word, *aliases) if word and word.strip()]
+    command = split_wake_word(text, patterns)
+    return text.strip() if command is None else command
 
 
 class WakeGate:
@@ -61,6 +79,7 @@ class WakeGate:
         clock: Callable[[], float] | None = None,
         aliases: Sequence[str] = (),
         always: bool = False,
+        lookback_s: float = DEFAULT_LOOKBACK_S,
     ) -> None:
         self._wake_word = wake_word.strip()
         self._aliases = tuple(aliases)
@@ -77,6 +96,8 @@ class WakeGate:
         self._armed_at: float | None = None
         self._speaking = False
         self._always = always
+        self._lookback_s = lookback_s
+        self._last_ignored: tuple[str, float] | None = None
 
     @property
     def always(self) -> bool:
@@ -95,6 +116,7 @@ class WakeGate:
         self._speaking = speaking
         if speaking:
             self._armed_at = None
+            self._last_ignored = None
 
     def feed(self, transcript: str) -> str | None:
         if self._speaking:
@@ -115,16 +137,26 @@ class WakeGate:
                 return text
             return command or None
 
+        now = self._clock()
         if command is not None:
-            # The wake word on its own arms the next utterance instead of being
-            # dispatched as a command.
             if not command:
-                self._armed_at = self._clock()
+                # "Play my liked songs, ... Xenon." The pause before the name
+                # ends the first utterance, so the name arrives on its own a
+                # moment after the command it belongs to: use that sentence.
+                previous = self._last_ignored
+                self._last_ignored = None
+                if previous is not None and now - previous[1] <= self._lookback_s:
+                    self._armed_at = None
+                    return previous[0]
+                # Otherwise the name on its own arms the next utterance.
+                self._armed_at = now
                 return None
             self._armed_at = None
+            self._last_ignored = None
             return command
 
         if self._armed_at is None:
+            self._last_ignored = (text, now)
             return None
         if self._clock() - self._armed_at > self._ttl_s:
             self._armed_at = None

@@ -115,7 +115,7 @@ def _ask(args: argparse.Namespace) -> int:
         print("xenon ask requires Windows for screen context", file=sys.stderr)
         return 2
 
-    question = " ".join(args.question).strip()
+    question = _without_wake(" ".join(args.question))
     config = chat_config_from_env()
     if config is None:
         print(
@@ -324,7 +324,7 @@ def _voice(args: argparse.Namespace) -> int:
             os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
             initial_prompt=os.environ.get(
                 "XENON_WHISPER_PROMPT",
-                f"{wake_word.capitalize()}, {', '.join(aliases)}.",
+                _whisper_hint(wake_word),
             ),
             beam_size=beam_size,
         )
@@ -405,7 +405,7 @@ def _voice(args: argparse.Namespace) -> int:
             os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
             initial_prompt=os.environ.get(
                 "XENON_WHISPER_PROMPT",
-                f"{wake_word.capitalize()}, {', '.join(aliases)}.",
+                _whisper_hint(wake_word),
             ),
             beam_size=beam_size,
         )
@@ -545,6 +545,7 @@ class _OrbBackend:
     def ask(self, text: str):
         from xenon.orb import OrbReply
 
+        text = _without_wake(text)
         fast = _voice_fast_reply(text)
         if fast is not None:
             return OrbReply(fast, note="fast path")
@@ -621,7 +622,7 @@ def _orb_voice_runner(config):
             os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
             os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
             initial_prompt=os.environ.get(
-                "XENON_WHISPER_PROMPT", f"{wake_word.capitalize()}, {', '.join(aliases)}."
+                "XENON_WHISPER_PROMPT", _whisper_hint(wake_word)
             ),
             beam_size=env_number("XENON_WHISPER_BEAM", 1, int),
         )
@@ -898,6 +899,7 @@ def _voice_fast_reply(
     """
     from xenon import music
 
+    command = _without_wake(command)
     music_command = music.parse(command)
     if music_command is not None:
         controller = music_controller or music.MusicController.from_env()
@@ -944,6 +946,24 @@ def _voice_fast_reply(
     return f"Couldn't do that: {outcome.detail or 'the action failed'}"
 
 
+def _without_wake(text: str) -> str:
+    """Drop the wake word from typed requests too ("open chrome xenon")."""
+    from xenon.wake import strip_wake_word
+
+    aliases = tuple(
+        part.strip()
+        for part in os.environ.get("XENON_WAKE_ALIASES", "").split(",")
+        if part.strip()
+    )
+    return strip_wake_word(text, os.environ.get("XENON_WAKE_WORD", "xenon"), aliases)
+
+
+def _whisper_hint(wake_word: str) -> str:
+    """Spelling hint for Whisper. Listing aliases here made it echo them back
+    on short clips ("Xenon, zenon, see none."), so it is just the name."""
+    return f"Hey {wake_word.capitalize()}."
+
+
 def _speakable(text: str) -> str:
     """Drop markdown punctuation that sounds wrong through SAPI."""
     cleaned = re.sub(r"[`*_#>|~]", " ", text)
@@ -955,7 +975,7 @@ def _do(args: argparse.Namespace) -> int:
         print("xenon do requires Windows", file=sys.stderr)
         return 2
 
-    goal = " ".join(args.goal).strip()
+    goal = _without_wake(" ".join(args.goal))
     if not goal:
         print("do needs a goal", file=sys.stderr)
         return 2

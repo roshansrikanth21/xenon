@@ -426,7 +426,7 @@ class MusicController:
         self,
         client: SpotifyClient | None = None,
         media_key: Callable[[int], bool] = press_media_key,
-        open_uri: Callable[[str], None] | None = None,
+        open_uri: Callable[[str], object] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._client = client
@@ -465,20 +465,24 @@ class MusicController:
         if kind == "previous":
             return "Going back." if self._media_key(VK_MEDIA_PREV_TRACK) else "Media keys are unavailable."
         if kind == "liked":
-            self._open_uri("spotify:collection:tracks")
+            where = self._where(self._open_uri("spotify:collection:tracks"))
             return (
-                "I opened your Liked Songs in Spotify; press play. Run "
+                f"I opened your Liked Songs in {where}; press play. Run "
                 "`python -m xenon spotify login` once and I'll start it myself."
             )
         if kind == "play":
-            self._open_uri("spotify:search:" + urllib.parse.quote(command.query))
+            where = self._where(self._open_uri("spotify:search:" + urllib.parse.quote(command.query)))
             return (
-                f"I searched Spotify for {command.query}. Log in with "
+                f"I searched {where} for {command.query}. Log in with "
                 "`python -m xenon spotify login` and I'll play it directly."
             )
         if kind == "now":
             return "Log in with `python -m xenon spotify login` and I can tell you what's playing."
         return "I can't do that with music yet."
+
+    @staticmethod
+    def _where(opened: object) -> str:
+        return "the Spotify web player" if opened == "web" else "Spotify"
 
     # --- logged in: Web API ------------------------------------------------
 
@@ -576,7 +580,7 @@ class MusicController:
         devices = client.devices()
         if not devices:
             self._open_uri("spotify:")
-            for _ in range(16):
+            for _ in range(30):
                 self._sleep(0.5)
                 devices = client.devices()
                 if devices:
@@ -587,10 +591,47 @@ class MusicController:
         return preferred[0].get("id")
 
 
-def _open_uri(uri: str) -> None:
-    if sys.platform == "win32":
-        os.startfile(uri)  # type: ignore[attr-defined]
-    else:  # pragma: no cover - Windows-first project
-        import webbrowser
+def spotify_app_installed() -> bool:
+    """True when the desktop app (classic or Store) handles spotify: links.
 
-        webbrowser.open(uri)
+    A leftover ``HKCR/spotify`` key without an open command is common after
+    an uninstall, and opening a link then silently does nothing.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"spotify\shell\open\command") as key:
+            if str(winreg.QueryValue(key, None)).strip():
+                return True
+    except OSError:
+        pass
+    candidates = (
+        os.path.join(os.environ.get("APPDATA", ""), "Spotify", "Spotify.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps", "Spotify.exe"),
+    )
+    return any(os.path.exists(path) for path in candidates)
+
+
+def web_url(uri: str) -> str:
+    """The open.spotify.com page for a spotify: link."""
+    if uri.startswith("spotify:search:"):
+        return "https://open.spotify.com/search/" + uri[len("spotify:search:"):]
+    if uri == "spotify:collection:tracks":
+        return "https://open.spotify.com/collection/tracks"
+    parts = uri.split(":")
+    if len(parts) == 3 and parts[1] in {"track", "album", "artist", "playlist"}:
+        return f"https://open.spotify.com/{parts[1]}/{parts[2]}"
+    return "https://open.spotify.com/"
+
+
+def _open_uri(uri: str) -> str:
+    """Open in the desktop app if installed, else the web player. Says where."""
+    if sys.platform == "win32" and spotify_app_installed():
+        os.startfile(uri)  # type: ignore[attr-defined]
+        return "app"
+    import webbrowser
+
+    webbrowser.open(web_url(uri))
+    return "web"

@@ -222,6 +222,19 @@ class WithoutLoginTests(unittest.TestCase):
         self.ctl.run(MusicCommand("play", "blinding lights"))
         self.assertEqual(self.opened, ["spotify:search:blinding%20lights"])
 
+    def test_reply_names_the_web_player_when_the_app_is_missing(self) -> None:
+        ctl = MusicController(None, media_key=lambda c: True, open_uri=lambda uri: "web")
+        self.assertIn("web player", ctl.run(MusicCommand("liked")))
+        app = MusicController(None, media_key=lambda c: True, open_uri=lambda uri: "app")
+        self.assertNotIn("web player", app.run(MusicCommand("liked")))
+
+    def test_web_urls_match_the_app_links(self) -> None:
+        self.assertEqual(music.web_url("spotify:collection:tracks"),
+                         "https://open.spotify.com/collection/tracks")
+        self.assertEqual(music.web_url("spotify:search:a%20b"), "https://open.spotify.com/search/a%20b")
+        self.assertEqual(music.web_url("spotify:playlist:x1"), "https://open.spotify.com/playlist/x1")
+        self.assertEqual(music.web_url("spotify:"), "https://open.spotify.com/")
+
 
 class OAuthTests(unittest.TestCase):
     def test_pkce_challenge_is_s256_of_the_verifier(self) -> None:
@@ -261,6 +274,14 @@ class FastReplyTests(unittest.TestCase):
         ctl = MusicController(None, media_key=lambda c: keys.append(c) or True, open_uri=lambda u: None)
         self.assertEqual(_voice_fast_reply("skip this song", music_controller=ctl), "Skipped.")
         self.assertEqual(keys, [VK_MEDIA_NEXT_TRACK])
+
+    def test_typed_wake_word_is_stripped_before_parsing(self) -> None:
+        from xenon.__main__ import _voice_fast_reply
+
+        opened = []
+        ctl = MusicController(None, media_key=lambda c: True, open_uri=lambda u: opened.append(u) or "web")
+        _voice_fast_reply("play my liked songs xenon", music_controller=ctl)
+        self.assertEqual(opened, ["spotify:collection:tracks"])
 
 
 if __name__ == "__main__":

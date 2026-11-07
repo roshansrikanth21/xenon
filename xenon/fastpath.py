@@ -121,6 +121,10 @@ _NOT_APPS = frozenset(
 
 _WAKE_PREFIX = r"(?:(?:hey\s+)?xenon[,\s]+)?"
 
+_POLITE_RE = re.compile(
+    r"^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+|(?:i\s+want\s+you\s+to|i\s+need\s+you\s+to)\s+)",
+    flags=re.IGNORECASE,
+)
 _OPEN_RE = re.compile(
     rf"^{_WAKE_PREFIX}(?:please\s+)?(?:open|launch|start|run)\s+"
     r"(?P<app>[a-z0-9][a-z0-9 .+#&:_'-]{0,40}?)[.!?]*$",
@@ -169,6 +173,9 @@ class FastCommand:
 def parse(text: str) -> FastCommand | None:
     """Return a deterministic command for a short, unambiguous request."""
     phrase = " ".join(text.strip().split())
+    # "Can you open calculator?" is the same request as "open calculator".
+    phrase = _POLITE_RE.sub("", phrase)
+    phrase = re.sub(r"\s+(?:please|for me)(?=[.!?]*$)", "", phrase, flags=re.IGNORECASE)
     if not phrase:
         return None
 

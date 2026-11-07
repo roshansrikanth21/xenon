@@ -111,5 +111,21 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(action.target, "chrome")
 
 
+class PoliteRequestTests(unittest.TestCase):
+    def test_can_you_and_please_are_ignored(self) -> None:
+        for text in (
+            "Can you open calculator?",
+            "could you please open calculator",
+            "open calculator please",
+            "I need you to open calculator",
+        ):
+            command = fastpath.parse(text)
+            self.assertIsNotNone(command, text)
+            self.assertEqual(command.target, "calc", text)
+
+    def test_a_polite_compound_task_still_goes_to_the_model(self) -> None:
+        self.assertIsNone(fastpath.parse("can you open my email and reply"))
+
+
 if __name__ == "__main__":
     unittest.main()
