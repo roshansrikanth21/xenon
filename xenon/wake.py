@@ -31,6 +31,7 @@ class WakeGate:
         ttl_s: float = DEFAULT_TTL_S,
         clock: Callable[[], float] | None = None,
         aliases: Sequence[str] = (),
+        always: bool = False,
     ) -> None:
         self._wake_word = wake_word.strip()
         self._aliases = tuple(aliases)
@@ -39,10 +40,18 @@ class WakeGate:
             for word in (self._wake_word, *aliases)
             if word and word.strip()
         ]
+        self._names = {
+            word.lower() for word in (self._wake_word, *aliases) if word.strip()
+        }
         self._ttl_s = ttl_s
         self._clock = clock if clock is not None else time.monotonic
         self._armed_at: float | None = None
         self._speaking = False
+        self._always = always
+
+    @property
+    def always(self) -> bool:
+        return self._always
 
     @property
     def armed(self) -> bool:
@@ -65,6 +74,19 @@ class WakeGate:
         text = transcript.strip()
         if not text:
             return None
+
+        if self._always:
+            # Hands-free mode: any complete sentence is the command. A spoken
+            # wake word is still accepted and stripped, so both habits work.
+            for pattern in self._patterns:
+                match = pattern.match(text)
+                if match is None:
+                    continue
+                command = match.group("rest").strip(" \t,.;:-")
+                if not command or command.lower() in self._names:
+                    return None
+                return command
+            return text
 
         match = None
         for pattern in self._patterns:

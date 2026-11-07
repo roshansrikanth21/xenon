@@ -231,7 +231,35 @@ def _voice(args: argparse.Namespace) -> int:
     if vad_threshold is None:
         vad_threshold = 0.015
 
-    beam_size = 3
+    silence_ms = getattr(args, "silence_ms", None)
+    if silence_ms is None:
+        raw_silence = os.environ.get("XENON_SILENCE_MS")
+        if raw_silence is not None:
+            try:
+                silence_ms = int(raw_silence)
+            except (TypeError, ValueError):
+                silence_ms = None
+    if silence_ms is None:
+        silence_ms = 350
+    silence_ms = min(max(silence_ms, 120), 2000)
+
+    # Hands-free is the default: the microphone stays open and a sentence is
+    # dispatched as soon as it is followed by a short silence. ``--wake`` (or
+    # XENON_WAKE_MODE=wake) restores the wake-word requirement.
+    always = os.environ.get("XENON_WAKE_MODE", "always").strip().lower() != "wake"
+    if getattr(args, "always", False):
+        always = True
+    if getattr(args, "wake", False):
+        always = False
+    if os.environ.get("XENON_ALWAYS_LISTEN", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        always = True
+
+    beam_size = 1
     raw_beam = os.environ.get("XENON_WHISPER_BEAM")
     if raw_beam is not None:
         try:
@@ -287,9 +315,11 @@ def _voice(args: argparse.Namespace) -> int:
             print(f"speech output unavailable: {error}", file=sys.stderr)
             return 1
         source = MicrophoneSource(device=mic_device)
-        detector = UtteranceDetector(threshold=vad_threshold, min_speech_ms=300)
+        detector = UtteranceDetector(
+            threshold=vad_threshold, silence_ms=silence_ms, min_speech_ms=200
+        )
         transcriber = WhisperTranscriber(
-            os.environ.get("XENON_WHISPER_MODEL", "base"),
+            os.environ.get("XENON_WHISPER_MODEL", "base.en"),
             os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
             os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
             initial_prompt=os.environ.get(
@@ -305,13 +335,16 @@ def _voice(args: argparse.Namespace) -> int:
                 "model warm-up failed; the first answer may be slow or fail",
                 file=sys.stderr,
             )
+        from xenon.apps import default_catalog
+
+        default_catalog().prewarm()
         store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
         assistant = Assistant(
             _observer(),
             store,
             model,
-            max_memories=3,
-            max_context_chars=2500,
+            max_memories=2,
+            max_context_chars=1800,
         )
 
         def handle(command: str) -> str:
@@ -331,12 +364,13 @@ def _voice(args: argparse.Namespace) -> int:
             return text
 
         loop = VoiceLoop(
-            gate=WakeGate(wake_word, aliases=aliases),
+            gate=WakeGate(wake_word, aliases=aliases, always=always),
             transcribe=transcribe,
             speak=speaker.speak,
             on_command=handle,
         )
-        print(f"listening for {wake_word!r}; press Ctrl+C to stop", flush=True)
+        mode = "always listening" if always else f"wake word: {wake_word}"
+        print(f"{mode}; press Ctrl+C to stop", flush=True)
         try:
             while True:
                 loop.tick()
@@ -362,9 +396,11 @@ def _voice(args: argparse.Namespace) -> int:
             stop_event.set()
             return
         source = MicrophoneSource(device=mic_device)
-        detector = UtteranceDetector(threshold=vad_threshold, min_speech_ms=300)
+        detector = UtteranceDetector(
+            threshold=vad_threshold, silence_ms=silence_ms, min_speech_ms=200
+        )
         transcriber = WhisperTranscriber(
-            os.environ.get("XENON_WHISPER_MODEL", "base"),
+            os.environ.get("XENON_WHISPER_MODEL", "base.en"),
             os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
             os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
             initial_prompt=os.environ.get(
@@ -385,13 +421,18 @@ def _voice(args: argparse.Namespace) -> int:
                 "model warm-up failed; the first answer may be slow or fail",
                 file=sys.stderr,
             )
+        from xenon.apps import default_catalog
+
+        if ind is not None:
+            ind.set("working", "indexing apps")
+        default_catalog().prewarm()
         store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
         assistant = Assistant(
             _observer(),
             store,
             model,
-            max_memories=3,
-            max_context_chars=2500,
+            max_memories=2,
+            max_context_chars=1800,
         )
 
         def handle(command: str) -> str:
@@ -413,17 +454,13 @@ def _voice(args: argparse.Namespace) -> int:
         def transcribe() -> str | None:
             ind = _ind()
             if ind is not None:
-                ind.set("listening", "")
+                ind.set("listening", "always listening" if always else f"wake word: {wake_word}")
             text = listen_once(source, detector, transcriber)
             if text:
                 print(f"heard: {text!r}", flush=True)
                 ind = _ind()
                 if ind is not None:
                     ind.set("heard", text)
-                lowered = text.lower()
-                wake_words = [wake_word, *aliases]
-                if not any(lowered.startswith(word.lower()) for word in wake_words if word):
-                    print(f"ignored (no wake word): {text!r}", flush=True)
             return text
 
         def speak(text: str) -> None:
@@ -433,15 +470,19 @@ def _voice(args: argparse.Namespace) -> int:
             speaker.speak(_speakable(text))
 
         loop = VoiceLoop(
-            gate=WakeGate(wake_word, aliases=aliases),
+            gate=WakeGate(wake_word, aliases=aliases, always=always),
             transcribe=transcribe,
             speak=speak,
             on_command=handle,
         )
 
         if indicator is not None:
-            indicator.set("listening", f"wake word: {wake_word}")
-        print(f"listening for {wake_word!r}; close the status window to stop", flush=True)
+            indicator.set(
+                "listening",
+                "always listening" if always else f"wake word: {wake_word}",
+            )
+        mode = "always listening" if always else f"wake word: {wake_word}"
+        print(f"{mode}; close the status window to stop", flush=True)
         try:
             while not stop_event.is_set():
                 loop.tick()
@@ -662,6 +703,60 @@ def _do(args: argparse.Namespace) -> int:
     return _run_actions(goal, plan.actions, args)
 
 
+def _providers(args: argparse.Namespace) -> int:
+    from xenon.providers import PROVIDER_PRESETS, key_is_set, settings_from_env
+
+    settings = settings_from_env()
+    for preset in PROVIDER_PRESETS.values():
+        marker = "*" if settings is not None and settings.provider == preset.name else " "
+        ready = "key set" if key_is_set(preset) else ", ".join(preset.key_envs)
+        print(f"{marker} {preset.name:11} {preset.base_url}")
+        print(f"    model: {preset.model}")
+        print(f"    key:   {ready}")
+        print(f"    {preset.note}")
+        if preset.signup:
+            print(f"    get a key: {preset.signup}")
+    if settings is None:
+        print(
+            "\nNo provider configured. Set XENON_MODEL_PROVIDER=groq and "
+            "GROQ_API_KEY=... (or export just GROQ_API_KEY)."
+        )
+    else:
+        print(f"\nactive: {settings.provider} / {settings.model}")
+    return 0
+
+
+def _apps(args: argparse.Namespace) -> int:
+    from xenon.apps import default_catalog, launch
+
+    catalog = default_catalog()
+    query = " ".join(args.query).strip()
+    if not query:
+        entries = catalog.entries
+        print(f"{len(entries)} launchable apps discovered")
+        for entry in entries[:50]:
+            print(f"  {entry.name}")
+        if len(entries) > 50:
+            print(f"  ... and {len(entries) - 50} more")
+        return 0
+
+    resolved = catalog.resolve(query)
+    if resolved is None:
+        print(f"no app matches {query!r}")
+        return 1
+    print(f"name:   {resolved.name}")
+    print(f"source: {resolved.source}")
+    if resolved.app_id:
+        print(f"app id: {resolved.app_id}")
+    if resolved.path:
+        print(f"path:   {resolved.path}")
+    if resolved.target:
+        print(f"target: {resolved.target}")
+    if args.launch:
+        print(launch(resolved))
+    return 0
+
+
 def _notion(args: argparse.Namespace) -> int:
     env_config = notion_config_from_env()
     token = os.environ.get("XENON_NOTION_TOKEN", "")
@@ -791,15 +886,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     ui.set_defaults(handler=_ui)
 
-    voice = subparsers.add_parser("voice", help="listen for the wake word and answer aloud")
+    voice = subparsers.add_parser("voice", help="listen continuously and answer aloud")
     voice.add_argument("--mic", default=None, help="input device index or name (or set XENON_MIC_DEVICE)")
     voice.add_argument("--threshold", type=float, default=None, help="VAD energy threshold (or set XENON_VAD_THRESHOLD)")
+    voice.add_argument("--silence-ms", type=int, default=None, help="silence before dispatch (default 350; or set XENON_SILENCE_MS)")
+    voice.add_argument("--always", action="store_true", help="dispatch every sentence without a wake word (default)")
+    voice.add_argument("--wake", action="store_true", help="require the wake word again")
     voice.add_argument("--list-mics", action="store_true", help="list input devices and exit")
     voice.set_defaults(handler=_voice)
 
     search = subparsers.add_parser("search", help="search the web (DuckDuckGo)")
     search.add_argument("query", nargs="+")
     search.set_defaults(handler=_search)
+
+    providers = subparsers.add_parser(
+        "providers", help="show free model providers and the active one"
+    )
+    providers.set_defaults(handler=_providers)
+
+    apps = subparsers.add_parser(
+        "apps", help="list discovered apps or resolve one by name"
+    )
+    apps.add_argument("query", nargs="*")
+    apps.add_argument(
+        "--launch", action="store_true", help="launch the resolved app"
+    )
+    apps.set_defaults(handler=_apps)
 
     skills = subparsers.add_parser("skills", help="list or match Agent Skills")
     skill_commands = skills.add_subparsers(dest="skills_command", required=True)

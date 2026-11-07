@@ -40,6 +40,11 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Add `search` (DuckDuckGo, no key) and fix `open_app`/`focus_window` races so real desktop actions complete.
 - [x] Add a deterministic fast path for open/focus/search so common commands skip the model entirely.
 - [x] Auto-run deterministic open/focus/search by voice; keep typing, key presses, and file writes approval-bound.
+- [x] Build a real app catalog (App Paths + Start-menu `.lnk`/`.url` + `Get-StartApps`): resolve spoken aliases to app IDs, launch via `explorer.exe shell:AppsFolder\<AppID>`, cache discovery, expose `python -m xenon apps`.
+- [x] Replace launch-polling UIA enumeration with a fast Win32 title scan (open chrome 3.46 s -> 1.17 s).
+- [x] Always-listening voice: dispatch after ~350 ms silence, `--wake` to restore the wake word, `base.en` + `beam_size=1` defaults.
+- [x] Add free provider presets (Groq fastest, Gemini strongest, Cerebras, OpenRouter, Ollama) with `python -m xenon providers` and key auto-detection.
+- [x] Teach the prompts that Xenon can open apps / switch windows / search directly.
 - [x] Cap output tokens (`XENON_MAX_TOKENS`, default 220), send `keep_alive` to local Ollama, and warm the model at voice startup.
 - [x] Add brief spoken answers (under 45 words, no markdown or file paths read aloud).
 - [x] Add `doctor`: one read-only report for screen, model reachability, memory, voice deps, microphone, and skills.
@@ -75,6 +80,7 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Scenario: user says “summarize this and save it to my notes,” then approves the write and receives verification (verified live: write + file-content verification, exit 0).
 - [x] Scenario: real desktop actuation opens an app and verifies the foreground title (verified live).
 - [x] Scenario: "open notepad" and "switch to notepad" run without a model and verify truthfully (verified live: 0.80 s open, 0.13 s focus).
+- [x] Scenario: Start-menu apps (Chrome, Obsidian, Calculator) open via the app catalog and verify via Win32 titles (verified live: 1.17 s / 2.37 s / 0.85 s). Electron titles (Notion) report `unverified` rather than false success.
 - [x] Scenario: `ask` reads an Electron window with empty UI Automation through local OCR and returns a next step (verified live against Ollama `qwen2.5:7b`: ~11 s, `screen via screenshot`).
 - [ ] Scenario: unplug network; local wake, screen context, and local memory still work.
 

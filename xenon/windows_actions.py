@@ -10,6 +10,7 @@ import ctypes
 import os
 import re
 import subprocess
+import sys
 import time
 from ctypes import wintypes
 from pathlib import Path
@@ -121,16 +122,117 @@ def _default_desktop():
     return Desktop(backend="uia")
 
 
+# ---------------------------------------------------------------------------
+# Fast Win32 window-title scan
+# ---------------------------------------------------------------------------
+# ``pywinauto``'s ``Desktop(...).windows()`` walks UI Automation, which is
+# slow enough (hundreds of ms per call) that polling for a freshly launched
+# window dominated the ``open_app`` path. Top-level title enumeration through
+# ``EnumWindows`` is a few milliseconds, so we use it for launch polling and
+# desktop verification and only fall back to UI Automation when needed.
+
+_FAST_USER32 = None
+_ENUMERATED_TITLES: list[str] = []
+
+
+def _load_fast_user32():
+    global _FAST_USER32
+    if _FAST_USER32 is not None:
+        return _FAST_USER32
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    enum_windows = user32.EnumWindows
+    enum_windows.argtypes = [
+        ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM),
+        wintypes.LPARAM,
+    ]
+    enum_windows.restype = wintypes.BOOL
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [
+        wintypes.HWND,
+        ctypes.c_wchar_p,
+        ctypes.c_int,
+    ]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    _FAST_USER32 = user32
+    return user32
+
+
+def _enum_cb(hwnd, _lparam) -> bool:
+    user32 = _FAST_USER32
+    if user32 is None or not user32.IsWindowVisible(hwnd):
+        return True
+    try:
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        title = buffer.value.strip()
+        if title:
+            _ENUMERATED_TITLES.append(title)
+    except Exception:
+        return True
+    return True
+
+
+def list_window_titles(title_scanner=None) -> list[str]:
+    """Return visible top-level window titles using Win32, or ``[]``.
+
+    On non-Windows or when Win32 is unavailable this returns an empty list so
+    callers can fall back to UI Automation. ``title_scanner`` is injectable
+    for tests.
+    """
+    if title_scanner is not None:
+        return list(title_scanner())
+    if sys.platform != "win32":
+        return []
+    try:
+        user32 = _load_fast_user32()
+        _ENUMERATED_TITLES.clear()
+        callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(
+            _enum_cb
+        )
+        user32.EnumWindows(callback, 0)
+        return list(_ENUMERATED_TITLES)
+    except Exception:
+        return []
+
+
+def find_window_title(needle: str, title_scanner=None) -> str | None:
+    """Return the first top-level title containing ``needle``, or ``None``."""
+    lowered = (needle or "").lower()
+    if not lowered:
+        return None
+    for title in list_window_titles(title_scanner):
+        if lowered in title.lower():
+            return title
+    return None
+
+
 class WindowsActionBackend:
     """Executes approved actions with Win32 and UI Automation."""
 
-    def __init__(self, backend=None, desktop_factory=None) -> None:
+    def __init__(
+        self, backend=None, desktop_factory=None, catalog=None, title_scanner=None
+    ) -> None:
         self._backend = backend if backend is not None else Win32Backend()
         self._desktop_factory = (
             desktop_factory if desktop_factory is not None else _default_desktop
         )
+        self._catalog = catalog
+        self._title_scanner = title_scanner
         self._focused_title: str | None = None
         self._user32 = None
+
+    def _app_catalog(self):
+        if self._catalog is None:
+            from xenon.apps import default_catalog
+
+            self._catalog = default_catalog()
+        return self._catalog
 
     @property
     def user32(self):
@@ -181,33 +283,63 @@ class WindowsActionBackend:
         target = action.target.strip()
         if not target:
             return ActionResult(False, "open_app needs a target")
-        path = Path(target).expanduser()
-        if path.exists() or "://" in target:
-            os.startfile(str(path) if path.exists() else target)
-        else:
-            # ShellExecute resolves Start-menu app names and App Paths entries
-            # that a bare Popen cannot find. Fall back for executables on PATH.
+
+        # Prefer the app catalog: most modern apps are Start-menu entries with
+        # an app id, so os.startfile("chrome") cannot find them even though
+        # they are installed.
+        resolved = self._app_catalog().resolve(target)
+        launch_detail = ""
+        if resolved is not None:
             try:
-                os.startfile(target)
-            except OSError:
-                subprocess.Popen([target], shell=False)
+                from xenon.apps import launch
+
+                launch_detail = launch(resolved)
+            except OSError as error:
+                return ActionResult(False, f"could not launch {target!r}: {error}")
+        else:
+            path = Path(target).expanduser()
+            try:
+                if path.exists() or "://" in target:
+                    os.startfile(str(path) if path.exists() else target)
+                else:
+                    # ShellExecute resolves some names a bare Popen cannot.
+                    try:
+                        os.startfile(target)
+                    except OSError:
+                        subprocess.Popen([target], shell=False)
+            except OSError as error:
+                return ActionResult(False, f"could not launch {target!r}: {error}")
+            launch_detail = f"launched {target}"
 
         # Give the process a moment to create its window, so a following
         # focus_window step does not race the launcher. ``value`` can carry the
         # expected title fragment (for example "Calculator" for ``calc``).
+        # Poll the cheap Win32 title list first; only fall back to UI
+        # Automation when Win32 returned nothing (e.g. in tests / CI).
         deadline = time.monotonic() + 5.0
-        needle = (action.value or Path(target).stem or target).lower()
+        expected = action.value or (resolved.name if resolved else "") or Path(target).stem or target
+        needle = expected.lower()
         while time.monotonic() < deadline:
+            titles = list_window_titles(self._title_scanner)
+            for title in titles:
+                if needle and needle in title.lower():
+                    return ActionResult(True, f"{launch_detail}; window {title!r} exists")
+            if titles:
+                # Win32 can see the desktop; it is authoritative. Keep polling
+                # it instead of paying for a UI Automation walk each cycle.
+                time.sleep(0.1)
+                continue
             try:
                 desktop = self._desktop_factory()
                 for window in desktop.windows():
                     title = (getattr(window, "window_text", lambda: "")() or "").lower()
                     if needle and needle in title:
-                        return ActionResult(True, f"opened {target}")
+                        detail = f"{launch_detail}; window {title!r} exists"
+                        return ActionResult(True, detail)
             except Exception:
                 pass
-            time.sleep(0.25)
-        return ActionResult(True, f"opened {target}")
+            time.sleep(0.1)
+        return ActionResult(True, launch_detail)
 
     def _do_focus_window(self, action: Action) -> ActionResult:
         target = action.target.strip()
@@ -344,19 +476,34 @@ class DesktopTitleVerifier:
     whole desktop rather than only the foreground window.
     """
 
-    def __init__(self, expected: str, desktop_factory=None) -> None:
+    def __init__(self, expected: str, desktop_factory=None, title_scanner=None) -> None:
         self.expected = expected
         self._desktop_factory = (
             desktop_factory if desktop_factory is not None else _default_desktop
         )
+        self._title_scanner = title_scanner
+        self._injected_desktop = desktop_factory is not None
 
     def verify(self, goal: str) -> Verification:
+        expected = self.expected.lower()
+        if not self._injected_desktop:
+            try:
+                titles = list_window_titles(self._title_scanner)
+                for title in titles:
+                    if expected in title.lower():
+                        return Verification(True, f"window {title!r} exists")
+                if titles:
+                    return Verification(
+                        False, f"no window title contains {self.expected!r}"
+                    )
+            except Exception:
+                pass
         try:
             desktop = self._desktop_factory()
             windows = desktop.windows()
             for window in windows:
                 title = (getattr(window, "window_text", lambda: "")() or "")
-                if self.expected.lower() in title.lower():
+                if expected in title.lower():
                     return Verification(True, f"window {title!r} exists")
         except Exception as error:
             return Verification(False, f"could not list desktop windows: {error}")

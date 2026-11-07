@@ -12,6 +12,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable
 
+from xenon.providers import settings_from_env
+
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_TIMEOUT_S = 60.0
 # Spoken and task-first answers fit comfortably in a few hundred tokens.
@@ -68,22 +70,20 @@ def _keep_alive_from_env(base_url: str) -> str:
 
 
 def config_from_env() -> ChatConfig | None:
-    api_key = os.environ.get("XENON_MODEL_API_KEY", "")
-    model = os.environ.get("XENON_MODEL_NAME", "")
-    if not api_key or not model:
+    settings = settings_from_env()
+    if settings is None:
         return None
     try:
         timeout = float(os.environ.get("XENON_MODEL_TIMEOUT_S", DEFAULT_TIMEOUT_S))
     except ValueError:
         timeout = DEFAULT_TIMEOUT_S
-    base_url = os.environ.get("XENON_MODEL_BASE_URL", DEFAULT_BASE_URL)
     return ChatConfig(
-        base_url=base_url,
-        model=model,
-        api_key=api_key,
+        base_url=settings.base_url,
+        model=settings.model,
+        api_key=settings.api_key,
         timeout_s=timeout,
         max_tokens=_max_tokens_from_env(),
-        keep_alive=_keep_alive_from_env(base_url),
+        keep_alive=_keep_alive_from_env(settings.base_url),
     )
 
 

@@ -47,6 +47,20 @@ Implemented and covered by tests:
   These skip the model entirely, so a common command starts immediately. Voice
   auto-runs only open, focus, and search; typing, key presses, and file writes
   still require explicit approval.
+- App catalog (`xenon/apps.py`): discovers launchable apps from App Paths,
+  Start-menu shortcuts, and `Get-StartApps`. Resolves spoken aliases such as
+  `code` -> Visual Studio Code, launches Store apps via
+  `explorer.exe shell:AppsFolder\<AppID>` when no direct path exists, and
+  opens websites in the browser when no desktop client is installed. Launch
+  polling uses a fast Win32 title scan instead of UI Automation.
+- Always-listening voice by default: the microphone stays open and a sentence
+  is dispatched after ~350 ms of silence (`--silence-ms`, `XENON_SILENCE_MS`).
+  `--wake` (or `XENON_WAKE_MODE=wake`) restores the wake-word requirement.
+  Whisper runs with `beam_size = 1` and `base.en` by default.
+- Free model presets (`xenon/providers.py`, `xenon providers`): Groq (fastest
+  free tier), Gemini (strongest free model), Cerebras, OpenRouter `:free`
+  variants, plus local Ollama. Set `XENON_MODEL_PROVIDER` or export just the
+  provider key (e.g. `GROQ_API_KEY`). GitHub Models was retired on 2026-07-30.
 - Model latency controls: `XENON_MAX_TOKENS` (default 220), an Ollama `keep_alive`
   of `2h` on loopback endpoints, and a model warm-up at voice startup. The first
   request after an idle Ollama unload was ~16 s; warm answers are ~1–3 s.
@@ -57,7 +71,9 @@ Implemented and covered by tests:
 - Focus safety: `focus_window` confirms the title it actually reached, and
   `type_text`/`press_keys` refuse to run if the foreground window changed since
   that focus step. `open_app` waits for the new window so a following focus step
-  does not race the launcher.
+  does not race the launcher. Note: some Electron apps (e.g. Notion) title their
+  window by the open page, so their launch reports `unverified` even though the
+  process started — verification never claims success it cannot see.
 - Startup prewarm for the screen adapter: one throwaway foreground read drops the
   first real observation from 289 ms to 32 ms.
 - Wake gate: a bare wake word only arms the next utterance briefly, commands
@@ -97,8 +113,10 @@ Pick the entry point that matches how you want to interact:
 | Check why something is broken | `python -m xenon doctor` | full report in ~1–2 s |
 | Ask about what is on screen | `python -m xenon ask "..."` | ~1 s start, then model time |
 | Ask repeatedly without waiting | `python -m xenon ui` | model stays warm between questions |
-| Talk to it | `python -m xenon voice` | wake word, then model time |
+| Talk to it | `python -m xenon voice` | always listening; dispatch after ~350 ms silence |
 | Open an app or switch windows | `python -m xenon do "open notepad" --yes` | deterministic, no model |
+| List / resolve apps | `python -m xenon apps` / `python -m xenon apps chrome` | Start-menu + App Paths catalog |
+| See free model options | `python -m xenon providers` | Groq, Gemini, Cerebras, OpenRouter, Ollama |
 | Change the desktop | `python -m xenon do "..." --dry-run` first | plan printed, nothing run |
 | Look something up | `python -m xenon search "..."` | ~1 s, top five results |
 
@@ -308,6 +326,8 @@ Local run on 30 Oct–1 Nov 2026, Windows 11, Python 3.11.9, pywinauto 0.6.9:
 | Ollama `qwen2.5:7b`, first request after an idle unload | **15.9 s** | — | — | — |
 | Ollama `qwen2.5:7b`, warm with `keep_alive: "2h"` | — | **1.1 s** | — | — |
 | Deterministic `do "open notepad"` (no model) | — | **0.80 s** | — | — |
+| Deterministic `do "open chrome"` via app-id + Win32 title poll | — | **1.17 s** | — | — |
+| Deterministic `do "open calculator"` | — | **0.85 s** | — | — |
 | Deterministic `do "switch to notepad"` (no model) | — | **0.13 s** | — | — |
 | Memory retrieval, 500 docs | ingest 264 ms | **0.1 ms** | 0.9 ms | 100 ms |
 | Wake gate + dispatch (no audio) | — | **0.001 ms** | 0.001 ms | 5 ms |

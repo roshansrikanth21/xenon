@@ -87,5 +87,36 @@ class WakeAliasTests(unittest.TestCase):
         self.assertEqual(gate.feed("summarize this"), "summarize this")
 
 
+class AlwaysListeningTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.now = 100.0
+        self.gate = WakeGate(
+            "xenon", clock=lambda: self.now, always=True
+        )
+
+    def test_any_sentence_dispatches_without_a_wake_word(self) -> None:
+        self.assertEqual(self.gate.feed("open notepad"), "open notepad")
+
+    def test_wake_word_is_stripped_when_spoken(self) -> None:
+        self.assertEqual(self.gate.feed("xenon open notepad"), "open notepad")
+
+    def test_a_bare_wake_word_does_not_dispatch(self) -> None:
+        self.assertIsNone(self.gate.feed("xenon"))
+
+    def test_every_sentence_dispatches_until_speaking(self) -> None:
+        self.assertEqual(self.gate.feed("open chrome"), "open chrome")
+        self.assertEqual(self.gate.feed("search for cats"), "search for cats")
+
+        self.gate.set_speaking(True)
+        self.assertIsNone(self.gate.feed("open chrome"))
+
+        self.gate.set_speaking(False)
+        self.assertEqual(self.gate.feed("open chrome"), "open chrome")
+
+    def test_always_property_reports_the_mode(self) -> None:
+        self.assertTrue(self.gate.always)
+        self.assertFalse(WakeGate("xenon").always)
+
+
 if __name__ == "__main__":
     unittest.main()

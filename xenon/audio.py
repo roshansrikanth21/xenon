@@ -42,8 +42,8 @@ class UtteranceDetector:
         sample_rate: int = 16000,
         frame_ms: int = 30,
         threshold: float = 0.012,
-        silence_ms: int = 700,
-        min_speech_ms: int = 250,
+        silence_ms: int = 350,
+        min_speech_ms: int = 200,
         max_utterance_ms: int = 15000,
         pre_roll_ms: int = 300,
     ) -> None:
