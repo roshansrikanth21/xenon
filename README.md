@@ -297,7 +297,8 @@ Say or type it like you would to a smart speaker: "play my liked songs xenon",
 
 - **Without setup**, pause/resume/next/previous use Windows media keys, so they
   work with Spotify or any player. "Play my liked songs" opens Liked Songs in
-  the Spotify app, but you have to press play yourself.
+  the Spotify app, or in the open.spotify.com web player when the app isn't
+  installed, but you have to press play yourself.
 - **With a one-time login**, Xenon picks *what* plays through Spotify's
   official Web API (the same one smart speakers use):
 
@@ -354,6 +355,7 @@ Measure screen-context latency:
 python -m benchmarks.screen_latency --samples 15
 python -m benchmarks.screen_latency --samples 15 --prewarm   # as a service would run
 python -m benchmarks.voice_latency --samples 500             # gate + dispatch only
+python -m benchmarks.voice_e2e      # SAPI speaks commands -> Whisper -> wake gate -> fast path (9/9)
 ```
 
 Mirror an Obsidian vault and query it:
