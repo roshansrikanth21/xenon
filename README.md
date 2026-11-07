@@ -119,6 +119,7 @@ Pick the entry point that matches how you want to interact:
 | --- | --- | --- |
 | Check why something is broken | `python -m xenon doctor` | full report in ~1–2 s |
 | Ask about what is on screen | `python -m xenon ask "..."` | ~1 s start, then model time |
+| Keep Xenon minimized on screen | `python -m xenon orb` | floating orb; hover for options |
 | Ask repeatedly without waiting | `python -m xenon ui` | model stays warm between questions |
 | Talk to it | `python -m xenon voice` | always listening; dispatch after ~350 ms silence |
 | Open an app or switch windows | `python -m xenon do "open notepad" --yes` | deterministic, no model |
@@ -246,6 +247,42 @@ python -m xenon do "search for python asyncio"
 the current window) and `focus` against the foreground title. The same commands
 by voice auto-run; anything else spoken still uses the model and its approval
 rules.
+
+### The orb (minimized Xenon)
+
+```powershell
+python -m xenon orb
+```
+
+A floating, always-on-top circle drawn as a per-pixel-alpha layered window, so
+its glow blends with the desktop and empty pixels are click-through. It never
+takes focus, so **Screen** and **Ask** read the window you were actually using.
+
+- **Hover** it: six options fan out on the side facing the middle of the
+  screen — Ask, Voice, Screen, Search, Expand (chat history), Close.
+- **Click** the orb to ask; **right-click** toggles voice; **drag** to move
+  (the position is remembered in `%APPDATA%\xenon\orb.json`).
+- Ask runs the fast path first, so "open chrome" works without a model.
+
+Each state has its own motion, not just its own colour, so you can tell what it
+is doing at a glance:
+
+| State | Looks like | Means |
+| --- | --- | --- |
+| idle | slow breathing plasma, `XENON` | voice off |
+| standby | green mic dot, slow sonar ping, `say xenon` | mic open, waiting for its name |
+| listening | fast green ripples + live mic equaliser | taking your command |
+| got it | bright flash, a ring snaps inward, high blip | command caught |
+| thinking | three comets chasing around the rim | model is working |
+| searching | radar sweep | web search |
+| speaking | waveform across the middle | reading the answer aloud |
+| error | red with a short shake | something failed; the card says what |
+
+The orb's voice waits for the wake word by default (`XENON_WAKE_MODE=always`
+answers every sentence instead). The wake word works **anywhere in the
+sentence** — "xenon open chrome", "play my liked music xenon", "can you, xenon,
+open notepad" — and saying just "Xenon" chimes and listens for the next 8 s.
+`XENON_CHIME=off` silences the chimes.
 
 Open the command box:
 

@@ -14,12 +14,41 @@ from typing import Callable, Sequence
 DEFAULT_TTL_S = 8.0
 
 
+_EDGE = " \t\r\n,.;:!?-\"'"
+# Greetings that only lead into the wake word ("hey xenon, ...").
+_LEAD_IN = re.compile(r"(?:^|\s)(?:hey|hi|hello|ok|okay|yo)[\s,]*$", re.IGNORECASE)
+
+
 def _wake_pattern(wake_word: str) -> re.Pattern[str]:
-    words = r"\s+".join(re.escape(part) for part in wake_word.split())
-    return re.compile(
-        rf"^[^\w]*{words}\b[\s,.;:!?-]*(?P<rest>.*)$",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    """Matches the wake word as a whole word anywhere in a sentence."""
+    words = r"[\s,.-]+".join(re.escape(part) for part in wake_word.split())
+    return re.compile(rf"(?<!\w){words}(?!\w)", flags=re.IGNORECASE)
+
+
+def split_wake_word(text: str, patterns: Sequence[re.Pattern[str]]) -> str | None:
+    """Remove the wake word wherever it was said and return the command.
+
+    "xenon open chrome", "open chrome xenon" and "can you, xenon, open chrome"
+    all give "open chrome"-style commands. Returns ``None`` when the wake word
+    is absent and ``""`` when it was said on its own.
+    """
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match is None:
+            continue
+        before = text[: match.start()].rstrip(_EDGE)
+        before = _LEAD_IN.sub("", before).strip(_EDGE)
+        # Keep the sentence's own ending ("...screen?") but not punctuation
+        # that only surrounded the wake word ("open chrome, xenon.").
+        after = text[match.end() :].lstrip(_EDGE).rstrip()
+        if not after.strip(_EDGE):
+            after = ""
+        # Strip a second mention ("xenon ... xenon") so it never reaches the model.
+        after = pattern.sub("", after).strip(" ,")
+        before = pattern.sub("", before).strip(_EDGE)
+        joined = " ".join(part for part in (before, after) if part)
+        return re.sub(r"\s{2,}", " ", joined)
+    return None
 
 
 class WakeGate:
@@ -75,31 +104,21 @@ class WakeGate:
         if not text:
             return None
 
+        command = split_wake_word(text, self._patterns)
+        if command is not None and command.lower() in self._names:
+            command = ""
+
         if self._always:
             # Hands-free mode: any complete sentence is the command. A spoken
             # wake word is still accepted and stripped, so both habits work.
-            for pattern in self._patterns:
-                match = pattern.match(text)
-                if match is None:
-                    continue
-                command = match.group("rest").strip(" \t,.;:-")
-                if not command or command.lower() in self._names:
-                    return None
-                return command
-            return text
+            if command is None:
+                return text
+            return command or None
 
-        match = None
-        for pattern in self._patterns:
-            match = pattern.match(text)
-            if match is not None:
-                break
-        if match is not None:
-            command = match.group("rest").strip(" \t,.;:-")
-            lowered = command.lower()
-            # A transcript that is just the wake word or one of its aliases (with
-            # no real command after it) arms the next utterance instead of being
+        if command is not None:
+            # The wake word on its own arms the next utterance instead of being
             # dispatched as a command.
-            if not command or lowered in {w.lower() for w in (self._wake_word, *self._aliases) if w.strip()}:
+            if not command:
                 self._armed_at = self._clock()
                 return None
             self._armed_at = None

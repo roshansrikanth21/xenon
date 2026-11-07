@@ -118,5 +118,39 @@ class AlwaysListeningTests(unittest.TestCase):
         self.assertFalse(WakeGate("xenon").always)
 
 
+class WakeWordAnywhereTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gate = WakeGate("xenon", aliases=("zenon", "see none"))
+
+    def test_wake_word_at_the_end(self) -> None:
+        self.assertEqual(self.gate.feed("play my liked music xenon"), "play my liked music")
+        self.assertEqual(self.gate.feed("Play my liked music, Xenon."), "Play my liked music")
+
+    def test_wake_word_in_the_middle(self) -> None:
+        self.assertEqual(self.gate.feed("can you, xenon, open notepad"), "can you open notepad")
+
+    def test_greeting_before_the_wake_word_is_dropped(self) -> None:
+        self.assertEqual(self.gate.feed("Hey Xenon, open chrome"), "open chrome")
+        self.assertEqual(self.gate.feed("okay xenon what time is it"), "what time is it")
+
+    def test_question_mark_survives(self) -> None:
+        self.assertEqual(self.gate.feed("what is on my screen, xenon?"), "what is on my screen")
+        self.assertEqual(self.gate.feed("Zenon what is on my screen?"), "what is on my screen?")
+
+    def test_multi_word_alias_at_the_end(self) -> None:
+        self.assertEqual(self.gate.feed("what time is it see none"), "what time is it")
+
+    def test_part_of_a_longer_word_does_not_wake(self) -> None:
+        self.assertIsNone(self.gate.feed("xenonic power levels"))
+
+    def test_wake_word_alone_with_punctuation_arms(self) -> None:
+        self.assertIsNone(self.gate.feed("Xenon."))
+        self.assertTrue(self.gate.armed)
+        self.assertEqual(self.gate.feed("open chrome"), "open chrome")
+
+    def test_said_twice_reaches_the_model_once(self) -> None:
+        self.assertEqual(self.gate.feed("xenon open chrome xenon"), "open chrome")
+
+
 if __name__ == "__main__":
     unittest.main()

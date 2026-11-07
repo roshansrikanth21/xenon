@@ -1,0 +1,964 @@
+"""The minimized Xenon orb: a floating, always-on-top circle.
+
+Hover it and six options fan out from the side that faces the middle of the
+screen: Ask, Voice, Screen, Search, Expand and Close. Drag it anywhere; it
+remembers where it was.
+
+The orb is a per-pixel-alpha layered window (``UpdateLayeredWindow``), so its
+glow and antialiased edges blend with whatever is behind it, and transparent
+pixels are click-through. It never takes focus, so the window you were using
+stays the one Xenon reads when you ask about the screen.
+
+Everything that touches the model, memory or the microphone runs off the Tk
+thread; results come back through ``post``.
+"""
+from __future__ import annotations
+
+import ctypes
+import json
+import math
+import os
+import queue
+import sys
+import threading
+import time
+import tkinter as tk
+import webbrowser
+from ctypes import wintypes
+from dataclasses import dataclass, field
+from typing import Callable, Protocol
+
+from xenon.orb_model import CENTER, WINDOW, OrbModel, fan_direction
+from xenon.orb_render import OrbRenderer, premultiplied_bgra
+
+# ----------------------------------------------------------------- Win32 --
+
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_NOACTIVATE = 0x08000000
+WS_EX_TOPMOST = 0x00000008
+ULW_ALPHA = 0x00000002
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01
+DIB_RGB_COLORS = 0
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWA_BORDER_COLOR = 34
+DWMWCP_ROUND = 2
+
+# The "got it" flash stays on screen at least this long.
+HEARD_HOLD_S = 0.45
+
+PANEL_BG = "#0d111c"
+PANEL_FG = "#e6eaf5"
+PANEL_DIM = "#8b93a7"
+ENTRY_BG = "#151a28"
+
+
+class _BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [
+        ("BlendOp", ctypes.c_ubyte),
+        ("BlendFlags", ctypes.c_ubyte),
+        ("SourceConstantAlpha", ctypes.c_ubyte),
+        ("AlphaFormat", ctypes.c_ubyte),
+    ]
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+def _enable_dpi_awareness() -> None:
+    _declare_win32()
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def _dpi_scale(hwnd: int) -> float:
+    try:
+        return ctypes.windll.user32.GetDpiForWindow(hwnd) / 96.0 or 1.0
+    except Exception:
+        return 1.0
+
+
+def _toplevel_hwnd(widget: tk.Misc) -> int:
+    widget.update_idletasks()
+    hwnd = ctypes.windll.user32.GetParent(widget.winfo_id())
+    return hwnd or widget.winfo_id()
+
+
+def _round_corners(widget: tk.Misc, border: str | None = None) -> None:
+    """Win11 rounded corners and an accent border on a borderless Toplevel."""
+    try:
+        hwnd = _toplevel_hwnd(widget)
+        preference = ctypes.c_int(DWMWCP_ROUND)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(preference), 4
+        )
+        if border:
+            r, g, b = (int(border[i : i + 2], 16) for i in (1, 3, 5))
+            colorref = ctypes.c_uint(r | (g << 8) | (b << 16))
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_BORDER_COLOR, ctypes.byref(colorref), 4
+            )
+    except Exception:
+        pass
+
+
+def _declare_win32() -> None:
+    """64-bit handles overflow ctypes' default int, so declare every call."""
+    gdi, user = ctypes.windll.gdi32, ctypes.windll.user32
+    gdi.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi.CreateCompatibleDC.restype = wintypes.HDC
+    gdi.CreateDIBSection.argtypes = [
+        wintypes.HDC, ctypes.c_void_p, wintypes.UINT,
+        ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD,
+    ]
+    gdi.CreateDIBSection.restype = wintypes.HBITMAP
+    gdi.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    gdi.SelectObject.restype = wintypes.HGDIOBJ
+    gdi.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi.DeleteDC.argtypes = [wintypes.HDC]
+    user.GetDC.argtypes = [wintypes.HWND]
+    user.GetDC.restype = wintypes.HDC
+    user.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    user.GetParent.argtypes = [wintypes.HWND]
+    user.GetParent.restype = wintypes.HWND
+    user.GetForegroundWindow.restype = wintypes.HWND
+    user.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user.GetWindowLongW.restype = wintypes.LONG
+    user.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+    user.SetWindowLongW.restype = wintypes.LONG
+    user.UpdateLayeredWindow.argtypes = [
+        wintypes.HWND, wintypes.HDC, ctypes.c_void_p, ctypes.c_void_p,
+        wintypes.HDC, ctypes.c_void_p, wintypes.COLORREF, ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    user.UpdateLayeredWindow.restype = wintypes.BOOL
+
+
+class LayeredWindow:
+    """Pushes premultiplied BGRA frames to a layered window."""
+
+    def __init__(self, hwnd: int) -> None:
+        _declare_win32()
+        self.hwnd = hwnd
+        user32 = ctypes.windll.user32
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(
+            hwnd,
+            GWL_EXSTYLE,
+            style | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+        )
+        self._gdi = ctypes.windll.gdi32
+        self._user32 = user32
+        self._screen_dc = user32.GetDC(None)
+        self._mem_dc = self._gdi.CreateCompatibleDC(self._screen_dc)
+        self._bitmap = None
+        self._bits = ctypes.c_void_p()
+        self._size = (0, 0)
+        self._old = None
+
+    def _ensure_bitmap(self, width: int, height: int) -> None:
+        if self._size == (width, height) and self._bitmap:
+            return
+        if self._bitmap:
+            self._gdi.SelectObject(self._mem_dc, self._old)
+            self._gdi.DeleteObject(self._bitmap)
+        header = _BITMAPINFOHEADER()
+        header.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        header.biWidth = width
+        header.biHeight = -height  # top-down rows
+        header.biPlanes = 1
+        header.biBitCount = 32
+        header.biCompression = 0
+        self._gdi.CreateDIBSection.restype = wintypes.HBITMAP
+        self._bitmap = self._gdi.CreateDIBSection(
+            self._mem_dc, ctypes.byref(header), DIB_RGB_COLORS,
+            ctypes.byref(self._bits), None, 0,
+        )
+        self._old = self._gdi.SelectObject(self._mem_dc, self._bitmap)
+        self._size = (width, height)
+
+    def update(self, data: bytes, width: int, height: int, x: int, y: int) -> None:
+        self._ensure_bitmap(width, height)
+        ctypes.memmove(self._bits, data, len(data))
+        blend = _BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+        point = wintypes.POINT(x, y)
+        size = wintypes.SIZE(width, height)
+        source = wintypes.POINT(0, 0)
+        self._user32.UpdateLayeredWindow(
+            self.hwnd, self._screen_dc, ctypes.byref(point), ctypes.byref(size),
+            self._mem_dc, ctypes.byref(source), 0, ctypes.byref(blend), ULW_ALPHA,
+        )
+
+    def close(self) -> None:
+        try:
+            if self._bitmap:
+                self._gdi.SelectObject(self._mem_dc, self._old)
+                self._gdi.DeleteObject(self._bitmap)
+            self._gdi.DeleteDC(self._mem_dc)
+            self._user32.ReleaseDC(None, self._screen_dc)
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------- backend --
+
+
+@dataclass
+class OrbReply:
+    text: str
+    sources: list[str] = field(default_factory=list)
+    note: str = ""
+
+
+@dataclass
+class OrbLink:
+    title: str
+    url: str
+    snippet: str = ""
+
+
+class OrbBackend(Protocol):
+    def ask(self, text: str) -> OrbReply: ...
+    def screen(self) -> OrbReply: ...
+    def search(self, query: str) -> list[OrbLink]: ...
+    def close(self) -> None: ...
+
+
+@dataclass
+class VoiceHooks:
+    state: Callable[[str, str], None]
+    level: Callable[[float], None]
+    exchange: Callable[[str, str], None]
+
+
+# Builds a voice session on its own thread and runs until ``stop`` is set.
+VoiceRunner = Callable[[VoiceHooks, threading.Event], None]
+
+
+class Worker:
+    """One thread for model + memory work, so SQLite and COM stay on it."""
+
+    def __init__(self, factory: Callable[[], OrbBackend]) -> None:
+        self._factory = factory
+        self._jobs: "queue.Queue[tuple[Callable[[OrbBackend], None], Callable[[str], None]] | None]" = queue.Queue()
+        self._backend: OrbBackend | None = None
+        self.error = ""
+        self._thread = threading.Thread(target=self._run, daemon=True, name="xenon-orb-worker")
+        self._thread.start()
+
+    def submit(self, job: Callable[[OrbBackend], None], fail: Callable[[str], None]) -> None:
+        """Run ``job`` on the worker; ``fail`` gets the message if it cannot."""
+        self._jobs.put((job, fail))
+
+    def _run(self) -> None:
+        try:
+            self._backend = self._factory()
+        except Exception as error:
+            self.error = f"Xenon could not start: {error}"
+        while True:
+            item = self._jobs.get()
+            if item is None:
+                break
+            job, fail = item
+            if self._backend is None:
+                fail(self.error or "Xenon could not start")
+                continue
+            try:
+                job(self._backend)
+            except Exception as error:
+                fail(str(error))
+        if self._backend is not None:
+            try:
+                self._backend.close()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        self._jobs.put(None)
+        self._thread.join(timeout=3)
+
+
+# ---------------------------------------------------------------- panels --
+
+
+class InputPill:
+    """A one-line prompt that slides out beside the orb."""
+
+    def __init__(self, root: tk.Tk) -> None:
+        self.top = tk.Toplevel(root)
+        self.top.withdraw()
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+        self.top.configure(bg=PANEL_BG)
+        frame = tk.Frame(self.top, bg=PANEL_BG, padx=14, pady=10)
+        frame.pack(fill="both", expand=True)
+        self._icon = tk.Label(frame, text="", font=("Segoe MDL2 Assets", 12), fg="#a78bfa", bg=PANEL_BG)
+        self._icon.pack(side="left", padx=(0, 10))
+        self.entry = tk.Entry(
+            frame, font=("Segoe UI", 11), fg=PANEL_FG, bg=PANEL_BG,
+            insertbackground="#a78bfa", relief="flat", highlightthickness=0, width=34,
+        )
+        self.entry.pack(side="left", fill="x", expand=True)
+        self._hint = tk.Label(frame, text="enter", font=("Segoe UI", 8), fg=PANEL_DIM, bg=PANEL_BG)
+        self._hint.pack(side="left", padx=(8, 0))
+        self.entry.bind("<Return>", self._submit)
+        self.entry.bind("<Escape>", lambda _e: self.hide())
+        self._on_submit: Callable[[str], None] | None = None
+        self.visible = False
+        _round_corners(self.top, "#2a3150")
+
+    def fill(self, glyph: str, placeholder: str, accent: str,
+             on_submit: Callable[[str], None]) -> None:
+        """Set the content first, so ``size`` measures what will be shown."""
+        self._on_submit = on_submit
+        self._icon.config(text=glyph, fg=accent)
+        self.entry.config(insertbackground=accent)
+        self.entry.delete(0, tk.END)
+        self._hint.config(text=placeholder)
+
+    def show_at(self, x: int, y: int) -> None:
+        self.top.geometry(f"+{x}+{y}")
+        self.top.deiconify()
+        self.top.lift()
+        self.top.focus_force()
+        self.entry.focus_set()
+        self.visible = True
+
+    def size(self) -> tuple[int, int]:
+        self.top.update_idletasks()
+        return self.top.winfo_reqwidth(), self.top.winfo_reqheight()
+
+    def hide(self) -> None:
+        self.top.withdraw()
+        self.visible = False
+
+    def _submit(self, _event=None) -> None:
+        text = self.entry.get().strip()
+        if not text or self._on_submit is None:
+            return
+        self.hide()
+        self._on_submit(text)
+
+
+class AnswerPanel:
+    """A rounded card that shows an answer, search results, or a chat log."""
+
+    def __init__(self, root: tk.Tk, scale: float) -> None:
+        self.scale = scale
+        self.top = tk.Toplevel(root)
+        self.top.withdraw()
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+        self.top.configure(bg=PANEL_BG)
+        self.top.bind("<Escape>", lambda _e: self.hide())
+
+        header = tk.Frame(self.top, bg=PANEL_BG)
+        header.pack(fill="x", padx=16, pady=(12, 4))
+        self._title = tk.Label(header, text="", font=("Segoe UI Semibold", 10), fg="#c4b5fd", bg=PANEL_BG)
+        self._title.pack(side="left")
+        self._note = tk.Label(header, text="", font=("Segoe UI", 8), fg=PANEL_DIM, bg=PANEL_BG)
+        self._note.pack(side="left", padx=(8, 0))
+        close = tk.Label(header, text="", font=("Segoe MDL2 Assets", 9), fg=PANEL_DIM, bg=PANEL_BG, cursor="hand2")
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda _e: self.hide())
+        copy = tk.Label(header, text="", font=("Segoe MDL2 Assets", 9), fg=PANEL_DIM, bg=PANEL_BG, cursor="hand2")
+        copy.pack(side="right", padx=(0, 12))
+        copy.bind("<Button-1>", lambda _e: self._copy())
+
+        self.text = tk.Text(
+            self.top, wrap="word", font=("Segoe UI", 10), fg=PANEL_FG, bg=PANEL_BG,
+            relief="flat", highlightthickness=0, padx=16, pady=4, width=46, height=4,
+            cursor="arrow", spacing1=2, spacing3=4,
+        )
+        self.text.pack(fill="both", expand=True, pady=(0, 6))
+        self.text.tag_configure("dim", foreground=PANEL_DIM, font=("Segoe UI", 9))
+        self.text.tag_configure("you", foreground="#93c5fd", font=("Segoe UI Semibold", 10))
+        self.text.tag_configure("link", foreground="#7dd3fc", font=("Segoe UI Semibold", 10))
+        self.text.tag_bind("link", "<Enter>", lambda _e: self.text.config(cursor="hand2"))
+        self.text.tag_bind("link", "<Leave>", lambda _e: self.text.config(cursor="arrow"))
+
+        self._entry_row = tk.Frame(self.top, bg=ENTRY_BG, padx=12, pady=8)
+        self.entry = tk.Entry(
+            self._entry_row, font=("Segoe UI", 10), fg=PANEL_FG, bg=ENTRY_BG,
+            insertbackground="#a78bfa", relief="flat", highlightthickness=0,
+        )
+        self.entry.pack(fill="x")
+        self.entry.bind("<Escape>", lambda _e: self.hide())
+        self._chat_submit: Callable[[str], None] | None = None
+        self.entry.bind("<Return>", self._submit_chat)
+        self.visible = False
+        self.chat_mode = False
+        self._links = 0
+        _round_corners(self.top, "#2a3150")
+
+    # content
+
+    def clear(self) -> None:
+        self.text.config(state="normal")
+        self.text.delete("1.0", tk.END)
+        self._links = 0
+
+    def append(self, line: str, tag: str | None = None) -> None:
+        self.text.config(state="normal")
+        self.text.insert(tk.END, line, tag or ())
+        self.text.config(state="disabled")
+
+    def append_link(self, title: str, url: str) -> None:
+        tag = f"link{self._links}"
+        self._links += 1
+        self.text.config(state="normal")
+        self.text.insert(tk.END, title, ("link", tag))
+        self.text.tag_bind(tag, "<Button-1>", lambda _e, u=url: webbrowser.open(u))
+        self.text.config(state="disabled")
+
+    def set_header(self, title: str, note: str = "", accent: str = "#c4b5fd") -> None:
+        self._title.config(text=title, fg=accent)
+        self._note.config(text=note)
+
+    def set_chat(self, enabled: bool, on_submit: Callable[[str], None] | None = None) -> None:
+        self.chat_mode = enabled
+        self._chat_submit = on_submit
+        if enabled:
+            self._entry_row.pack(fill="x", side="bottom")
+        else:
+            self._entry_row.pack_forget()
+
+    def _submit_chat(self, _event=None) -> None:
+        text = self.entry.get().strip()
+        if text and self._chat_submit:
+            self.entry.delete(0, tk.END)
+            self._chat_submit(text)
+
+    def _copy(self) -> None:
+        body = self.text.get("1.0", tk.END).strip()
+        self.top.clipboard_clear()
+        self.top.clipboard_append(body)
+        self._note.config(text="copied")
+
+    # layout
+
+    def fit(self, max_lines: int = 14) -> None:
+        self.text.config(height=1)
+        self.top.update_idletasks()
+        try:
+            lines = int(self.text.count("1.0", "end", "displaylines")[0])
+        except Exception:
+            lines = int(self.text.index("end-1c").split(".")[0])
+        self.text.config(height=max(2, min(lines, max_lines)))
+        if self.chat_mode:
+            self.text.see(tk.END)
+
+    def size(self) -> tuple[int, int]:
+        self.top.update_idletasks()
+        return self.top.winfo_reqwidth(), self.top.winfo_reqheight()
+
+    def show_at(self, x: int, y: int) -> None:
+        self.top.geometry(f"+{x}+{y}")
+        self.top.deiconify()
+        self.top.lift()
+        self.visible = True
+        if self.chat_mode:
+            self.top.focus_force()
+            self.entry.focus_set()
+
+    def hide(self) -> None:
+        self.top.withdraw()
+        self.visible = False
+
+
+# ------------------------------------------------------------------ app --
+
+
+def _config_path() -> str:
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "xenon", "orb.json")
+
+
+def load_position() -> tuple[int, int] | None:
+    try:
+        with open(_config_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+        return int(data["x"]), int(data["y"])
+    except Exception:
+        return None
+
+
+def save_position(x: int, y: int) -> None:
+    try:
+        path = _config_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"x": x, "y": y}, handle)
+    except Exception:
+        pass
+
+
+def shorten(text: str, limit: int) -> str:
+    """Trim at a word boundary and add an ellipsis."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(",.;:")
+    return cut + "…"
+
+
+def _work_area() -> tuple[int, int, int, int]:
+    """The primary monitor minus the taskbar, in physical pixels."""
+    rect = wintypes.RECT()
+    try:
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:
+        pass
+    user = ctypes.windll.user32
+    return 0, 0, user.GetSystemMetrics(0), user.GetSystemMetrics(1)
+
+
+def _hex(color: tuple[int, int, int]) -> str:
+    return "#%02x%02x%02x" % color
+
+
+class OrbApp:
+    FPS = 30
+    GLYPHS = {"ask": "", "search": "", "screen": "", "chat": ""}
+
+    def __init__(
+        self,
+        backend_factory: Callable[[], OrbBackend],
+        voice_runner: VoiceRunner | None = None,
+    ) -> None:
+        if sys.platform != "win32":
+            raise RuntimeError("the orb needs Windows (layered windows)")
+        _enable_dpi_awareness()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.root.overrideredirect(True)
+        self.root.title("Xenon")
+        self._events: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._worker = Worker(backend_factory)
+        self._voice_runner = voice_runner
+        self._voice_stop: threading.Event | None = None
+        self._history: list[tuple[str, str]] = []
+        self._busy = False
+
+        hwnd = _toplevel_hwnd(self.root)
+        self.scale = _dpi_scale(hwnd)
+        self.size = int(round(WINDOW * self.scale))
+        self.screen_w = self.root.winfo_screenwidth()
+        self.screen_h = self.root.winfo_screenheight()
+        position = load_position()
+        if position is None or not self._on_screen(*position):
+            position = (
+                self.screen_w - self.size - int(8 * self.scale),
+                self.screen_h - self.size - int(40 * self.scale),
+            )
+        self.x, self.y = position
+        self.root.geometry(f"{self.size}x{self.size}+{self.x}+{self.y}")
+        self.root.deiconify()
+        self.root.attributes("-topmost", True)
+        self.window = LayeredWindow(_toplevel_hwnd(self.root))
+
+        self.model = OrbModel()
+        self._update_direction()
+        self.renderer = OrbRenderer(self.scale)
+        self.pill = InputPill(self.root)
+        self.panel = AnswerPanel(self.root, self.scale)
+        self._own_hwnds = {
+            self.window.hwnd, _toplevel_hwnd(self.pill.top), _toplevel_hwnd(self.panel.top)
+        }
+
+        self._last_external = 0
+        self._frame = 0
+        self._render_failed = False
+        self._drag_origin: tuple[int, int, int, int] | None = None
+        self._dragged = False
+        self._press_target: str | None = None
+        self.root.bind("<ButtonPress-1>", self._on_press)
+        self.root.bind("<B1-Motion>", self._on_drag)
+        self.root.bind("<ButtonRelease-1>", self._on_release)
+        self.root.bind("<Button-3>", lambda _e: self._action("voice"))
+        self.root.report_callback_exception = self._callback_error
+        self._last = time.perf_counter()
+        self._tick()
+
+    def _callback_error(self, kind, value, traceback) -> None:
+        # Ctrl+C in the terminal lands inside whichever Tk callback is running.
+        if issubclass(kind, KeyboardInterrupt):
+            self.quit()
+            return
+        print(f"orb error: {value!r}", file=sys.stderr, flush=True)
+
+    # ----- helpers ------------------------------------------------------
+
+    def post(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` on the Tk thread (safe from any thread)."""
+        self._events.put(callback)
+
+    def _on_screen(self, x: int, y: int) -> bool:
+        return -self.size // 2 < x < self.screen_w - self.size // 2 and -self.size // 2 < y < self.screen_h - self.size // 2
+
+    def _update_direction(self) -> None:
+        self.model.set_direction(fan_direction(self.x / self.scale, self.y / self.scale,
+                                               self.screen_w / self.scale, self.screen_h / self.scale))
+
+    def _local(self, screen_x: int, screen_y: int) -> tuple[float, float]:
+        return (screen_x - self.x) / self.scale, (screen_y - self.y) / self.scale
+
+    def _accent(self) -> str:
+        return _hex(self.model.colors()[1])
+
+    def _side_position(self, width: int, height: int) -> tuple[int, int]:
+        """Place a panel beside the orb, on the side facing the screen centre."""
+        orb_cx = self.x + self.size / 2
+        orb_cy = self.y + self.size / 2
+        gap = int((48 + 14) * self.scale)  # orb radius + breathing room
+        if orb_cx > self.screen_w / 2:
+            x = orb_cx - gap - width
+        else:
+            x = orb_cx + gap
+        y = orb_cy - height / 2
+        margin = int(8 * self.scale)
+        left, top, right, bottom = _work_area()
+        x = min(max(x, left + margin), right - width - margin)
+        y = min(max(y, top + margin), bottom - height - margin)
+        return int(x), int(y)
+
+    def _track_foreground(self) -> None:
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            return
+        if hwnd and hwnd not in self._own_hwnds:
+            self._last_external = hwnd
+
+    def _return_focus(self) -> None:
+        """Hand focus back to the user's window before Xenon reads the screen."""
+        try:
+            current = ctypes.windll.user32.GetForegroundWindow()
+            if current in self._own_hwnds and self._last_external:
+                ctypes.windll.user32.SetForegroundWindow(self._last_external)
+        except Exception:
+            pass
+
+    # ----- loop ---------------------------------------------------------
+
+    def _tick(self) -> None:
+        now = time.perf_counter()
+        dt = now - self._last
+        self._last = now
+        while True:
+            try:
+                callback = self._events.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception as error:
+                self.model.set_state("error", str(error))
+
+        self._frame += 1
+        if self._frame % 6 == 0:
+            self._track_foreground()
+        px, py = self.root.winfo_pointerxy()
+        lx, ly = self._local(px, py)
+        if self._drag_origin is not None and self._dragged:
+            self.model.pointer(None, None)
+        else:
+            self.model.pointer(lx, ly)
+        self.model.step(dt)
+        try:
+            frame = self.renderer.render(self.model)
+            self.window.update(premultiplied_bgra(frame), frame.width, frame.height, self.x, self.y)
+        except Exception as error:
+            if not self._render_failed:
+                self._render_failed = True
+                print(f"orb render failed: {error!r}", file=sys.stderr, flush=True)
+        delay = int(1000 / self.FPS)
+        self.root.after(max(5, delay - int((time.perf_counter() - now) * 1000)), self._tick)
+
+    # ----- input --------------------------------------------------------
+
+    def _on_press(self, event) -> None:
+        lx, ly = self._local(event.x_root, event.y_root)
+        self._press_target = self.model.hit(lx, ly)
+        self.model.pressed = self._press_target
+        self._drag_origin = (event.x_root, event.y_root, self.x, self.y)
+        self._dragged = False
+
+    def _on_drag(self, event) -> None:
+        if self._drag_origin is None or self._press_target != "orb":
+            return
+        sx, sy, wx, wy = self._drag_origin
+        dx, dy = event.x_root - sx, event.y_root - sy
+        if not self._dragged and math.hypot(dx, dy) < 5:
+            return
+        self._dragged = True
+        self.x, self.y = wx + dx, wy + dy
+        self.root.geometry(f"+{self.x}+{self.y}")
+        self.pill.hide()
+
+    def _on_release(self, event) -> None:
+        target = self._press_target
+        dragged = self._dragged
+        self._drag_origin = None
+        self._dragged = False
+        self.model.pressed = None
+        if dragged:
+            self._update_direction()
+            save_position(self.x, self.y)
+            return
+        if target == "orb":
+            if self.pill.visible:
+                self.pill.hide()
+            else:
+                self._action("ask")
+        elif target:
+            self._action(target)
+
+    # ----- actions ------------------------------------------------------
+
+    def _action(self, key: str) -> None:
+        if key == "ask":
+            self._prompt("ask", "ask or command", self._run_ask)
+        elif key == "search":
+            self._prompt("search", "search the web", self._run_search)
+        elif key == "screen":
+            self._run_screen()
+        elif key == "voice":
+            self._toggle_voice()
+        elif key == "panel":
+            self._open_chat()
+        elif key == "close":
+            self.quit()
+
+    def _prompt(self, kind: str, placeholder: str, submit: Callable[[str], None]) -> None:
+        self.panel.hide()
+        self.model.fold()  # the pill sits where the fan would be
+        self.pill.fill(self.GLYPHS[kind], placeholder, self._accent(), submit)
+        width, height = self.pill.size()
+        self.pill.show_at(*self._side_position(width, height))
+
+    def _start(self, label: str, state: str = "thinking") -> bool:
+        if self._busy:
+            self.model.set_state("thinking", "still working on the last one")
+            return False
+        if self._worker.error:
+            self._show_error(self._worker.error)
+            return False
+        self._busy = True
+        self.model.set_state(state, label)
+        self._return_focus()
+        return True
+
+    def _finish(self) -> None:
+        self._busy = False
+        if self.model.state in {"thinking", "searching"}:
+            self.model.set_state("standby" if self.model.voice_on else "idle")
+
+    def _show_error(self, message: str) -> None:
+        self._busy = False
+        self.model.set_state("error", message)
+        self.panel.set_chat(False)
+        self.panel.clear()
+        self.panel.set_header("Something went wrong", "", "#f87171")
+        self.panel.append(message)
+        self._place_panel()
+        self.root.after(4000, lambda: self.model.state == "error" and self.model.set_state(
+            "standby" if self.model.voice_on else "idle"))
+
+    def _place_panel(self) -> None:
+        self.model.fold()
+        self.panel.fit()
+        width, height = self.panel.size()
+        self.panel.show_at(*self._side_position(width, height))
+
+    def _show_reply(self, title: str, question: str, reply: OrbReply, started: float) -> None:
+        self._history.append((question, reply.text))
+        if self.panel.chat_mode and self.panel.visible:
+            self._render_chat()
+            self._place_panel()
+            self._finish()
+            return
+        self.panel.set_chat(False)
+        self.panel.clear()
+        note = reply.note or f"{(time.perf_counter() - started):.1f}s"
+        self.panel.set_header(title, note, self._accent())
+        self.panel.append(reply.text)
+        if reply.sources:
+            self.panel.append("\n\nsources\n", "dim")
+            self.panel.append("\n".join(reply.sources), "dim")
+        self._place_panel()
+        self._finish()
+
+    def _run_ask(self, text: str) -> None:
+        if not self._start(text):
+            return
+        started = time.perf_counter()
+
+        def job(backend: OrbBackend) -> None:
+            try:
+                reply = backend.ask(text)
+            except Exception as error:
+                self.post(lambda: self._show_error(str(error)))
+                return
+            self.post(lambda: self._show_reply("Xenon", text, reply, started))
+
+        self._worker.submit(job, lambda message: self.post(lambda: self._show_error(message)))
+
+    def _run_screen(self) -> None:
+        if not self._start("reading your screen"):
+            return
+        started = time.perf_counter()
+
+        def job(backend: OrbBackend) -> None:
+            try:
+                reply = backend.screen()
+            except Exception as error:
+                self.post(lambda: self._show_error(str(error)))
+                return
+            self.post(lambda: self._show_reply("On your screen", "(screen)", reply, started))
+
+        self._worker.submit(job, lambda message: self.post(lambda: self._show_error(message)))
+
+    def _run_search(self, query: str) -> None:
+        if not self._start(query, "searching"):
+            return
+        started = time.perf_counter()
+
+        def job(backend: OrbBackend) -> None:
+            try:
+                results = backend.search(query)
+            except Exception as error:
+                self.post(lambda: self._show_error(str(error)))
+                return
+            self.post(lambda: self._show_results(query, results, started))
+
+        self._worker.submit(job, lambda message: self.post(lambda: self._show_error(message)))
+
+    def _show_results(self, query: str, results: list[OrbLink], started: float) -> None:
+        self.panel.set_chat(False)
+        self.panel.clear()
+        self.panel.set_header(f"Search · {query}", f"{(time.perf_counter() - started):.1f}s", self._accent())
+        if not results:
+            self.panel.append("No results.", "dim")
+        for index, result in enumerate(results):
+            if index:
+                self.panel.append("\n\n")
+            self.panel.append_link(result.title, result.url)
+            if result.snippet:
+                self.panel.append("\n" + shorten(result.snippet, 180), "dim")
+        self._place_panel()
+        self._finish()
+
+    def _open_chat(self) -> None:
+        self.pill.hide()
+        self.panel.set_chat(True, self._run_ask)
+        self._render_chat()
+        self._place_panel()
+
+    def _render_chat(self) -> None:
+        self.panel.clear()
+        self.panel.set_header("Xenon", f"{len(self._history)} messages", self._accent())
+        if not self._history:
+            self.panel.append("Ask anything about your screen or notes, or say what to open.", "dim")
+        for index, (question, answer) in enumerate(self._history[-12:]):
+            if index:
+                self.panel.append("\n\n")
+            self.panel.append(question + "\n", "you")
+            self.panel.append(answer)
+        self.panel.fit()
+
+    # ----- voice --------------------------------------------------------
+
+    def _toggle_voice(self) -> None:
+        if self._voice_runner is None:
+            self._show_error("Voice needs the voice extras: pip install -e \".[voice]\"")
+            return
+        if self._voice_stop is not None:
+            self._voice_stop.set()
+            self._voice_stop = None
+            self.model.voice_on = False
+            self.model.set_state("idle")
+            return
+        stop = threading.Event()
+        self._voice_stop = stop
+        self.model.voice_on = True
+        self.model.set_state("thinking", "loading voice")
+
+        def apply(state: str, detail: str) -> None:
+            if stop.is_set():
+                return
+            # Hold the "got it" flash long enough to see, even when the next
+            # state (thinking, or a fast-path reply) arrives right after it.
+            hold = HEARD_HOLD_S - self.model.state_age
+            if self.model.state == "heard" and state != "heard" and hold > 0:
+                self.root.after(int(hold * 1000) + 1, lambda: apply(state, detail))
+                return
+            self.model.set_state(state, detail)
+
+        def on_state(state: str, detail: str) -> None:
+            self.post(lambda: apply(state, detail))
+
+        def on_level(level: float) -> None:
+            self.model.set_level(level)  # a float write; safe without the queue
+
+        def on_exchange(you: str, answer: str) -> None:
+            def show() -> None:
+                self._history.append((you, answer))
+                if self.panel.chat_mode and self.panel.visible:
+                    self._render_chat()
+            self.post(show)
+
+        def run() -> None:
+            try:
+                self._voice_runner(VoiceHooks(on_state, on_level, on_exchange), stop)
+            except Exception as error:
+                message = str(error)
+
+                def fail() -> None:
+                    self._voice_stop = None
+                    self.model.voice_on = False
+                    self._show_error(f"voice stopped: {message}")
+                self.post(fail)
+
+        threading.Thread(target=run, daemon=True, name="xenon-orb-voice").start()
+
+    # ----- lifecycle ----------------------------------------------------
+
+    def quit(self) -> None:
+        if self._voice_stop is not None:
+            self._voice_stop.set()
+        save_position(self.x, self.y)
+        self._worker.stop()
+        self.window.close()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def run(self) -> None:
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            self.quit()

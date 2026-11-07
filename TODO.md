@@ -55,6 +55,8 @@ Xenon can be left running on Windows, wake on a chosen wake word, understand a t
 - [x] Wire real VAD + STT + TTS adapters behind the voice loop (energy endpointer, faster-whisper, SAPI).
 - [ ] Benchmark true wake-to-command latency with microphone capture in the loop.
 - [x] Add a floating voice status indicator (listening/heard/working/speaking).
+- [x] Add the floating orb (`xenon orb`): layered window, hover fan, per-state motion, chimes.
+- [x] Accept the wake word anywhere in the sentence ("play my liked music xenon").
 - [ ] Add a tray icon and a global hotkey for the command box.
 - [x] Keep the voice process warm: model loaded with `keep_alive`, microphone open, screen adapter prewarmed.
 

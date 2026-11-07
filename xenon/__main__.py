@@ -507,6 +507,234 @@ def _voice(args: argparse.Namespace) -> int:
     return 0
 
 
+_NO_MODEL = (
+    "No model configured. Export GROQ_API_KEY or GEMINI_API_KEY (or set "
+    "XENON_MODEL_PROVIDER=ollama), then restart the orb."
+)
+_SCREEN_QUESTION = (
+    "Look at what is on my screen and tell me the single most useful thing "
+    "I should do next, with the concrete step."
+)
+
+
+class _OrbBackend:
+    """Built on the orb's worker thread, so SQLite and COM live there."""
+
+    def __init__(self, config) -> None:
+        self._store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
+        self._assistant = (
+            Assistant(_observer(), self._store, OpenAICompatibleChat(config))
+            if config is not None
+            else None
+        )
+        if config is not None:
+            OpenAICompatibleChat(config).warm_up()
+
+    def _answer(self, question: str):
+        from xenon.orb import OrbReply
+
+        if self._assistant is None:
+            raise ChatUnavailable(_NO_MODEL)
+        answer = self._assistant.ask(question)
+        sources = [
+            f"{memory.title} ({memory.source_kind})" for memory in answer.memories
+        ]
+        via = "screenshot" if answer.used_vision else "UI Automation"
+        return OrbReply(answer.text, sources, f"{answer.latency_ms / 1000:.1f}s · {via}")
+
+    def ask(self, text: str):
+        from xenon.orb import OrbReply
+
+        fast = _voice_fast_reply(text)
+        if fast is not None:
+            return OrbReply(fast, note="fast path")
+        return self._answer(text)
+
+    def screen(self):
+        return self._answer(_SCREEN_QUESTION)
+
+    def search(self, query: str):
+        from xenon.orb import OrbLink
+
+        results = websearch.search(query, limit=5)
+        return [OrbLink(r.title, r.url, re.sub(r"\s+", " ", r.snippet).strip()) for r in results]
+
+    def close(self) -> None:
+        self._store.close()
+
+
+def _orb_voice_runner(config):
+    """Return a runner for the orb's Voice toggle, or None without the extras."""
+    try:
+        import sounddevice  # noqa: F401
+        import faster_whisper  # noqa: F401
+    except Exception:
+        return None
+    def run(hooks, stop) -> None:
+        import math as _math
+        import time
+
+        from xenon.audio import (
+            MicrophoneSource,
+            SapiSpeaker,
+            UtteranceDetector,
+            WhisperTranscriber,
+        )
+        from xenon.wake import WakeGate
+
+        wake_word = os.environ.get("XENON_WAKE_WORD", "xenon")
+        aliases = tuple(
+            part.strip()
+            for part in os.environ.get("XENON_WAKE_ALIASES", "").split(",")
+            if part.strip()
+        )
+        # The orb floats on screen all day, so it waits for its name by default
+        # instead of answering every sentence; XENON_WAKE_MODE=always opts out.
+        always = os.environ.get("XENON_WAKE_MODE", "wake").strip().lower() == "always"
+
+        def env_number(name, default, kind):
+            try:
+                return kind(os.environ.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        mic = os.environ.get("XENON_MIC_DEVICE") or None
+        if mic is not None:
+            try:
+                mic = int(mic)
+            except ValueError:
+                pass
+        hooks.state("thinking", "loading speech model")
+        speaker = SapiSpeaker()
+        source = MicrophoneSource(device=mic)
+
+        def make_detector():
+            return UtteranceDetector(
+                threshold=env_number("XENON_VAD_THRESHOLD", 0.015, float),
+                silence_ms=min(max(env_number("XENON_SILENCE_MS", 350, int), 120), 2000),
+                min_speech_ms=200,
+            )
+
+        detector = make_detector()
+        transcriber = WhisperTranscriber(
+            os.environ.get("XENON_WHISPER_MODEL", "base.en"),
+            os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
+            os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
+            initial_prompt=os.environ.get(
+                "XENON_WHISPER_PROMPT", f"{wake_word.capitalize()}, {', '.join(aliases)}."
+            ),
+            beam_size=env_number("XENON_WHISPER_BEAM", 1, int),
+        )
+        store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
+        # Without a model, open/switch/search still work through the fast path.
+        assistant = (
+            Assistant(
+                _observer(), store, OpenAICompatibleChat(config),
+                max_memories=2, max_context_chars=1800,
+            )
+            if config is not None
+            else None
+        )
+        from xenon import chime
+        from xenon.wake import DEFAULT_TTL_S
+
+        gate = WakeGate(wake_word, aliases=aliases, always=always)
+        armed_until = 0.0
+
+        def waiting() -> None:
+            """Standby (waiting for the name) or listening (taking a command)."""
+            if always:
+                hooks.state("listening", "always listening")
+            elif time.monotonic() < armed_until:
+                hooks.state("listening", "go ahead")
+            else:
+                hooks.state("standby", f"say “{wake_word}” anywhere in a sentence")
+
+        try:
+            waiting()
+            shown_armed = False
+            while not stop.is_set():
+                frame = source.read_frame()
+                if frame:
+                    rms = _math.sqrt(sum(v * v for v in frame) / len(frame))
+                    hooks.level(min(1.0, rms / 0.08))
+                # Drop back to standby once the armed window runs out.
+                if shown_armed and time.monotonic() >= armed_until:
+                    shown_armed = False
+                    waiting()
+                pcm = detector.feed(frame)
+                if pcm is None:
+                    continue
+                text = (transcriber.transcribe(pcm, source.sample_rate) or "").strip()
+                if not text or stop.is_set():
+                    continue
+                command = gate.feed(text)
+                if command is None:
+                    if gate.armed and not shown_armed:
+                        # Heard just the name: chime and wait for the command.
+                        armed_until = time.monotonic() + DEFAULT_TTL_S
+                        shown_armed = True
+                        chime.play("wake")
+                        waiting()
+                    continue
+                armed_until = 0.0
+                shown_armed = False
+                chime.play("heard")
+                hooks.state("heard", command)
+                fast = _voice_fast_reply(command)
+                if fast is not None:
+                    reply = fast
+                else:
+                    hooks.state("thinking", command)
+                    try:
+                        if assistant is None:
+                            raise ChatUnavailable(
+                                "I can open apps, switch windows and search, but "
+                                "answering needs a model key."
+                            )
+                        reply = assistant.ask(command, brief=True).text
+                    except ChatUnavailable as error:
+                        reply = str(error)
+                hooks.exchange(command, reply)
+                if stop.is_set():
+                    break
+                hooks.state("speaking", reply[:120])
+                gate.set_speaking(True)
+                try:
+                    speaker.speak(_speakable(reply))
+                finally:
+                    gate.set_speaking(False)
+                # The input stream buffered Xenon's own voice while it spoke;
+                # reopening it drops that audio so it cannot answer itself.
+                source.close()
+                detector = make_detector()
+                waiting()
+        finally:
+            source.close()
+            store.close()
+
+    return run
+
+
+def _orb(args: argparse.Namespace) -> int:
+    if not is_windows():
+        print("xenon orb requires Windows", file=sys.stderr)
+        return 2
+    try:
+        from xenon.orb import OrbApp
+    except ImportError as error:
+        print(f"the orb needs Pillow: pip install -e \".[capture]\" ({error})", file=sys.stderr)
+        return 2
+
+    config = chat_config_from_env()
+    if config is None:
+        print(_NO_MODEL + " Search and app launching still work.", file=sys.stderr)
+    app = OrbApp(lambda: _OrbBackend(config), _orb_voice_runner(config))
+    print("orb running: hover it for options, drag to move, Close to quit", flush=True)
+    app.run()
+    return 0
+
+
 def _render_search(query: str) -> int:
     try:
         results = websearch.search(query, limit=5)
@@ -891,6 +1119,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-topmost", action="store_true", help="let other windows cover the box"
     )
     ui.set_defaults(handler=_ui)
+
+    orb = subparsers.add_parser(
+        "orb", help="open the minimized floating orb (hover for options)"
+    )
+    orb.set_defaults(handler=_orb)
 
     voice = subparsers.add_parser("voice", help="listen continuously and answer aloud")
     voice.add_argument("--mic", default=None, help="input device index or name (or set XENON_MIC_DEVICE)")
