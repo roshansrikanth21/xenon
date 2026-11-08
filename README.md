@@ -333,10 +333,14 @@ Say or type it like you would to a smart speaker: "play my liked songs xenon",
 "xenon play drake", "play my gym playlist", "play some jazz", "skip", "pause",
 "what's playing". These run on the fast path, with no model involved.
 
-- **Without setup**, pause/resume/next/previous use Windows media keys, so they
-  work with Spotify or any player. "Play my liked songs" opens Liked Songs in
-  the Spotify app, or in the open.spotify.com web player when the app isn't
-  installed, but you have to press play yourself.
+- **Without setup**, with the open.spotify.com web player signed in to your
+  browser, Xenon presses the page's own buttons through Windows accessibility:
+  "play my liked songs", "play my lockedin playlist", "skip", "pause" all work
+  and are confirmed by the player bar turning to Pause or Play. A song or
+  artist ("play drake") opens a Spotify search and plays the closest match when
+  the page labels it clearly. With no web player open, pause/next/previous fall
+  back to Windows media keys for any player. (Opera ignores media keys for the
+  Spotify tab, which is why the page's buttons are used first.)
 - **With a one-time login**, Xenon picks *what* plays through Spotify's
   official Web API (the same one smart speakers use):
 

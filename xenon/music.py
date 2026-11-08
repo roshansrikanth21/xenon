@@ -428,16 +428,26 @@ class MusicController:
         media_key: Callable[[int], bool] = press_media_key,
         open_uri: Callable[[str], object] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        web: object | None = None,
     ) -> None:
         self._client = client
         self._media_key = media_key
         self._open_uri = open_uri or _open_uri
         self._sleep = sleep
+        self._web = web
 
     @classmethod
     def from_env(cls) -> "MusicController":
         tokens = load_tokens()
-        return cls(SpotifyClient(tokens) if tokens else None)
+        web = None
+        if sys.platform == "win32":
+            try:
+                from xenon.webplayer import WebPlayer
+
+                web = WebPlayer()
+            except Exception:
+                web = None
+        return cls(SpotifyClient(tokens) if tokens else None, web=web)
 
     def run(self, command: MusicCommand) -> str:
         if self._client is None:
@@ -458,27 +468,67 @@ class MusicController:
 
     def _without_api(self, command: MusicCommand) -> str:
         kind = command.kind
-        if kind in {"pause", "resume"}:
-            return "Done." if self._media_key(VK_MEDIA_PLAY_PAUSE) else "Media keys are unavailable."
-        if kind == "next":
-            return "Skipped." if self._media_key(VK_MEDIA_NEXT_TRACK) else "Media keys are unavailable."
-        if kind == "previous":
-            return "Going back." if self._media_key(VK_MEDIA_PREV_TRACK) else "Media keys are unavailable."
+        replies = {"pause": "Paused.", "resume": "Playing.", "next": "Skipped.", "previous": "Going back."}
+        if kind in replies:
+            # The web player's own buttons first: browsers do not always pass
+            # Windows media keys to the Spotify tab.
+            pressed = None
+            if self._web is not None:
+                try:
+                    pressed = self._web.control(kind)
+                except Exception:
+                    pressed = None
+            if pressed:
+                return replies[kind]
+            if pressed is False:
+                return "I found the Spotify player but couldn't press that button."
+            key = {"pause": VK_MEDIA_PLAY_PAUSE, "resume": VK_MEDIA_PLAY_PAUSE,
+                   "next": VK_MEDIA_NEXT_TRACK, "previous": VK_MEDIA_PREV_TRACK}[kind]
+            if not self._media_key(key):
+                return "Media keys are unavailable."
+            return "Done." if kind in {"pause", "resume"} else replies[kind]
         if kind == "liked":
-            where = self._where(self._open_uri("spotify:collection:tracks"))
+            opened: list = []
+            played = self._press_play(
+                "Liked Songs", lambda: opened.append(self._open_uri("spotify:collection:tracks"))
+            )
+            if played:
+                return "Playing your Liked Songs."
+            if not opened:
+                opened.append(self._open_uri("spotify:collection:tracks"))
             return (
-                f"I opened your Liked Songs in {where}; press play. Run "
+                f"I opened your Liked Songs in {self._where(opened[0])}; press play. Run "
                 "`python -m xenon spotify login` once and I'll start it myself."
             )
         if kind == "play":
-            where = self._where(self._open_uri("spotify:search:" + urllib.parse.quote(command.query)))
+            if command.hint == "playlist":
+                # Your playlists are in the web player's sidebar on every page.
+                played = self._press_play(
+                    command.query, lambda: self._open_uri("spotify:collection:tracks")
+                )
+                if played:
+                    return f"Playing {played}."
+            uri = "spotify:search:" + urllib.parse.quote(command.query)
+            opened_where = self._open_uri(uri)
+            played = self._press_play(command.query, None)
+            if played:
+                return f"Playing {played}."
             return (
-                f"I searched {where} for {command.query}. Log in with "
+                f"I searched {self._where(opened_where)} for {command.query}. Log in with "
                 "`python -m xenon spotify login` and I'll play it directly."
             )
         if kind == "now":
             return "Log in with `python -m xenon spotify login` and I can tell you what's playing."
         return "I can't do that with music yet."
+
+    def _press_play(self, wanted: str, open_page) -> str | None:
+        """Click the web player's own Play button; None if that didn't work."""
+        if self._web is None:
+            return None
+        try:
+            return self._web.play(wanted, open_page)
+        except Exception:
+            return None
 
     @staticmethod
     def _where(opened: object) -> str:
