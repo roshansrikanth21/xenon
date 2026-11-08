@@ -372,6 +372,81 @@ class GlobalHotkeys:
             self._thread.join(timeout=1)
 
 
+# ------------------------------------------------------------------ tray --
+
+
+class Tray:
+    """Notification-area icon: shows Xenon is running and holds its menu.
+
+    pystray runs its own Win32 message loop on a thread; every menu action
+    hops back to Tk through ``OrbApp.post``.
+    """
+
+    def __init__(self, app: "OrbApp") -> None:
+        import pystray
+
+        from xenon import startup
+
+        self._app = app
+        self._startup = startup
+        self._last_title = ""
+        item = pystray.MenuItem
+        menu = pystray.Menu(
+            item("Ask   Ctrl+Alt+X", lambda: app.post(lambda: app._action("ask")), default=True),
+            item("Voice   Ctrl+Alt+V", lambda: app.post(lambda: app._action("voice")),
+                 checked=lambda _i: app.model.voice_on),
+            item("Show orb", lambda: app.post(app.toggle_hidden),
+                 checked=lambda _i: not app.hidden),
+            item("Start at sign-in", self._toggle_startup,
+                 checked=lambda _i: self._startup.enabled()),
+            pystray.Menu.SEPARATOR,
+            item("Quit Xenon", lambda: app.post(app.quit)),
+        )
+        self._icon = pystray.Icon("xenon", self._image(), "Xenon", menu)
+        self._icon.run_detached()
+
+    def _image(self):
+        """The idle orb itself, cropped and shrunk to an icon."""
+        renderer = OrbRenderer(1.0)
+        model = OrbModel()
+        model.step(0.5)
+        frame = renderer.render(model)
+        pad = 4
+        box = (int(CENTER - ORB_RADIUS - pad), int(CENTER - ORB_RADIUS - pad),
+               int(CENTER + ORB_RADIUS + pad), int(CENTER + ORB_RADIUS + pad))
+        return frame.crop(box).resize((64, 64))
+
+    def _toggle_startup(self) -> None:
+        try:
+            if self._startup.enabled():
+                self._startup.disable()
+            else:
+                self._startup.enable()
+        except Exception as error:
+            message = f"could not change start-at-sign-in: {error}"
+            self._app.post(lambda: self._app._show_error(message))
+        self._icon.update_menu()
+
+    def refresh(self) -> None:
+        """Keep the hover tooltip in step with what the orb is doing."""
+        from xenon.orb_model import STATE_LABELS
+
+        state = STATE_LABELS.get(self._app.model.state, self._app.model.state)
+        title = "Xenon" if state == "XENON" else f"Xenon: {state}"
+        if title != self._last_title:
+            self._last_title = title
+            try:
+                self._icon.title = title
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        try:
+            self._icon.stop()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- panels --
 
 
@@ -620,6 +695,7 @@ class OrbApp:
         self,
         backend_factory: Callable[[], OrbBackend],
         voice_runner: VoiceRunner | None = None,
+        tray: bool = True,
     ) -> None:
         if sys.platform != "win32":
             raise RuntimeError("the orb needs Windows (layered windows)")
@@ -673,6 +749,17 @@ class OrbApp:
         self.root.bind("<Button-3>", lambda _e: self._action("voice"))
         self.root.report_callback_exception = self._callback_error
         self._closing = False
+        from xenon import quick
+
+        self._timers = quick.TIMERS
+        self._timers.listen(self._on_timer_thread)
+        self.hidden = False
+        self._tray: Tray | None = None
+        if tray:
+            try:
+                self._tray = Tray(self)
+            except Exception as error:  # pystray missing or no shell
+                print(f"tray icon unavailable: {error}", file=sys.stderr, flush=True)
         self._hotkeys: GlobalHotkeys | None = None
         try:
             self._hotkeys = GlobalHotkeys(lambda key: self.post(lambda: self._hotkey(key)))
@@ -685,6 +772,49 @@ class OrbApp:
             print(f"global hotkeys unavailable: {error}", file=sys.stderr, flush=True)
         self._last = time.perf_counter()
         self._tick()
+
+    # ----- timers -------------------------------------------------------
+
+    def _on_timer_thread(self, timer) -> None:
+        """Called on the timer's thread; hop to Tk."""
+        self.post(lambda: self._timer_done(timer))
+
+    def _timer_done(self, timer) -> None:
+        from xenon import chime
+        from xenon.quick import describe
+
+        chime.play("timer")
+        self.model.set_state("heard", f"{timer.name} is done")
+        self.panel.set_chat(False)
+        self.panel.clear()
+        self.panel.set_header("Timer done", "", "#fbbf24")
+        self.panel.append(f"{timer.name[0].upper() + timer.name[1:]} is done.")
+        self.panel.append("\n" + describe(timer.seconds), "dim")
+        self._place_panel()
+        self._update_timer_ring()
+        self.root.after(600, lambda: self.model.state == "heard" and self.model.set_state(
+            "standby" if self.model.voice_on else "idle"))
+
+    def _update_timer_ring(self) -> None:
+        active = self._timers.active()
+        if not active:
+            self.model.timer_fraction = None
+            return
+        nearest = active[0]
+        self.model.timer_fraction = nearest.remaining() / max(1, nearest.seconds)
+
+    def toggle_hidden(self) -> None:
+        """Tuck the orb into the tray, or bring it back."""
+        self.hidden = not self.hidden
+        if self.hidden:
+            self.pill.hide()
+            self.panel.hide()
+            self.root.withdraw()
+        else:
+            self.root.deiconify()
+            self.root.attributes("-topmost", True)
+        if self._tray is not None:
+            self._tray._icon.update_menu()
 
     def _hotkey(self, key: str) -> None:
         """Ctrl+Alt+X toggles the Ask pill; Ctrl+Alt+V toggles voice."""
@@ -788,7 +918,16 @@ class OrbApp:
             self.model.pointer(None, None)
         else:
             self.model.pointer(lx, ly)
+        if self._frame % 10 == 0:
+            self._update_timer_ring()
+        if self._frame % 15 == 0 and self._tray is not None:
+            self._tray.refresh()
         self.model.step(dt)
+        if self.hidden:
+            # Tucked into the tray: keep events, timers and voice running but
+            # skip drawing, and wake up less often.
+            self.root.after(150, self._tick)
+            return
         try:
             frame = self.renderer.render(self.model)
             self.window.update(premultiplied_bgra(frame), frame.width, frame.height, self.x, self.y)
@@ -841,6 +980,8 @@ class OrbApp:
     # ----- actions ------------------------------------------------------
 
     def _action(self, key: str) -> None:
+        if self.hidden and key in {"ask", "search", "panel"}:
+            self.toggle_hidden()
         if key == "ask":
             self._prompt("ask", "ask or command", self._run_ask)
         elif key == "search":
@@ -1056,6 +1197,9 @@ class OrbApp:
             self._voice_stop.set()
         if self._hotkeys is not None:
             self._hotkeys.stop()
+        self._timers.unlisten(self._on_timer_thread)
+        if self._tray is not None:
+            self._tray.stop()
         save_position(self.x, self.y)
         # Vanish first, then clean up: closing should feel instant.
         try:

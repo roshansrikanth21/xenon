@@ -21,9 +21,13 @@ try:
 except ImportError:  # Pillow is an optional extra
     OrbRenderer = None
 
+import sys as _sys
+
 try:
     from xenon.orb import OrbReply, Worker, shorten
 except Exception:  # tkinter / wintypes may be missing off Windows
+    if _sys.platform == "win32":
+        raise  # on Windows a broken import is a bug, not a reason to skip
     Worker = None
 
 
@@ -177,8 +181,10 @@ class StateTests(unittest.TestCase):
     def test_chime_is_short_enough_to_be_ignored_by_the_endpointer(self) -> None:
         from xenon.chime import CUES, SAMPLE_RATE, synthesize
 
-        for name, notes in CUES.items():
-            seconds = len(synthesize(notes)) / 2 / SAMPLE_RATE
+        # The cues played while the mic is listening; the timer alarm is long
+        # on purpose and cannot trigger anything without the wake word.
+        for name in ("wake", "heard"):
+            seconds = len(synthesize(CUES[name])) / 2 / SAMPLE_RATE
             self.assertLess(seconds, 0.2, name)  # min_speech_ms is 200
 
     def test_ease_out_back_overshoots_then_settles(self) -> None:
@@ -341,7 +347,7 @@ class OrbAppTests(unittest.TestCase):
         import tkinter
 
         try:
-            app = orb.OrbApp(lambda: backend, None)
+            app = orb.OrbApp(lambda: backend, None, tray=False)
         except tkinter.TclError as error:  # no interactive desktop
             self.skipTest(f"Tk unavailable: {error}")
         if app._hotkeys is not None:  # don't fight a running orb for the keys
@@ -371,6 +377,49 @@ class OrbAppTests(unittest.TestCase):
         self.assertEqual(app.model.state, "error")
         self.assertTrue(app.panel.visible)
         self.assertIn("No model configured", app.panel.text.get("1.0", "end"))
+
+    def test_timers_show_a_ring_and_a_card_when_done(self) -> None:
+        from xenon import quick
+
+        class Idle:
+            def close(self):
+                pass
+
+        import os
+        from unittest import mock
+
+        patcher = mock.patch.dict(os.environ, {"XENON_CHIME": "off"})  # tests stay silent
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        app, pump = self.make(Idle())
+        self.assertIsNone(app.model.timer_fraction)
+        timer = quick.TIMERS.add(600, "tea")
+        self.addCleanup(quick.TIMERS.cancel_all)
+        pump(0.6)
+        self.assertGreater(app.model.timer_fraction, 0.99)
+        self.assertIsNotNone(app.renderer.render(app.model))
+        quick.TIMERS.cancel_all()
+        app._timer_done(timer)  # what the timer thread posts when it fires
+        pump(0.3)
+        self.assertTrue(app.panel.visible)
+        self.assertIn("Tea is done", app.panel.text.get("1.0", "end"))
+        self.assertIsNone(app.model.timer_fraction)
+
+    def test_hide_to_tray_and_back(self) -> None:
+        class Idle:
+            def close(self):
+                pass
+
+        app, pump = self.make(Idle())
+        pump(0.2)
+        app.toggle_hidden()
+        pump(0.3)
+        self.assertTrue(app.hidden)
+        self.assertFalse(app.root.winfo_viewable())
+        app._action("ask")  # asking brings it back so the pill has an anchor
+        pump(0.3)
+        self.assertFalse(app.hidden)
+        self.assertTrue(app.pill.visible)
 
     def test_search_results_render_as_links(self) -> None:
         class Searcher:

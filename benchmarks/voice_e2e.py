@@ -13,7 +13,7 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import win32com.client  # noqa: E402
 
-from xenon import fastpath, music  # noqa: E402
+from xenon import fastpath, music, quick  # noqa: E402
 from xenon.audio import UtteranceDetector, WhisperTranscriber  # noqa: E402
 from xenon.wake import WakeGate  # noqa: E402
 
@@ -29,6 +29,9 @@ CASES = [
     ("Xenon, open notepad.", "app", "open_app"),
     ("Can you open calculator, Xenon?", "app", "open_app"),
     ("Xenon, what's playing?", "music", "now"),
+    ("What time is it, Xenon?", "quick", "time"),
+    ("Xenon, set a timer for five minutes.", "quick", "timer"),
+    ("Turn it up, Xenon.", "quick", "volume_up"),
     ("Play my liked songs.", "ignored", ""),       # no wake word
     ("The weather is nice today.", "ignored", ""),  # background talk
 ]
@@ -62,6 +65,9 @@ def frames(path: str, frame_samples: int = 480):
 def classify(command: str | None) -> tuple[str, str]:
     if command is None:
         return "ignored", ""
+    fast_quick = quick.parse(command)
+    if fast_quick is not None:
+        return "quick", fast_quick.kind
     parsed = music.parse(command)
     if parsed is not None:
         return "music", parsed.kind

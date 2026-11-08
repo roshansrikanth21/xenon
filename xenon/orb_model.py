@@ -152,6 +152,7 @@ class OrbModel:
     progress: float = 0.0          # 0 closed .. 1 fully fanned out
     direction: float = math.pi
     level: float = 0.0             # 0..1 microphone level, decays
+    timer_fraction: float | None = None  # nearest timer's time left, 1 -> 0
     voice_on: bool = False
     hovered: str | None = None     # action key under the pointer
     pressed: str | None = None

@@ -747,64 +747,24 @@ def _orb(args: argparse.Namespace) -> int:
     os._exit(0)
 
 
-STARTUP_NAME = "Xenon Orb.lnk"
-_KEY_NAMES = (
-    "XENON_MODEL_PROVIDER", "XENON_MODEL_API_KEY", "GROQ_API_KEY",
-    "GEMINI_API_KEY", "GOOGLE_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY",
-)
-
-
-def _startup_dir() -> str:
-    return os.path.join(
-        os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", "Startup"
-    )
-
-
-def _user_env_has(name: str) -> bool:
-    """True when ``name`` is saved in the user's environment (survives reboot)."""
-    try:
-        import winreg
-
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            value, _ = winreg.QueryValueEx(key, name)
-        return bool(str(value).strip())
-    except OSError:
-        return False
-
-
 def _orb_startup(enable: bool) -> int:
-    path = os.path.join(_startup_dir(), STARTUP_NAME)
+    from xenon import startup
+
     if not enable:
-        try:
-            os.remove(path)
-            print(f"removed {path}")
-        except FileNotFoundError:
+        if startup.disable():
+            print(f"removed {startup.shortcut_path()}")
+        else:
             print("the orb was not set to start at sign-in")
         return 0
-
-    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    if not os.path.exists(pythonw):
-        pythonw = sys.executable
-    project = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
-        import win32com.client
-
-        shell = win32com.client.Dispatch("WScript.Shell")
-        shortcut = shell.CreateShortcut(path)
-        shortcut.TargetPath = pythonw
-        shortcut.Arguments = "-m xenon orb"
-        shortcut.WorkingDirectory = project
-        shortcut.Description = "Xenon floating orb"
-        shortcut.Save()
+        path = startup.enable()
     except Exception as error:
         print(f"could not create the startup shortcut: {error}", file=sys.stderr)
         return 1
     print(f"the orb will start when you sign in ({path})")
     # A process started at sign-in only sees variables saved with setx, not
     # ones set in this terminal session.
-    if any(os.environ.get(name) for name in _KEY_NAMES) and not any(
-        _user_env_has(name) for name in _KEY_NAMES
-    ):
+    if startup.key_only_in_this_session():
         print(
             "note: your model key is only set in this terminal. Save it so the "
             "startup orb sees it, e.g.:  setx GROQ_API_KEY \"gsk_...\"",
@@ -899,7 +859,12 @@ def _voice_fast_reply(
     """
     from xenon import music
 
+    from xenon import quick
+
     command = _without_wake(command)
+    quick_command = quick.parse(command)
+    if quick_command is not None:
+        return quick.run(quick_command)
     music_command = music.parse(command)
     if music_command is not None:
         controller = music_controller or music.MusicController.from_env()
@@ -983,6 +948,16 @@ def _do(args: argparse.Namespace) -> int:
     # Common commands skip the model entirely: no cold start, no planning
     # round trip. The same approval/verification rules still apply.
     from xenon import music
+
+    from xenon import quick
+
+    quick_command = quick.parse(goal)
+    if quick_command is not None:
+        print(f"fast path: {quick_command.kind}")
+        if args.dry_run:
+            return 0
+        print(quick.run(quick_command))
+        return 0
 
     music_command = music.parse(goal)
     if music_command is not None:

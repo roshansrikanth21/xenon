@@ -268,6 +268,8 @@ class OrbRenderer:
         if model.state == "error" and model.state_age < 0.5:
             shake = int(round(math.sin(model.state_age * 60) * 4 * self.scale * (1 - model.state_age * 2)))
         frame.alpha_composite(orb, (offset + shake, offset))
+        if model.timer_fraction is not None:
+            self._draw_timer_ring(frame, model)
         if model.voice_on:
             self._draw_badge(frame, model)
         return frame
@@ -302,6 +304,23 @@ class OrbRenderer:
         ring = self._ripple.resize((px, px), Image.BILINEAR)
         offset = (self.size - px) // 2
         frame.alpha_composite(_tint(ring, color, strength), (offset, offset))
+
+    def _draw_timer_ring(self, frame: Image.Image, model: OrbModel) -> None:
+        """An amber arc just outside the orb: the nearest timer's time left."""
+        fraction = min(max(model.timer_fraction or 0.0, 0.0), 1.0)
+        if fraction <= 0.001:
+            return
+        size = self.size
+        big = Image.new("L", (size * 2, size * 2), 0)  # 2x is enough for a thin arc
+        c = size
+        radius = (ORB_RADIUS + 7) * self.scale * 2
+        box = (c - radius, c - radius, c + radius, c + radius)
+        draw = ImageDraw.Draw(big)
+        draw.arc(box, 0, 360, fill=50, width=max(2, int(1.4 * self.scale * 2)))
+        draw.arc(box, -90, -90 + 360 * fraction, fill=255, width=max(3, int(2.4 * self.scale * 2)))
+        mask = big.reduce(2)
+        pulse = 0.75 + 0.25 * math.sin(model.time * 2.5) if fraction < 0.1 else 0.9
+        frame.alpha_composite(_tint(mask, (251, 191, 36), pulse))
 
     def _draw_badge(self, frame: Image.Image, model: OrbModel) -> None:
         """Green dot on the rim: the microphone is open."""

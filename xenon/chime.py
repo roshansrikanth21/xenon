@@ -22,6 +22,8 @@ SAMPLE_RATE = 22050
 CUES: dict[str, tuple[tuple[float, float], ...]] = {
     "wake": ((660.0, 0.07), (988.0, 0.09)),
     "heard": ((1175.0, 0.08),),
+    # Timer done: a bright three-note figure, played three times.
+    "timer": ((784.0, 0.12), (988.0, 0.12), (1319.0, 0.22), (0.0, 0.18)) * 3,
 }
 
 
@@ -38,6 +40,9 @@ def synthesize(notes: tuple[tuple[float, float], ...], volume: float = 0.22) -> 
         for index in range(count):
             envelope = min(1.0, index / fade, (count - index) / fade)
             # A touch of the octave makes it sound like a chime, not a beep.
+            if frequency <= 0:  # a rest
+                frames += struct.pack("<h", 0)
+                continue
             phase = math.tau * frequency * index / SAMPLE_RATE
             value = math.sin(phase) * 0.8 + math.sin(phase * 2) * 0.2
             frames += struct.pack("<h", int(value * envelope * volume * 32767))

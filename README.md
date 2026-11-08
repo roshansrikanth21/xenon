@@ -289,6 +289,21 @@ sentence** — "xenon open chrome", "play my liked music xenon", "can you, xenon
 open notepad" — and saying just "Xenon" chimes and listens for the next 8 s.
 `XENON_CHIME=off` silences the chimes.
 
+### Everyday commands (no model needed)
+
+"what time is it", "what's the date", "volume up", "turn it down a lot",
+"mute", "set a timer for 5 minutes", "set a ten minute timer for tea",
+"remind me in 20 minutes to stretch", "how long is left", "cancel the timer".
+While a timer runs, an amber arc around the orb shrinks; when it ends, the orb
+chimes and shows a card. Timers live in the running orb or voice process, so a
+one-shot `xenon do` says so instead of pretending.
+
+### Tray icon
+
+With `pip install -e ".[orb]"`, the orb also puts an icon in the notification
+area: Ask, Voice, Show orb (tuck it away without quitting), Start at sign-in,
+and Quit. Hover it to see the current state.
+
 ### Music and Spotify
 
 Say or type it like you would to a smart speaker: "play my liked songs xenon",
