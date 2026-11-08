@@ -55,6 +55,9 @@ class Companion:
         self._music_at = 0.0
         self._track_lyrics: dict[str, object] = {}
         self._last_request = 0.0
+        # The notch shows the song too, so it can ask for music polling even
+        # when no tablet is connected.
+        self.always_poll = False
         # Screens that polled recently: address -> what they reported.
         self.screens: dict[str, dict] = {}
         # Something the PC asked every screen to show (see ``show``).
@@ -91,6 +94,12 @@ class Companion:
 
     def clear(self) -> None:
         self._overlay = None
+
+    def current_music(self) -> dict | None:
+        """The last song read from the web player, if it is still fresh."""
+        if self._music and time.monotonic() - self._music_at < 10:
+            return self._music
+        return None
 
     def snapshot(self, have_lyrics: str = "") -> dict:
         self._last_request = time.monotonic()
@@ -130,7 +139,7 @@ class Companion:
         except Exception:
             pass
         while not self._stop.is_set():
-            wanted = time.monotonic() - self._last_request < 15
+            wanted = self.always_poll or time.monotonic() - self._last_request < 15
             if wanted and self._now_playing is not None:
                 try:
                     music = self._now_playing()

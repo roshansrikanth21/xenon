@@ -838,6 +838,8 @@ class OrbApp:
         self.root.bind("<B1-Motion>", self._on_drag)
         self.root.bind("<ButtonRelease-1>", self._on_release)
         self.root.bind("<Button-3>", lambda _e: self._action("voice"))
+        self.root.bind("<MouseWheel>", self._on_wheel)
+        self._notch_flash: tuple[str, float] | None = None
         self.root.report_callback_exception = self._callback_error
         self._closing = False
         from xenon import quick
@@ -857,6 +859,7 @@ class OrbApp:
                 self._companion = Companion(
                     self.companion_state, WebPlayer().now_playing, LyricsFinder().find, port=port
                 )
+                self._companion.always_poll = self.notch  # the notch shows the song
                 self.companion_url = self._companion.start()
                 print(f"companion screen: {self.companion_url}", flush=True)
             except Exception as error:
@@ -964,6 +967,41 @@ class OrbApp:
                 return hwnd
             hwnd = user32.GetWindow(hwnd, GW_HWNDNEXT)
         return None
+
+    def _notch_info(self) -> dict:
+        """Live content for the folded notch: clock, song, timer, voice."""
+        info: dict = {"clock": time.strftime("%I:%M").lstrip("0"), "voice": self.model.voice_on}
+        if self._notch_flash and self._notch_flash[1] > time.monotonic():
+            info["flash"] = self._notch_flash[0]
+        active = self._timers.active()
+        if active:
+            nearest = active[0]
+            left = int(round(nearest.remaining()))
+            info["timer"] = {
+                "text": f"{left // 60}:{left % 60:02d}" if left < 3600 else f"{left // 3600}h {left % 3600 // 60}m",
+                "name": nearest.label,
+                "fraction": nearest.remaining() / max(1, nearest.seconds),
+            }
+        if self._companion is not None:
+            music = self._companion.current_music()
+            if music and (music.get("playing") or music.get("title")):
+                info["music"] = {"title": music.get("title", ""), "artist": music.get("artist", ""),
+                                 "playing": bool(music.get("playing"))}
+                if not music.get("playing"):
+                    info.pop("music")  # paused: back to the clock
+        return info
+
+    def _on_wheel(self, event) -> None:
+        """Scroll over the notch or orb to change the volume."""
+        from xenon import quick
+
+        lx, ly = self._local(event.x_root, event.y_root)
+        if not (self.model.in_notch(lx, ly) or self.model.hit(lx, ly) == "orb"):
+            return
+        up = event.delta > 0
+        quick.run(quick.QuickCommand("volume_up" if up else "volume_down", steps=1))
+        self._notch_flash = ("Volume up" if up else "Volume down", time.monotonic() + 1.2)
+        self.model.notch_info = self._notch_info()
 
     def companion_state(self) -> dict:
         """What the companion screen shows when no music plays (read-only)."""
@@ -1184,6 +1222,8 @@ class OrbApp:
             self._tray.refresh()
         if self._frame % 30 == 0:
             self._sync_dimmer()
+        if self.notch and self._frame % 10 == 0:
+            self.model.notch_info = self._notch_info()
         if self.pill.visible or self.panel.visible or self._busy:
             self.model.mark_active()  # never shrink while you're using it
         self.model.step(dt)

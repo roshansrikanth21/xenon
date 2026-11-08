@@ -319,9 +319,13 @@ it.
 The orb lives at the top centre of your primary monitor, measured from the
 monitor's real bounds. After `XENON_ORB_IDLE_S` seconds untouched (default 6)
 and not listening, thinking or speaking, it folds into a slim notch flush with
-the screen's top edge; put the cursor on the notch and it drops down into the
-circle with the options fanning downward. `XENON_ORB_NOTCH=off` restores the
-free-floating, draggable orb.
+the screen's top edge (solid black, curved shoulders, drawn at 4x). The notch
+is live: the time; the playing song with scrolling title and moving bars; a
+timer countdown with a progress ring; a green dot and mic while voice is on.
+Rest the cursor on it for a quarter second and it morphs down into the circle
+with the options fanning downward (sweeping past, e.g. to a browser tab, does
+nothing). Scroll on the notch to change the volume. `XENON_ORB_NOTCH=off`
+restores the free-floating, draggable orb.
 
 ### Shrinks when idle (free-floating mode)
 

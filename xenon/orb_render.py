@@ -19,6 +19,8 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from xenon.orb_model import (
     NOTCH_DROP,
     NOTCH_HEIGHT,
+    NOTCH_MAX_WIDTH,
+    NOTCH_SHOULDER,
     NOTCH_WIDTH,
     ease_in_out,
     IDLE_FADE,
@@ -219,52 +221,165 @@ class OrbRenderer:
         self._badge_glow = glow.filter(ImageFilter.GaussianBlur(2.2 * s))
 
     def _build_notch(self) -> None:
-        """The folded pill: a rounded bar whose top half is above the screen."""
         s = self.scale
-        w, h = int(NOTCH_WIDTH * s), int(NOTCH_HEIGHT * s)
-        big = Image.new("L", (w * STATIC_SS, h * STATIC_SS), 0)
-        ImageDraw.Draw(big).rounded_rectangle(
-            (0, 0, w * STATIC_SS - 1, h * STATIC_SS - 1), radius=h * STATIC_SS // 2, fill=255
-        )
-        self._notch_mask = big.resize((w, h), Image.LANCZOS)
-        ring = Image.new("L", (w * STATIC_SS, h * STATIC_SS), 0)
-        ImageDraw.Draw(ring).rounded_rectangle(
-            (0, 0, w * STATIC_SS - 1, h * STATIC_SS - 1), radius=h * STATIC_SS // 2,
-            outline=255, width=int(1.4 * s * STATIC_SS),
-        )
-        self._notch_ring = ring.resize((w, h), Image.LANCZOS)
-        glow = Image.new("L", (w + int(24 * s), h + int(24 * s)), 0)
-        pad = int(12 * s)
-        ImageDraw.Draw(glow).rounded_rectangle((pad, pad, pad + w, pad + h), radius=h // 2, fill=255)
-        self._notch_glow = glow.filter(ImageFilter.GaussianBlur(7 * s))
-        self._notch_font = _font(("segoeuisb.ttf", "segoeui.ttf"), max(7, int(8.5 * s)))
+        self._notch_font = _font(("segoeuisb.ttf", "segoeui.ttf"), max(8, int(11.5 * s)))
+        self._notch_small = _font(("segoeui.ttf", "segoeuisb.ttf"), max(7, int(10 * s)))
+        self._notch_icon_font, self._notch_has_icons = _icon_font(max(7, int(10 * s)))
+        self._notch_shapes: dict[int, Image.Image] = {}
+
+    def _notch_shape(self, width: int) -> Image.Image:
+        """Notch mask: flat top flush with the screen edge, rounded bottom,
+        concave shoulders where it meets the edge. Drawn at 4x, cached."""
+        cached = self._notch_shapes.get(width)
+        if cached is not None:
+            return cached
+        s, ss = self.scale, STATIC_SS
+        h = int(NOTCH_HEIGHT * s)
+        sh = int(NOTCH_SHOULDER * s)
+        W, H, SH = width * ss, h * ss, sh * ss
+        big = Image.new("L", (W + 2 * SH, H), 0)
+        draw = ImageDraw.Draw(big)
+        radius = int(H * 0.5)
+        # Body, with its top pushed above the canvas so only the bottom rounds.
+        draw.rounded_rectangle((SH, -radius, SH + W - 1, H - 1), radius=radius, fill=255)
+        # Shoulders: fill the corner squares, then cut a quarter circle out.
+        draw.rectangle((0, 0, SH, SH), fill=255)
+        draw.rectangle((SH + W - 1, 0, 2 * SH + W, SH), fill=255)
+        draw.ellipse((-SH, 0, SH, 2 * SH), fill=0)
+        draw.ellipse((W + SH - 1, 0, W + 3 * SH, 2 * SH), fill=0)
+        mask = big.resize(((W + 2 * SH) // ss, H // ss), Image.LANCZOS)
+        if len(self._notch_shapes) > 48:
+            self._notch_shapes.clear()
+        self._notch_shapes[width] = mask
+        return mask
+
+    def _notch_layout(self, model: OrbModel):
+        """What to show, and how wide the notch must be for it."""
+        info = model.notch_info or {}
+        s = self.scale
+        timer, music = info.get("timer"), info.get("music")
+        clock = info.get("clock", "")
+        if info.get("flash"):
+            main, sub = info["flash"], ""
+        elif timer:
+            main, sub = timer.get("text", ""), timer.get("name", "")
+        elif music:
+            main, sub = music.get("title", ""), clock
+        else:
+            main, sub = clock or "XENON", ""
+        measure = ImageDraw.Draw(Image.new("L", (1, 1)))
+        main_w = measure.textlength(main, font=self._notch_font)
+        sub_w = measure.textlength(sub, font=self._notch_small) if sub else 0
+        slot = NOTCH_HEIGHT * s  # icon slot on the left (and right when needed)
+        want = slot + min(main_w, (NOTCH_MAX_WIDTH - 90) * s) + (sub_w + 14 * s if sub else 0) + slot * 0.75
+        width = min(max(want / s, NOTCH_WIDTH), NOTCH_MAX_WIDTH)
+        return info, main, sub, main_w, width
+
+    def _notch_content(self, model: OrbModel, width_px: int, core, accent) -> Image.Image:
+        info, main, sub, main_w, _ = self._notch_layout(model)
+        s = self.scale
+        h = int(NOTCH_HEIGHT * s)
+        sh = int(NOTCH_SHOULDER * s)
+        canvas = Image.new("RGBA", (width_px + 2 * sh, h), (0, 0, 0, 0))
+        mid = h / 2
+        left = sh + h * 0.55
+        t = model.time
+        timer, music = info.get("timer"), info.get("music")
+        listening = info.get("voice") and model.state in {"standby", "listening"}
+
+        # ---- left icon -----------------------------------------------------
+        icon = Image.new("L", (canvas.width * 2, h * 2), 0)
+        draw = ImageDraw.Draw(icon)
+        cx, cy, r = left * 2, mid * 2, h * 0.34 * 2 / 2 * 1.0
+        if timer:
+            fraction = max(0.0, min(1.0, timer.get("fraction", 0)))
+            width = max(2, int(2.2 * s * 2))
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=70, width=width)
+            draw.arc((cx - r, cy - r, cx + r, cy + r), -90, -90 + 360 * fraction, fill=255, width=width)
+            icon_color = (251, 191, 36)
+        elif music:
+            playing = music.get("playing")
+            bar_w = max(2, int(2.4 * s * 2))
+            for i in range(4):
+                level = 0.35 + 0.65 * abs(math.sin(t * (5.2 + i * 1.3) + i)) if playing else 0.3
+                bh = r * 2 * level
+                x = cx - r + i * (r * 2 / 3.2)
+                draw.rounded_rectangle((x, cy + r - bh, x + bar_w, cy + r), radius=bar_w // 2, fill=255)
+            icon_color = accent
+        else:
+            breath = 0.75 + 0.25 * math.sin(t * 2.0)
+            rr = r * 0.62 * breath
+            draw.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=255)
+            icon_color = (74, 222, 128) if listening else core
+        icon = icon.resize((canvas.width, h), Image.LANCZOS)
+        if not timer and not music:
+            glow = icon.filter(ImageFilter.GaussianBlur(3 * s))
+            canvas.alpha_composite(_tint(glow, icon_color, 0.7))
+        canvas.alpha_composite(_tint(icon, icon_color))
+
+        # ---- main text (scrolls when a song title is too long) -------------
+        text_left = int(sh + h * 1.05)
+        right_room = (self._text_width(sub, self._notch_small) + 16 * s) if sub else h * 0.6
+        avail = int(canvas.width - text_left - right_room - sh)
+        text = Image.new("L", (max(1, avail), h), 0)
+        tdraw = ImageDraw.Draw(text)
+        if main_w > avail and music:
+            gap = 40 * s
+            offset = (t * 28 * s) % (main_w + gap)
+            tdraw.text((-offset, mid), main, font=self._notch_font, fill=255, anchor="lm")
+            tdraw.text((-offset + main_w + gap, mid), main, font=self._notch_font, fill=255, anchor="lm")
+            fade = Image.linear_gradient("L").rotate(90, expand=True).resize((max(1, avail), h))
+            edge_fade = ImageChops.multiply(fade, fade.transpose(Image.FLIP_LEFT_RIGHT))
+            text = ImageChops.multiply(text, edge_fade.point(lambda v: min(255, v * 4)))
+        else:
+            tdraw.text((0, mid), main, font=self._notch_font, fill=255, anchor="lm")
+        layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        layer.alpha_composite(_tint(text, (240, 243, 252)), (text_left, 0))
+        canvas.alpha_composite(layer)
+
+        # ---- right side: secondary text, or the mic when listening ---------
+        if sub:
+            label = Image.new("L", canvas.size, 0)
+            ImageDraw.Draw(label).text(
+                (canvas.width - sh - h * 0.45, mid), sub, font=self._notch_small, fill=255, anchor="rm"
+            )
+            canvas.alpha_composite(_tint(label, (160, 168, 188)))
+        elif listening and self._notch_has_icons:
+            mic = Image.new("L", canvas.size, 0)
+            ImageDraw.Draw(mic).text(
+                (canvas.width - sh - h * 0.5, mid), "\ue720", font=self._notch_icon_font, fill=255, anchor="mm"
+            )
+            canvas.alpha_composite(_tint(mic, (74, 222, 128), 0.9))
+        return canvas
+
+    @staticmethod
+    def _text_width(text: str, font) -> float:
+        if not text:
+            return 0.0
+        return ImageDraw.Draw(Image.new("L", (1, 1))).textlength(text, font=font)
 
     def _draw_notch(self, frame: Image.Image, model: OrbModel, core, accent, alpha: float) -> None:
         s = self.scale
-        w, h = self._notch_mask.size
-        cx = self.size / 2
-        edge = (self.size / 2) - NOTCH_DROP * s  # screen top edge in window pixels
-        left, top = int(cx - w / 2), int(edge - h / 2)
-        breath = 0.5 + 0.5 * math.sin(model.time * 1.8)
-        gx = left - (self._notch_glow.width - w) // 2
-        gy = top - (self._notch_glow.height - h) // 2
-        frame.alpha_composite(_tint(self._notch_glow, accent, alpha * (0.35 + 0.2 * breath)), (max(gx, 0), max(gy, 0)))
-        body = Image.new("RGBA", (w, h), GLASS + (0,))
-        body.putalpha(_scale_alpha(self._notch_mask, 0.96 * alpha))
-        frame.alpha_composite(body, (left, top))
-        frame.alpha_composite(_tint(self._notch_ring, accent, 0.65 * alpha), (left, top))
-        # Visible half: a status dot and the name, letter-spaced.
-        visible_mid = int(edge + h / 4)
-        listening = model.voice_on and model.state in {"standby", "listening"}
-        dot_color = (74, 222, 128) if listening else core
-        r = max(2, int(3.2 * s * (0.85 + 0.25 * breath)))
-        dot_x = int(cx - w / 2 + h * 0.55)
-        dot = Image.new("L", frame.size, 0)
-        ImageDraw.Draw(dot).ellipse((dot_x - r, visible_mid - r, dot_x + r, visible_mid + r), fill=255)
-        frame.alpha_composite(_tint(dot, dot_color, alpha))
-        label = Image.new("L", frame.size, 0)
-        ImageDraw.Draw(label).text((cx + r, visible_mid), "X E N O N", font=self._notch_font, fill=255, anchor="mm")
-        frame.alpha_composite(_tint(label, (225, 230, 245), 0.8 * alpha))
+        width_px = max(10, int(model.notch_width * s))
+        shape = self._notch_shape(width_px)
+        sh = int(NOTCH_SHOULDER * s)
+        edge = int(self.size / 2 - NOTCH_DROP * s)  # the screen's top edge
+        left = int(self.size / 2 - width_px / 2 - sh)
+        info = model.notch_info or {}
+        if info.get("music", {}) and info["music"].get("playing"):
+            # A soft glow under the notch that breathes while music plays.
+            glow = shape.filter(ImageFilter.GaussianBlur(6 * s))
+            pulse = 0.25 + 0.15 * abs(math.sin(model.time * 3.1))
+            frame.alpha_composite(_tint(glow, accent, pulse * alpha), (left, edge + int(2 * s)))
+        body = Image.new("RGBA", shape.size, (0, 0, 0, 0))
+        body.putalpha(_scale_alpha(shape, alpha))
+        frame.alpha_composite(body, (left, edge))
+        # Hairline highlight along the bottom curve.
+        rim = ImageChops.subtract(shape, shape.transform(shape.size, Image.AFFINE, (1, 0, 0, 0, 1, int(1.2 * s))))
+        frame.alpha_composite(_tint(rim, (255, 255, 255), 0.10 * alpha), (left, edge))
+        content = self._notch_content(model, width_px, core, accent)
+        content.putalpha(ImageChops.multiply(content.getchannel("A"), _scale_alpha(shape, alpha)))
+        frame.alpha_composite(content, (left, edge))
 
     def _build_satellites(self) -> None:
         s = self.scale
@@ -340,17 +455,43 @@ class OrbRenderer:
         return frame
 
     def _fold_into_notch(self, frame: Image.Image, model: OrbModel, core, accent) -> Image.Image:
-        """Morph: the circle shrinks, rises and fades into the notch pill."""
+        """Liquid morph: a black shape stretches between the circle and the
+        notch, the orb fades out early and the notch's content fades in late."""
+        _, _, _, _, target = self._notch_layout(model)
+        model.notch_target_width = target
         d = ease_in_out(model.dock)
         out = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-        if d < 0.999:
-            scale = 1 - 0.8 * d
-            px = max(4, int(self.size * scale))
-            shrunk = frame.resize((px, px), Image.BILINEAR)
-            shrunk.putalpha(_scale_alpha(shrunk.getchannel("A"), (1 - d) ** 1.4))
-            cy = self.size / 2 - d * NOTCH_DROP * self.scale
-            out.alpha_composite(shrunk, (int(self.size / 2 - px / 2), max(0, int(cy - px / 2))))
-        self._draw_notch(out, model, core, accent, min(1.0, d * 1.3))
+        if d >= 0.999:
+            self._draw_notch(out, model, core, accent, 1.0)
+            return out
+        s = self.scale
+        c = self.size / 2
+        r = ORB_RADIUS * s
+        edge = c - NOTCH_DROP * s
+        w_notch = model.notch_width * s
+        h_notch = NOTCH_HEIGHT * s
+        # The blob: circle (orb body) -> notch (above the edge, so flush).
+        half_w = r + (w_notch / 2 - r) * d
+        top = (c - r) + ((edge - h_notch) - (c - r)) * d
+        bottom = (c + r) + ((edge + h_notch) - (c + r)) * d
+        radius = r + (h_notch * 0.5 - r) * d
+        ss = 2
+        blob = Image.new("L", (self.size * ss, self.size * ss), 0)
+        ImageDraw.Draw(blob).rounded_rectangle(
+            ((c - half_w) * ss, top * ss, (c + half_w) * ss, bottom * ss),
+            radius=max(1, radius * ss), fill=255,
+        )
+        blob = blob.reduce(ss)
+        out.alpha_composite(_tint(blob, (0, 0, 0), min(1.0, d * 2.2)))
+        # A faint accent rim so the moving shape reads as glass, not a hole.
+        rim = ImageChops.subtract(blob, blob.filter(ImageFilter.MinFilter(3)))
+        out.alpha_composite(_tint(rim, accent, 0.45 * min(1.0, d * 2.2)))
+        if d < 0.5:
+            fading = frame.copy()
+            fading.putalpha(_scale_alpha(fading.getchannel("A"), (1 - d / 0.5) ** 1.3))
+            out.alpha_composite(fading)
+        if d > 0.75:
+            self._draw_notch(out, model, core, accent, (d - 0.75) / 0.25)
         return out
 
     def _draw_ripples(self, frame: Image.Image, model: OrbModel, color) -> None:

@@ -37,9 +37,12 @@ QUIET_STATES = frozenset({"idle", "standby"})
 # into a slim pill flush with the screen's top edge; hover it and it drops
 # down into the full circle with the options fanning downward.
 NOTCH_DROP = ORB_RADIUS + 16      # screen top edge -> orb centre (logical px)
-NOTCH_WIDTH = 124
-NOTCH_HEIGHT = 46                 # half of it sits above the screen edge
+NOTCH_WIDTH = 150                 # resting width; grows with what it shows
+NOTCH_MAX_WIDTH = 300
+NOTCH_HEIGHT = 30                 # visible height below the screen edge
+NOTCH_SHOULDER = 9                # concave curve where it meets the edge
 NOTCH_IDLE_S = 6.0
+NOTCH_DWELL_S = 0.25              # rest this long on the notch to unfold it
 OPEN_SPEED = 5.5   # progress units per second
 CLOSE_SPEED = 4.0
 STAGGER = 0.07     # each satellite starts this much progress later
@@ -181,6 +184,11 @@ class OrbModel:
     shrink: float = 1.0            # 1 = full size .. IDLE_SCALE when idle
     notch: bool = False
     dock: float = 0.0              # notch mode: 0 = circle .. 1 = folded pill
+    # What the folded notch shows: clock, music, timer, voice (set by the app).
+    notch_info: dict = field(default_factory=dict)
+    notch_width: float = NOTCH_WIDTH
+    notch_target_width: float = NOTCH_WIDTH
+    _notch_enter: float | None = None
     last_active: float = 0.0
 
     def __post_init__(self) -> None:
@@ -226,13 +234,29 @@ class OrbModel:
             distance = math.inf
         else:
             distance = math.hypot(x - CENTER, y - CENTER)
-        if distance <= OPEN_RADIUS + 10:
+        docked = self.notch and self.dock >= 0.3
+        if distance <= OPEN_RADIUS + 10 and not docked:
+            # Near the orb counts as activity, except while it is folded into
+            # the notch: then only resting on the notch itself does.
             self.mark_active()
         on_notch = x is not None and y is not None and self.in_notch(x, y)
+        unfold = False
         if on_notch:
-            # Hovering the folded notch unfolds it straight into the fan.
-            self.mark_active()
+            # Rest on the notch briefly to unfold it, so sweeping the cursor
+            # across the top of the screen (browser tabs) doesn't pop it open.
+            if self._notch_enter is None:
+                self._notch_enter = self.time
+            if self.time - self._notch_enter >= NOTCH_DWELL_S:
+                self.mark_active()
+                unfold = True
+        else:
+            self._notch_enter = None
+        if unfold:
             distance = 0.0
+        elif docked:
+            # Folded: the empty space where the circle would be is not the
+            # orb, so passing through it must not open anything.
+            distance = math.inf
         limit = STAY_OPEN_RADIUS if self.progress > 0.05 else OPEN_RADIUS
         if self._suppressed:
             # Stay folded until the pointer has left the orb once.
@@ -268,7 +292,7 @@ class OrbModel:
         if not self.notch or self.dock < 0.3:
             return False
         edge = self.notch_edge()
-        return (abs(x - CENTER) <= NOTCH_WIDTH / 2 + 10) and (y <= edge + NOTCH_HEIGHT / 2 + 10)
+        return abs(x - CENTER) <= self.notch_width / 2 + 6 and y <= edge + NOTCH_HEIGHT + 6
 
     def mark_active(self) -> None:
         """Something happened: stay (or become) full size."""
@@ -308,6 +332,8 @@ class OrbModel:
         if self.state not in QUIET_STATES:
             self.mark_active()
         if self.notch:
+            # The notch widens or narrows smoothly to fit what it shows.
+            self.notch_width += (self.notch_target_width - self.notch_width) * min(1.0, dt * 8)
             # Fold into the notch when idle; unfold fast when needed.
             target = 1.0 if self.is_idle else 0.0
             rate = 2.2 if target > self.dock else 6.0

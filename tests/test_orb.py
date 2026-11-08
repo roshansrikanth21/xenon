@@ -159,6 +159,55 @@ class IdleShrinkTests(unittest.TestCase):
         self.assertLess(renderer.render(small).getpixel(edge)[3], 120)
 
 
+class NotchTests(unittest.TestCase):
+    def docked(self):
+        model = OrbModel(notch=True, idle_after=0.5)
+        run(model, 3.0, 5, 400)
+        self.assertGreater(model.dock, 0.99)
+        return model
+
+    def test_a_quick_pass_over_the_notch_does_not_unfold_it(self) -> None:
+        from xenon.orb_model import NOTCH_DROP
+
+        model = self.docked()
+        run(model, 0.1, CENTER, CENTER - NOTCH_DROP + 5)  # cursor brushes past
+        run(model, 0.2, 5, 400)
+        self.assertGreater(model.dock, 0.9)
+
+    def test_resting_on_the_notch_unfolds_it_into_the_fan(self) -> None:
+        from xenon.orb_model import NOTCH_DROP
+
+        model = self.docked()
+        run(model, 0.8, CENTER, CENTER - NOTCH_DROP + 5)
+        self.assertLess(model.dock, 0.1)
+        self.assertGreater(model.progress, 0.9)
+
+    def test_passing_below_the_folded_notch_opens_nothing(self) -> None:
+        model = self.docked()
+        run(model, 1.0, CENTER, CENTER)  # where the circle would be
+        self.assertGreater(model.dock, 0.9)
+        self.assertEqual(model.progress, 0.0)
+
+    @unittest.skipIf(OrbRenderer is None, "Pillow not installed")
+    def test_notch_widens_for_a_song_and_draws_flush_with_the_edge(self) -> None:
+        from xenon.orb_model import NOTCH_DROP, NOTCH_WIDTH
+
+        renderer = OrbRenderer(1.0)
+        model = self.docked()
+        model.notch_info = {"clock": "6:42"}
+        renderer.render(model)
+        idle_width = model.notch_target_width
+        model.notch_info = {"clock": "6:42", "music": {"title": "A fairly long song title here", "playing": True}}
+        renderer.render(model)
+        self.assertGreater(model.notch_target_width, idle_width)
+        self.assertGreaterEqual(idle_width, NOTCH_WIDTH)
+        run(model, 1.0, 5, 400)
+        frame = renderer.render(model)
+        edge = int(CENTER - NOTCH_DROP)
+        self.assertGreater(frame.getpixel((int(CENTER), edge + 2))[3], 200)   # body right at the edge
+        self.assertEqual(frame.getpixel((int(CENTER), edge + 60))[3], 0)      # nothing below it
+
+
 class StateTests(unittest.TestCase):
     def test_state_change_blends_colours(self) -> None:
         model = OrbModel()
