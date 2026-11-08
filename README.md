@@ -317,7 +317,7 @@ it.
 ### Notch mode (default)
 
 The orb lives at the top centre of your primary monitor, measured from the
-monitor's real bounds. After `XENON_ORB_IDLE_S` seconds untouched (default 6)
+monitor's real bounds. After `XENON_ORB_IDLE_S` seconds untouched (default 3)
 and not listening, thinking or speaking, it folds into a slim notch flush with
 the screen's top edge (solid black, curved shoulders, drawn at 4x). The notch
 is live: the time; the playing song with scrolling title and moving bars; a
