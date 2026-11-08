@@ -1097,8 +1097,10 @@ def _brightness(args: argparse.Namespace) -> int:
         if not displays:
             print("no controllable displays (turn on DDC/CI in the monitor's menu)")
             return 1
+        wanted = brightness.target_kinds()
         for display in displays:
-            print(f"{display.name} ({display.kind}): {display.get()}%")
+            used = "" if display.kind in wanted else "   (not targeted; XENON_BRIGHTNESS_TARGET=all to include)"
+            print(f"{display.name} ({display.kind}): {display.get()}%{used}")
         return 0
     if level.rstrip("%").isdigit():
         reply = brightness.apply("set", int(level.rstrip("%")))

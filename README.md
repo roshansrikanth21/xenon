@@ -306,7 +306,8 @@ understand "dim my monitor", "brightness 30", "max brightness",
 "brightness down" and "restore brightness"; the CLI is
 `python -m xenon brightness list|min|max|up|down|toggle|restore|0-100`.
 
-External monitors are set over DDC/CI through Windows' own monitor API, and
+Only external monitors are changed by default (`XENON_BRIGHTNESS_TARGET=all`
+or `laptop` to include the built-in screen). They are set over DDC/CI through Windows' own monitor API, and
 laptop panels through WMI. Every write is read back. Some monitors accept the
 command but keep their brightness (Windows HDR, dynamic contrast and some
 picture modes lock it); for those the orb lays a click-through dark overlay

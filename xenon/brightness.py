@@ -174,6 +174,22 @@ def _release(found) -> None:
             pass
 
 
+def target_kinds() -> set[str]:
+    """Which displays brightness commands touch: XENON_BRIGHTNESS_TARGET.
+
+    ``monitor`` (default) changes external monitors only, ``laptop`` only the
+    built-in panel, ``all`` both.
+    """
+    value = os.environ.get("XENON_BRIGHTNESS_TARGET", "monitor").strip().lower()
+    return {"monitor": {"monitor"}, "laptop": {"laptop"}, "all": {"monitor", "laptop"}}.get(
+        value, {"monitor"}
+    )
+
+
+def targets(displays: list[Display]) -> list[Display]:
+    return [display for display in displays if display.kind in target_kinds()]
+
+
 def discover() -> list[Display]:
     """Displays whose brightness Xenon can address right now."""
     if sys.platform != "win32":
@@ -254,7 +270,8 @@ class Outcome:
 def apply_detailed(action: str, value: int = 0, displays: list[Display] | None = None,
                    state_path: str | None = None) -> Outcome:
     """``action``: set, up, down, min, max, toggle or restore."""
-    displays = discover() if displays is None else displays
+    if displays is None:
+        displays = targets(discover())
     if not displays:
         return Outcome(
             "I can't control brightness on these displays. For an external "

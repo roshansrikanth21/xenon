@@ -97,6 +97,20 @@ class ApplyTests(unittest.TestCase):
         self.assertGreater(overlay_alpha(0), overlay_alpha(50))
 
 
+class TargetTests(unittest.TestCase):
+    def test_monitor_only_by_default_and_configurable(self) -> None:
+        from unittest import mock
+
+        displays = [FakeDisplay("Monitor"), FakeDisplay("Laptop", "laptop")]
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XENON_BRIGHTNESS_TARGET", None)
+            self.assertEqual([d.name for d in brightness.targets(displays)], ["Monitor"])
+        with mock.patch.dict(os.environ, {"XENON_BRIGHTNESS_TARGET": "all"}):
+            self.assertEqual(len(brightness.targets(displays)), 2)
+        with mock.patch.dict(os.environ, {"XENON_BRIGHTNESS_TARGET": "laptop"}):
+            self.assertEqual([d.name for d in brightness.targets(displays)], ["Laptop"])
+
+
 class FastReplyTests(unittest.TestCase):
     def test_brightness_is_on_the_fast_path(self) -> None:
         from unittest import mock
