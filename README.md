@@ -298,6 +298,28 @@ While a timer runs, an amber arc around the orb shrinks; when it ends, the orb
 chimes and shows a card. Timers live in the running orb or voice process, so a
 one-shot `xenon do` says so instead of pretending.
 
+### Brightness
+
+**Ctrl+Alt+B** drops every screen to minimum and pressing it again restores
+the old levels; **Ctrl+Alt+PageUp / PageDown** step by 10. Voice and Ask
+understand "dim my monitor", "brightness 30", "max brightness",
+"brightness down" and "restore brightness"; the CLI is
+`python -m xenon brightness list|min|max|up|down|toggle|restore|0-100`.
+
+External monitors are set over DDC/CI through Windows' own monitor API, and
+laptop panels through WMI. Every write is read back. Some monitors accept the
+command but keep their brightness (Windows HDR, dynamic contrast and some
+picture modes lock it); for those the orb lays a click-through dark overlay
+on that screen instead, and it stays dimmed across restarts until you restore
+it.
+
+### Shrinks when idle
+
+After two minutes untouched (and not listening, thinking or speaking), the
+orb eases down to about half size and fades a little, then grows back the
+moment you hover near it or anything happens. Set `XENON_ORB_IDLE_S` to change
+the delay, or `0` to keep it full size.
+
 ### Tray icon
 
 With `pip install -e ".[orb]"`, the orb also puts an icon in the notification

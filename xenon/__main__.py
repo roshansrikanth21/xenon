@@ -865,6 +865,11 @@ def _voice_fast_reply(
     quick_command = quick.parse(command)
     if quick_command is not None:
         return quick.run(quick_command)
+    from xenon import brightness
+
+    bright = brightness.parse(command)
+    if bright is not None:
+        return brightness.run(bright)
     music_command = music.parse(command)
     if music_command is not None:
         controller = music_controller or music.MusicController.from_env()
@@ -957,6 +962,16 @@ def _do(args: argparse.Namespace) -> int:
         if args.dry_run:
             return 0
         print(quick.run(quick_command))
+        return 0
+
+    from xenon import brightness
+
+    bright = brightness.parse(goal)
+    if bright is not None:
+        print(f"fast path: brightness {bright.action}")
+        if args.dry_run:
+            return 0
+        print(brightness.run(bright))
         return 0
 
     music_command = music.parse(goal)
@@ -1071,6 +1086,29 @@ def _spotify(args: argparse.Namespace) -> int:
     print(f"connected. Tokens saved to {music.token_path()} (delete with `xenon spotify logout`).")
     print('try: python -m xenon do "play my liked songs"')
     return 0
+
+
+def _brightness(args: argparse.Namespace) -> int:
+    from xenon import brightness
+
+    level = args.level.strip().lower()
+    if level == "list":
+        displays = brightness.discover()
+        if not displays:
+            print("no controllable displays (turn on DDC/CI in the monitor's menu)")
+            return 1
+        for display in displays:
+            print(f"{display.name} ({display.kind}): {display.get()}%")
+        return 0
+    if level.rstrip("%").isdigit():
+        reply = brightness.apply("set", int(level.rstrip("%")))
+    elif level in {"min", "max", "up", "down", "toggle", "restore"}:
+        reply = brightness.apply(level)
+    else:
+        print("use: list, min, max, up, down, toggle, restore or 0-100", file=sys.stderr)
+        return 2
+    print(reply)
+    return 0 if not reply.startswith(("Couldn't", "I can't")) else 1
 
 
 def _providers(args: argparse.Namespace) -> int:
@@ -1283,6 +1321,12 @@ def main(argv: list[str] | None = None) -> int:
     search = subparsers.add_parser("search", help="search the web (DuckDuckGo)")
     search.add_argument("query", nargs="+")
     search.set_defaults(handler=_search)
+
+    bright = subparsers.add_parser(
+        "brightness", help="set display brightness (DDC/CI monitors and laptop panels)"
+    )
+    bright.add_argument("level", help="list, min, max, up, down, toggle, restore or 0-100")
+    bright.set_defaults(handler=_brightness)
 
     spotify = subparsers.add_parser("spotify", help="connect Spotify for music control")
     spotify_commands = spotify.add_subparsers(dest="spotify_command", required=True)

@@ -315,9 +315,15 @@ MOD_NOREPEAT = 0x4000
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 # Ctrl+Alt+X summons Ask, Ctrl+Alt+V toggles voice.
+VK_PRIOR = 0x21  # Page Up
+VK_NEXT = 0x22   # Page Down
 DEFAULT_HOTKEYS: dict[str, tuple[int, int]] = {
     "ask": (MOD_CONTROL | MOD_ALT, ord("X")),
     "voice": (MOD_CONTROL | MOD_ALT, ord("V")),
+    # Ctrl+Alt+B drops every screen to minimum; again restores.
+    "dim": (MOD_CONTROL | MOD_ALT, ord("B")),
+    "brighter": (MOD_CONTROL | MOD_ALT, VK_PRIOR),
+    "darker": (MOD_CONTROL | MOD_ALT, VK_NEXT),
 }
 
 
@@ -370,6 +376,64 @@ class GlobalHotkeys:
         if self._thread_id:
             ctypes.windll.user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
             self._thread.join(timeout=1)
+
+
+# --------------------------------------------------------------- dimmer --
+
+WS_EX_TRANSPARENT = 0x00000020
+
+
+class ScreenDimmer:
+    """Click-through dark overlays for monitors that ignore DDC/CI brightness."""
+
+    def __init__(self, root: tk.Tk) -> None:
+        self._root = root
+        self._windows: dict[tuple[int, int, int, int], tk.Toplevel] = {}
+
+    def sync(self, overlays) -> None:
+        from xenon.brightness import overlay_alpha
+
+        wanted = {tuple(rect): level for rect, level in overlays}
+        for rect in list(self._windows):
+            if rect not in wanted or overlay_alpha(wanted[rect]) <= 0.01:
+                self._windows.pop(rect).destroy()
+        for rect, level in wanted.items():
+            alpha = overlay_alpha(level)
+            if alpha <= 0.01:
+                continue
+            window = self._windows.get(rect)
+            if window is None:
+                window = self._make(rect)
+                self._windows[rect] = window
+            window.attributes("-alpha", alpha)
+
+    def _make(self, rect) -> tk.Toplevel:
+        left, top, right, bottom = rect
+        window = tk.Toplevel(self._root)
+        window.overrideredirect(True)
+        window.configure(bg="black")
+        window.geometry(f"{right - left}x{bottom - top}+{left}+{top}")
+        window.attributes("-topmost", True)
+        window.attributes("-alpha", 0.0)
+        window.update_idletasks()
+        hwnd = _toplevel_hwnd(window)
+        user32 = ctypes.windll.user32
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        # Clicks and typing go straight through to the apps underneath.
+        user32.SetWindowLongW(
+            hwnd, GWL_EXSTYLE,
+            style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        )
+        return window
+
+    @property
+    def active(self) -> int:
+        return len(self._windows)
+
+    def clear(self) -> None:
+        for window in self._windows.values():
+            window.destroy()
+        self._windows.clear()
 
 
 # ------------------------------------------------------------------ tray --
@@ -729,6 +793,10 @@ class OrbApp:
         self.window = LayeredWindow(_toplevel_hwnd(self.root))
 
         self.model = OrbModel()
+        try:
+            self.model.idle_after = float(os.environ.get("XENON_ORB_IDLE_S", self.model.idle_after))
+        except ValueError:
+            pass
         self._update_direction()
         self.renderer = OrbRenderer(self.scale)
         self.pill = InputPill(self.root)
@@ -754,6 +822,14 @@ class OrbApp:
         self._timers = quick.TIMERS
         self._timers.listen(self._on_timer_thread)
         self.hidden = False
+        self.dimmer = ScreenDimmer(self.root)
+        self._last_overlays: list = []
+        try:
+            from xenon.brightness import software_overlays
+
+            self.dimmer.sync(software_overlays())  # stay dimmed across restarts
+        except Exception:
+            pass
         self._tray: Tray | None = None
         if tray:
             try:
@@ -803,6 +879,27 @@ class OrbApp:
         nearest = active[0]
         self.model.timer_fraction = nearest.remaining() / max(1, nearest.seconds)
 
+    def _sync_dimmer(self) -> None:
+        """Follow brightness changes made by voice, Ask or the CLI."""
+        try:
+            from xenon.brightness import software_overlays
+
+            overlays = sorted(software_overlays())
+        except Exception:
+            return
+        if overlays != self._last_overlays:
+            self._last_overlays = overlays
+            self.dimmer.sync(overlays)
+            self._raise_orb()
+
+    def _raise_orb(self) -> None:
+        """Keep the orb above the dimming overlays."""
+        try:
+            flags = 0x0001 | 0x0002 | 0x0010  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+            ctypes.windll.user32.SetWindowPos(self.window.hwnd, -1, 0, 0, 0, 0, flags)
+        except Exception:
+            pass
+
     def toggle_hidden(self) -> None:
         """Tuck the orb into the tray, or bring it back."""
         self.hidden = not self.hidden
@@ -827,6 +924,29 @@ class OrbApp:
                 self._action("ask")
         elif key == "voice":
             self._action("voice")
+        elif key in {"dim", "brighter", "darker"}:
+            self._brightness({"dim": "toggle", "brighter": "up", "darker": "down"}[key])
+
+    def _brightness(self, action: str, value: int = 0) -> None:
+        """DDC/CI writes take ~100 ms per monitor, so they run off the Tk thread."""
+        from xenon import brightness
+
+        self.model.set_state("heard", f"brightness {action}")
+
+        def work() -> None:
+            outcome = brightness.apply_detailed(action, value)
+
+            def done() -> None:
+                # Monitors that ignored the hardware change are dimmed on screen.
+                self.dimmer.sync(outcome.overlays)
+                self._raise_orb()
+                if not outcome.ok:
+                    self._show_error(outcome.reply)
+                elif self.model.state == "heard":
+                    self.model.set_state("standby" if self.model.voice_on else "idle")
+            self.post(done)
+
+        threading.Thread(target=work, daemon=True, name="xenon-brightness").start()
 
     def _callback_error(self, kind, value, traceback) -> None:
         # Ctrl+C in the terminal lands inside whichever Tk callback is running.
@@ -922,6 +1042,10 @@ class OrbApp:
             self._update_timer_ring()
         if self._frame % 15 == 0 and self._tray is not None:
             self._tray.refresh()
+        if self._frame % 30 == 0:
+            self._sync_dimmer()
+        if self.pill.visible or self.panel.visible or self._busy:
+            self.model.mark_active()  # never shrink while you're using it
         self.model.step(dt)
         if self.hidden:
             # Tucked into the tray: keep events, timers and voice running but
@@ -1198,6 +1322,7 @@ class OrbApp:
         if self._hotkeys is not None:
             self._hotkeys.stop()
         self._timers.unlisten(self._on_timer_thread)
+        self.dimmer.clear()
         if self._tray is not None:
             self._tray.stop()
         save_position(self.x, self.y)

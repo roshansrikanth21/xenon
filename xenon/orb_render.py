@@ -17,6 +17,8 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 from xenon.orb_model import (
+    IDLE_FADE,
+    IDLE_SCALE,
     ACTIONS,
     CENTER,
     ORB_RADIUS,
@@ -254,6 +256,7 @@ class OrbRenderer:
         halo_strength = 0.30 + 0.12 * breath + 0.45 * model.level
         if model.state == "thinking":
             halo_strength += 0.12 * (0.5 + 0.5 * math.sin(model.time * 6))
+        halo_strength *= 0.35 + 0.65 * (model.shrink - IDLE_SCALE) / (1 - IDLE_SCALE)
         halo_color = lerp_color(core, accent, 0.5 + 0.5 * math.sin(model.time * 0.7))
         if model.state == "heard":
             halo_strength += 0.5 * max(0.0, 1 - model.state_age * 2.5)
@@ -267,6 +270,13 @@ class OrbRenderer:
         shake = 0
         if model.state == "error" and model.state_age < 0.5:
             shake = int(round(math.sin(model.state_age * 60) * 4 * self.scale * (1 - model.state_age * 2)))
+        if model.shrink < 0.999:
+            # Idle: a smaller, fainter orb in the same spot.
+            px = max(8, int(orb.width * model.shrink))
+            fade = IDLE_FADE + (1 - IDLE_FADE) * (model.shrink - IDLE_SCALE) / (1 - IDLE_SCALE)
+            orb = orb.resize((px, px), Image.LANCZOS)
+            orb.putalpha(_scale_alpha(orb.getchannel("A"), fade))
+            offset = int(round(self.size / 2 - px / 2))
         frame.alpha_composite(orb, (offset + shake, offset))
         if model.timer_fraction is not None:
             self._draw_timer_ring(frame, model)

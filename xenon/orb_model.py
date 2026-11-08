@@ -27,6 +27,12 @@ FAN_DEGREES = 210
 OPEN_RADIUS = ORB_RADIUS + 4
 STAY_OPEN_RADIUS = SATELLITE_DISTANCE + SATELLITE_RADIUS + 10
 CLOSE_DELAY_S = 0.35
+# After this long untouched (and not busy), the orb eases down to IDLE_SCALE
+# and fades a little; any hover or activity grows it back.
+IDLE_AFTER_S = 120.0
+IDLE_SCALE = 0.55
+IDLE_FADE = 0.72
+QUIET_STATES = frozenset({"idle", "standby"})
 OPEN_SPEED = 5.5   # progress units per second
 CLOSE_SPEED = 4.0
 STAGGER = 0.07     # each satellite starts this much progress later
@@ -164,6 +170,9 @@ class OrbModel:
     _last_inside: float = -1e9
     _suppressed: bool = False
     state_since: float = 0.0
+    idle_after: float = IDLE_AFTER_S
+    shrink: float = 1.0            # 1 = full size .. IDLE_SCALE when idle
+    last_active: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.satellites:
@@ -190,6 +199,7 @@ class OrbModel:
             self.color_mix = 0.0
             self.state = state
             self.state_since = self.time
+            self.mark_active()
         self.detail = detail
 
     @property
@@ -207,6 +217,8 @@ class OrbModel:
             distance = math.inf
         else:
             distance = math.hypot(x - CENTER, y - CENTER)
+        if distance <= OPEN_RADIUS + 10:
+            self.mark_active()
         limit = STAY_OPEN_RADIUS if self.progress > 0.05 else OPEN_RADIUS
         if self._suppressed:
             # Stay folded until the pointer has left the orb once.
@@ -233,6 +245,19 @@ class OrbModel:
             return "orb"
         return None
 
+    def mark_active(self) -> None:
+        """Something happened: stay (or become) full size."""
+        self.last_active = self.time
+
+    @property
+    def is_idle(self) -> bool:
+        return (
+            self.idle_after > 0
+            and self.state in QUIET_STATES
+            and self.progress <= 0.01
+            and self.time - self.last_active >= self.idle_after
+        )
+
     def fold(self) -> None:
         """Close the fan now and keep it shut until the pointer leaves."""
         self._open_wanted = False
@@ -254,6 +279,15 @@ class OrbModel:
         else:
             self.progress = max(target, self.progress - speed * dt)
         self.color_mix = min(1.0, self.color_mix + dt * 3.0)
+        # Shrink slowly when idle, grow back quickly when needed.
+        if self.state not in QUIET_STATES:
+            self.mark_active()
+        target = IDLE_SCALE if self.is_idle else 1.0
+        rate = 0.6 if target < self.shrink else 5.0
+        if self.shrink < target:
+            self.shrink = min(target, self.shrink + rate * dt)
+        else:
+            self.shrink = max(target, self.shrink - rate * dt)
         self.level = max(0.0, self.level - dt * 1.6)
 
         count = len(self.satellites)

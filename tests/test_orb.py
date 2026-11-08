@@ -125,6 +125,40 @@ class HoverTests(unittest.TestCase):
         self.assertEqual(model.progress, 1.0)
 
 
+class IdleShrinkTests(unittest.TestCase):
+    def test_untouched_orb_shrinks_then_grows_back_on_hover(self) -> None:
+        from xenon.orb_model import IDLE_SCALE
+
+        model = OrbModel(idle_after=5.0)
+        run(model, 4.0, 5, 5)
+        self.assertEqual(model.shrink, 1.0)
+        run(model, 3.0, 5, 5)
+        self.assertAlmostEqual(model.shrink, IDLE_SCALE, places=2)
+        run(model, 0.3, CENTER, CENTER)  # hover
+        self.assertEqual(model.shrink, 1.0)
+
+    def test_busy_states_never_shrink(self) -> None:
+        model = OrbModel(idle_after=1.0)
+        model.set_state("thinking")
+        run(model, 5.0, 5, 5)
+        self.assertEqual(model.shrink, 1.0)
+
+    def test_zero_disables_shrinking(self) -> None:
+        model = OrbModel(idle_after=0)
+        run(model, 10.0, 5, 5)
+        self.assertEqual(model.shrink, 1.0)
+
+    @unittest.skipIf(OrbRenderer is None, "Pillow not installed")
+    def test_shrunk_orb_draws_smaller(self) -> None:
+        renderer = OrbRenderer(1.0)
+        full, small = OrbModel(), OrbModel(idle_after=1.0)
+        run(full, 0.5, 5, 5)
+        run(small, 4.0, 5, 5)
+        edge = (int(CENTER + ORB_RADIUS - 4), int(CENTER))
+        self.assertGreater(renderer.render(full).getpixel(edge)[3], 200)
+        self.assertLess(renderer.render(small).getpixel(edge)[3], 120)
+
+
 class StateTests(unittest.TestCase):
     def test_state_change_blends_colours(self) -> None:
         model = OrbModel()
