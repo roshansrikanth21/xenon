@@ -37,6 +37,24 @@ USER_AGENT = "xenon-assistant/0.1"
 Transport = Callable[[str, dict, bytes, float], dict]
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict
+
+
+@dataclass(frozen=True)
+class AssistantTurn:
+    """One model reply: text, tool calls, and the raw message to append back
+    into the conversation before sending tool results."""
+
+    content: str
+    tool_calls: list
+    message: dict
+    finish_reason: str = ""
+
+
 class ChatUnavailable(RuntimeError):
     """Raised when the model cannot produce an answer."""
 
@@ -182,21 +200,78 @@ class OpenAICompatibleChat:
         self._transport = transport if transport is not None else _urllib_transport
 
     def complete(self, messages: list[dict]) -> str:
+        response = self._request(messages)
+        try:
+            choice = response["choices"][0]
+            content = choice["message"]["content"]
+        except (KeyError, IndexError, TypeError) as error:
+            raise ChatUnavailable("chat response had no content") from error
+        if not isinstance(content, str) or not content.strip():
+            if choice.get("finish_reason") == "length":
+                raise ChatUnavailable(
+                    "the model used its whole token budget before answering "
+                    "(likely hidden reasoning). Raise XENON_MAX_TOKENS or set "
+                    "XENON_REASONING_EFFORT=low."
+                )
+            raise ChatUnavailable("chat response was empty")
+        return content.strip()
+
+    def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        max_tokens: int | None = None,
+        model: str | None = None,
+    ) -> "AssistantTurn":
+        """One model turn that may call tools (OpenAI function calling).
+
+        Returns the text and any tool calls with their arguments already
+        decoded. ``model`` overrides the configured model for this call (for
+        example a vision model for a screenshot step).
+        """
+        extra: dict = {}
+        if tools:
+            extra["tools"] = tools
+            extra["tool_choice"] = tool_choice or "auto"
+        response = self._request(messages, extra, max_tokens=max_tokens, model=model)
+        try:
+            choice = response["choices"][0]
+            message = choice["message"]
+        except (KeyError, IndexError, TypeError) as error:
+            raise ChatUnavailable("chat response had no message") from error
+        calls = []
+        for raw in message.get("tool_calls") or []:
+            function = raw.get("function") or {}
+            arguments = function.get("arguments") or "{}"
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments) if arguments.strip() else {}
+                except ValueError:
+                    arguments = {"_unparsed": arguments}
+            calls.append(ToolCall(raw.get("id") or f"call_{len(calls)}", function.get("name", ""), arguments))
+        content = message.get("content") or ""
+        if not calls and not content.strip() and choice.get("finish_reason") == "length":
+            raise ChatUnavailable("the model used its whole token budget before answering")
+        return AssistantTurn(content.strip(), calls, message, choice.get("finish_reason") or "")
+
+    def _request(self, messages: list[dict], extra: dict | None = None,
+                 max_tokens: int | None = None, model: str | None = None) -> dict:
         payload = {
-            "model": self._config.model,
+            "model": model or self._config.model,
             "messages": messages,
             "temperature": 0.2,
             # ``max_tokens`` is understood by Ollama, LM Studio, vLLM and the
             # OpenAI chat models. The newer ``max_completion_tokens`` spelling
             # is ignored by local servers, which lets a 7B model ramble for
             # half a minute on a long screen dump.
-            "max_tokens": self._config.max_tokens,
+            "max_tokens": max_tokens or self._config.max_tokens,
         }
-        if self._config.reasoning_effort:
+        if extra:
+            payload.update(extra)
+        if self._config.reasoning_effort and (model is None or model == self._config.model):
             payload["reasoning_effort"] = self._config.reasoning_effort
-            payload["max_tokens"] = (
-                self._config.max_tokens + REASONING_HEADROOM_TOKENS
-            )
+            payload["max_tokens"] = payload["max_tokens"] + REASONING_HEADROOM_TOKENS
         if self._config.keep_alive:
             # Ollama-specific; only sent to loopback endpoints. Without this the
             # model unloads after five idle minutes and the next request pays a
@@ -220,21 +295,7 @@ class OpenAICompatibleChat:
                 "server (for example `ollama serve`) or run "
                 "`python -m xenon doctor` to check the configuration."
             ) from error
-
-        try:
-            choice = response["choices"][0]
-            content = choice["message"]["content"]
-        except (KeyError, IndexError, TypeError) as error:
-            raise ChatUnavailable("chat response had no content") from error
-        if not isinstance(content, str) or not content.strip():
-            if choice.get("finish_reason") == "length":
-                raise ChatUnavailable(
-                    "the model used its whole token budget before answering "
-                    "(likely hidden reasoning). Raise XENON_MAX_TOKENS or set "
-                    "XENON_REASONING_EFFORT=low."
-                )
-            raise ChatUnavailable("chat response was empty")
-        return content.strip()
+        return response
 
     def _send(self, url: str, headers: dict, body: bytes) -> dict:
         try:

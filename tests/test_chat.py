@@ -119,8 +119,37 @@ class ChatClientTests(unittest.TestCase):
         with self.assertRaises(ChatUnavailable):
             client.complete(MESSAGES)
 
+    def test_chat_returns_decoded_tool_calls(self) -> None:
+        reply = {"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None,
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "open_app", "arguments": '{"name": "notepad"}'}},
+                {"id": "c2", "type": "function", "function": {"name": "broken", "arguments": "{not json"}},
+            ]}}]}
+        transport = FakeTransport(response=reply)
+        client = OpenAICompatibleChat(ChatConfig("https://example.com/v1", "m", "k"), transport=transport)
+        tools = [{"type": "function", "function": {"name": "open_app", "parameters": {"type": "object"}}}]
+        turn = client.chat([{"role": "user", "content": "open notepad"}], tools=tools)
+        self.assertEqual([(c.name, c.arguments) for c in turn.tool_calls],
+                         [("open_app", {"name": "notepad"}), ("broken", {"_unparsed": "{not json"})])
+        payload = transport.requests[0][2]
+        self.assertEqual(payload["tools"], tools)
+        self.assertEqual(payload["tool_choice"], "auto")
+
+    def test_chat_can_switch_model_for_one_call(self) -> None:
+        transport = FakeTransport()
+        client = OpenAICompatibleChat(ChatConfig("https://example.com/v1", "main", "k", reasoning_effort="low"),
+                                      transport=transport)
+        client.chat([{"role": "user", "content": "x"}], model="vision-model")
+        payload = transport.requests[0][2]
+        self.assertEqual(payload["model"], "vision-model")
+        self.assertNotIn("reasoning_effort", payload)  # only for the configured model
+
     def test_config_from_env_is_opt_in(self) -> None:
-        keys = ["XENON_MODEL_API_KEY", "XENON_MODEL_NAME", "XENON_MODEL_BASE_URL"]
+        # Provider keys are auto-detected, so a machine with GROQ_API_KEY saved
+        # (like the developer's) must not leak into these tests.
+        keys = ["XENON_MODEL_API_KEY", "XENON_MODEL_NAME", "XENON_MODEL_BASE_URL", "XENON_MODEL_PROVIDER",
+                "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY"]
         original = {key: os.environ.pop(key, None) for key in keys}
         try:
             self.assertIsNone(config_from_env())
@@ -169,7 +198,10 @@ class ChatClientTests(unittest.TestCase):
                     os.environ[key] = original[key]
 
     def test_cloud_endpoints_never_get_a_keep_alive(self) -> None:
-        keys = ["XENON_MODEL_API_KEY", "XENON_MODEL_NAME", "XENON_MODEL_BASE_URL"]
+        # Provider keys are auto-detected, so a machine with GROQ_API_KEY saved
+        # (like the developer's) must not leak into these tests.
+        keys = ["XENON_MODEL_API_KEY", "XENON_MODEL_NAME", "XENON_MODEL_BASE_URL", "XENON_MODEL_PROVIDER",
+                "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY"]
         original = {key: os.environ.pop(key, None) for key in keys}
         try:
             os.environ["XENON_MODEL_API_KEY"] = "k"
