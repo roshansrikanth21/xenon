@@ -55,14 +55,49 @@ class Companion:
         self._music_at = 0.0
         self._track_lyrics: dict[str, object] = {}
         self._last_request = 0.0
+        # Screens that polled recently: address -> what they reported.
+        self.screens: dict[str, dict] = {}
+        # Something the PC asked every screen to show (see ``show``).
+        self._overlay: dict | None = None
         self._stop = threading.Event()
         self._server: ThreadingHTTPServer | None = None
 
     # ----- state ---------------------------------------------------------
 
+    def report(self, address: str, info: dict) -> None:
+        """A screen told us about itself (size, browser, smoothness)."""
+        entry = self.screens.setdefault(address, {})
+        entry.update({k: v for k, v in info.items() if v not in (None, "")})
+        entry["last_seen"] = time.time()
+
+    def connected(self, within_s: float = 10.0) -> dict[str, dict]:
+        now = time.time()
+        return {a: s for a, s in self.screens.items() if now - s.get("last_seen", 0) <= within_s}
+
+    def show(self, kind: str, content: str, seconds: float = 15.0, title: str = "") -> dict:
+        """Show ``content`` on every screen: kind is text, image or url."""
+        if kind not in {"text", "image", "url"}:
+            raise ValueError("kind must be text, image or url")
+        if kind in {"image", "url"} and not content.startswith(("http://", "https://", "/")):
+            raise ValueError("images and pages must be http(s) addresses")
+        self._overlay = {
+            "id": f"{time.time():.3f}",
+            "kind": kind,
+            "content": content[:4000],
+            "title": title[:200],
+            "until": time.time() + max(1.0, min(seconds, 3600.0)),
+        }
+        return self._overlay
+
+    def clear(self) -> None:
+        self._overlay = None
+
     def snapshot(self, have_lyrics: str = "") -> dict:
         self._last_request = time.monotonic()
         payload = {"time": time.time(), "xenon": self._safe_state(), "music": None}
+        overlay = self._overlay
+        if overlay and overlay["until"] > time.time():
+            payload["overlay"] = overlay
         music = self._music
         if music and time.monotonic() - self._music_at < 10:
             track = f"{music['title']}|{music['artist']}"
@@ -132,16 +167,48 @@ class Companion:
                         body = b"companion page missing"
                     self._send(200, "text/html; charset=utf-8", body)
                 elif path == "/state":
-                    have = ""
-                    for part in query.split("&"):
-                        if part.startswith("have="):
-                            from urllib.parse import unquote_plus
+                    from urllib.parse import parse_qs
 
-                            have = unquote_plus(part[5:])
-                    body = json.dumps(companion.snapshot(have)).encode("utf-8")
+                    params = {k: v[0] for k, v in parse_qs(query).items()}
+                    companion.report(self.client_address[0], {
+                        "width": params.get("w"), "height": params.get("h"),
+                        "dpr": params.get("dpr"), "fps": params.get("fps"),
+                        "agent": (self.headers.get("User-Agent") or "")[:200],
+                    })
+                    body = json.dumps(companion.snapshot(params.get("have", ""))).encode("utf-8")
                     self._send(200, "application/json", body)
+                elif path == "/screens" and self._local():
+                    self._send(200, "application/json", json.dumps(companion.connected(3600)).encode("utf-8"))
                 else:
                     self._send(404, "text/plain", b"not found")
+
+            def do_POST(self) -> None:  # noqa: N802 - http.server API
+                # Only this PC may push to the screens; LAN devices can only look.
+                if not self._local():
+                    self._send(403, "text/plain", b"only this computer can do that")
+                    return
+                length = min(int(self.headers.get("Content-Length") or 0), 16384)
+                try:
+                    data = json.loads(self.rfile.read(length) or b"{}")
+                except ValueError:
+                    self._send(400, "text/plain", b"bad json")
+                    return
+                if self.path == "/show":
+                    try:
+                        shown = companion.show(data.get("kind", "text"), str(data.get("content", "")),
+                                               float(data.get("seconds", 15)), str(data.get("title", "")))
+                    except (ValueError, TypeError) as error:
+                        self._send(400, "text/plain", str(error).encode("utf-8"))
+                        return
+                    self._send(200, "application/json", json.dumps(shown).encode("utf-8"))
+                elif self.path == "/clear":
+                    companion.clear()
+                    self._send(200, "application/json", b"{}")
+                else:
+                    self._send(404, "text/plain", b"not found")
+
+            def _local(self) -> bool:
+                return self.client_address[0] in {"127.0.0.1", "::1"}
 
             def _send(self, status: int, kind: str, body: bytes) -> None:
                 self.send_response(status)

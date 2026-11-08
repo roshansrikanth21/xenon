@@ -97,5 +97,57 @@ class CompanionTests(unittest.TestCase):
             urllib.request.urlopen(f"http://127.0.0.1:{port}/control", timeout=5)
 
 
+class RemoteScreenTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.companion = Companion(lambda: {"state": "idle"}, port=0, host="127.0.0.1")
+        self.companion.start()
+        self.addCleanup(self.companion.stop)
+        self.base = f"http://127.0.0.1:{self.companion._server.server_address[1]}"
+
+    def post(self, path, payload):
+        request = urllib.request.Request(self.base + path, data=json.dumps(payload).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+        return json.load(urllib.request.urlopen(request, timeout=5))
+
+    def test_screens_report_their_size_and_smoothness(self) -> None:
+        urllib.request.urlopen(self.base + "/state?w=1280&h=800&dpr=1.5&fps=58", timeout=5).read()
+        screens = json.load(urllib.request.urlopen(self.base + "/screens", timeout=5))
+        info = screens["127.0.0.1"]
+        self.assertEqual((info["width"], info["height"], info["fps"]), ("1280", "800", "58"))
+
+    def test_pushed_text_reaches_the_page_until_cleared(self) -> None:
+        self.post("/show", {"kind": "text", "content": "Dinner's ready", "seconds": 30})
+        state = json.load(urllib.request.urlopen(self.base + "/state", timeout=5))
+        self.assertEqual(state["overlay"]["content"], "Dinner's ready")
+        self.post("/clear", {})
+        state = json.load(urllib.request.urlopen(self.base + "/state", timeout=5))
+        self.assertNotIn("overlay", state)
+
+    def test_only_web_addresses_can_be_shown_as_pages(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.post("/show", {"kind": "url", "content": "file:///C:/secret.txt"})
+        self.assertEqual(caught.exception.code, 400)
+
+    def test_lan_devices_cannot_push(self) -> None:
+        from xenon.companion import lan_address
+
+        address = lan_address()
+        if address.startswith("127."):
+            self.skipTest("no LAN address on this machine")
+        # Reaching the server through the LAN address makes this machine look
+        # like any other device on the network.
+        lan = Companion(lambda: {}, port=0, host=address)
+        lan.start()
+        self.addCleanup(lan.stop)
+        url = f"http://{address}:{lan._server.server_address[1]}/show"
+        request = urllib.request.Request(url, data=b'{"kind": "text", "content": "x"}', method="POST",
+                                         headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(caught.exception.code, 403)
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(f"http://{address}:{lan._server.server_address[1]}/screens", timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()

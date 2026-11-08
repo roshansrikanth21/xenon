@@ -1175,6 +1175,70 @@ def _brightness(args: argparse.Namespace) -> int:
     return 0 if not reply.startswith(("Couldn't", "I can't")) else 1
 
 
+def _companion_url(path: str) -> str:
+    from xenon.companion import DEFAULT_PORT
+
+    port = int(os.environ.get("XENON_COMPANION_PORT", DEFAULT_PORT))
+    return f"http://127.0.0.1:{port}{path}"
+
+
+def _screens(args: argparse.Namespace) -> int:
+    import json as _json
+    import time as _time
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(_companion_url("/screens"), timeout=3) as response:
+            screens = _json.load(response)
+    except Exception as error:
+        print(f"the orb's companion server is not running ({error})", file=sys.stderr)
+        return 1
+    if not screens:
+        from xenon.companion import lan_address
+
+        print(f"no screens yet; open http://{lan_address()}:{_companion_url('').rsplit(':', 1)[1]} on the tablet")
+        return 1
+    for address, info in screens.items():
+        age = _time.time() - info.get("last_seen", 0)
+        status = "connected" if age < 10 else f"last seen {int(age)} s ago"
+        size = f"{info.get('width', '?')}x{info.get('height', '?')} @{info.get('dpr', '?')}x"
+        print(f"{address}: {status}, {size}, {info.get('fps', '?')} fps")
+        print(f"    {info.get('agent', '')}")
+    return 0
+
+
+def _show(args: argparse.Namespace) -> int:
+    import json as _json
+    import urllib.request
+
+    if args.clear:
+        path, payload = "/clear", {}
+    else:
+        if args.image:
+            kind, content = "image", args.image
+        elif args.url:
+            kind, content = "url", args.url
+        else:
+            kind, content = "text", " ".join(args.text)
+        if not content.strip():
+            print("nothing to show", file=sys.stderr)
+            return 2
+        path = "/show"
+        payload = {"kind": kind, "content": content, "seconds": args.seconds, "title": args.title or ""}
+    request = urllib.request.Request(
+        _companion_url(path), data=_json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3):
+            pass
+    except Exception as error:
+        print(f"could not reach the companion screen: {error}", file=sys.stderr)
+        return 1
+    print("cleared" if args.clear else f"showing on the companion screen for {args.seconds:g} s")
+    return 0
+
+
 def _providers(args: argparse.Namespace) -> int:
     from xenon.providers import PROVIDER_PRESETS, key_is_set, settings_from_env
 
@@ -1391,6 +1455,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     bright.add_argument("level", help="list, min, max, up, down, toggle, restore or 0-100")
     bright.set_defaults(handler=_brightness)
+
+    screens = subparsers.add_parser("screens", help="list companion screens (tablets) and what they report")
+    screens.set_defaults(handler=_screens)
+
+    show = subparsers.add_parser("show", help="show text, an image or a page on the companion screens")
+    show.add_argument("text", nargs="*", help="text to show")
+    show.add_argument("--image", help="image address (http/https)")
+    show.add_argument("--url", help="page address (http/https)")
+    show.add_argument("--title", help="small heading above it")
+    show.add_argument("--seconds", type=float, default=15.0, help="how long to show it")
+    show.add_argument("--clear", action="store_true", help="remove whatever is shown")
+    show.set_defaults(handler=_show)
 
     spotify = subparsers.add_parser("spotify", help="connect Spotify for music control")
     spotify_commands = spotify.add_subparsers(dest="spotify_command", required=True)

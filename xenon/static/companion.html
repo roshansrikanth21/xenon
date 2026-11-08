@@ -99,6 +99,13 @@
   .timer .bar b { display: block; height: 100%; background: #fbbf24; transition: width 1s linear; }
   .answer { font-size: clamp(15px, 2.2vw, 26px); color: var(--dim); max-width: 80vw; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 
+  .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 3vh; padding: 6vh 6vw; background: rgba(6, 7, 12, .92); z-index: 5; text-align: center; }
+  .overlay.on { display: flex; animation: fadein .5s ease; }
+  .overlay h2 { font-size: clamp(16px, 2.6vw, 30px); color: var(--dim); font-weight: 500; }
+  .overlay .text { font-size: clamp(26px, 5.5vw, 72px); font-weight: 700; line-height: 1.15; max-width: 90vw; }
+  .overlay img { max-width: 90vw; max-height: 78vh; border-radius: 14px; }
+  .overlay iframe { width: 100%; height: 100%; border: 0; border-radius: 12px; background: #fff; }
+  @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
   .offline { position: fixed; right: 3vw; bottom: 2.5vh; font-size: 13px; color: #f87171; opacity: 0; transition: opacity .4s; }
   .offline.on { opacity: 1; }
   .hint { position: fixed; left: 50%; bottom: 2.5vh; transform: translateX(-50%); font-size: 12px; color: var(--faint); }
@@ -129,6 +136,7 @@
     <div class="progress"><b id="bar"></b></div>
   </section>
 
+  <div class="overlay" id="overlay"><h2 id="ovTitle"></h2><div id="ovBody"></div></div>
   <div class="offline" id="offline">Xenon is not reachable</div>
   <div class="hint" id="hint">tap for full screen</div>
 
@@ -264,8 +272,40 @@
     $("answer").textContent = (x && x.last) || "";
   }
 
+  // Anything the PC pushed to this screen (text, an image or a page).
+  var overlayId = "";
+  function applyOverlay(o) {
+    var box = $("overlay");
+    if (!o) { if (overlayId) { box.classList.remove("on"); $("ovBody").innerHTML = ""; overlayId = ""; } return; }
+    if (o.id === overlayId) { return; }
+    overlayId = o.id;
+    $("ovTitle").textContent = o.title || "";
+    var body = $("ovBody");
+    body.innerHTML = "";
+    body.style.width = o.kind === "url" ? "100%" : "";
+    body.style.height = o.kind === "url" ? "80vh" : "";
+    if (o.kind === "text") {
+      var t = document.createElement("div"); t.className = "text"; t.textContent = o.content; body.appendChild(t);
+    } else if (o.kind === "image") {
+      var img = document.createElement("img"); img.src = o.content; body.appendChild(img);
+    } else if (o.kind === "url") {
+      var frame = document.createElement("iframe"); frame.src = o.content; body.appendChild(frame);
+    }
+    box.classList.add("on");
+  }
+
+  // How smoothly this screen animates, reported back to the PC.
+  var frames = 0, fps = 0, fpsSince = performance.now();
+  (function count() {
+    frames++;
+    var now = performance.now();
+    if (now - fpsSince >= 2000) { fps = Math.round(frames * 1000 / (now - fpsSince)); frames = 0; fpsSince = now; }
+    (window.requestAnimationFrame || function (f) { setTimeout(f, 16); })(count);
+  })();
+
   var pausedSince = 0;
   function apply(data) {
+    applyOverlay(data.overlay || null);
     var m = data.music;
     // Paused for a while: back to the clock instead of a frozen lyric.
     if (m && !m.playing) {
@@ -298,7 +338,9 @@
 
   function poll() {
     var xhr = new XMLHttpRequest();
-    xhr.open("GET", "/state?have=" + encodeURIComponent(lyrics ? track : ""), true);
+    xhr.open("GET", "/state?have=" + encodeURIComponent(lyrics ? track : "") +
+      "&w=" + window.innerWidth + "&h=" + window.innerHeight +
+      "&dpr=" + (window.devicePixelRatio || 1) + "&fps=" + fps, true);
     xhr.timeout = 4000;
     xhr.onload = function () {
       $("offline").classList.remove("on");
