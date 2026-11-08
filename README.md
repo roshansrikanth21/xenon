@@ -321,6 +321,18 @@ orb eases down to about half size and fades a little, then grows back the
 moment you hover near it or anything happens. Set `XENON_ORB_IDLE_S` to change
 the delay, or `0` to keep it full size.
 
+### Companion screen (tablet or phone)
+
+The orb serves a lightweight page on your network. Open
+`http://<this PC's IP>:8765` on a tablet (the tray menu shows the exact
+address; allow Python through Windows Firewall on private networks the first
+time). While Spotify plays in the web player it shows the song with **synced
+lyrics** from LRCLIB as kinetic typography, with four rotating entrance
+styles and colours that drift per song. Otherwise it shows a big clock,
+Xenon's state, running timers and the last answer. The page is read-only and
+uses only CSS transforms, so slow tablets cope. `XENON_COMPANION=off`
+disables it; `XENON_COMPANION_PORT` changes the port.
+
 ### Tray icon
 
 With `pip install -e ".[orb]"`, the orb also puts an icon in the notification

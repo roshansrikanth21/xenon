@@ -33,7 +33,7 @@ class WebPlayer:
     def window(self):
         """The browser window whose active tab is the Spotify web player."""
         browsers = []
-        for window in self._desktop_factory().windows():
+        for window in self._candidate_windows():
             title = (window.window_text() or "").lower()
             browser_tab = "spotify" in title and any(hint in title for hint in BROWSER_HINTS)
             desktop_app = title.strip() in {"spotify", "spotify premium", "spotify free"}
@@ -47,6 +47,74 @@ class WebPlayer:
             if self.address(window).startswith("https://open.spotify.com"):
                 return window
         return None
+
+    def _candidate_windows(self):
+        """UIA's desktop listing can skip windows (for example on another
+        virtual desktop), so also look them up by handle through Win32."""
+        seen = []
+        try:
+            seen = list(self._desktop_factory().windows())
+        except Exception:
+            seen = []
+        if self._desktop_factory is not _uia_desktop:
+            return seen  # tests inject a fake desktop
+        titles = {(w.window_text() or "") for w in seen}
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            handles = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def collect(hwnd, _):
+                if user32.IsWindowVisible(hwnd):
+                    buffer = ctypes.create_unicode_buffer(256)
+                    user32.GetWindowTextW(hwnd, buffer, 256)
+                    title = buffer.value.lower()
+                    if buffer.value not in titles and any(h in title for h in BROWSER_HINTS + ("spotify",)):
+                        handles.append(hwnd)
+                return True
+
+            user32.EnumWindows(collect, 0)
+            desktop = self._desktop_factory()
+            for hwnd in handles:
+                try:
+                    seen.append(desktop.window(handle=hwnd).wrapper_object())
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return seen
+
+    def now_playing(self) -> dict | None:
+        """Title, artist and position from the player bar, or None."""
+        window = self.window()
+        if window is None:
+            return None
+        info: dict = {"title": "", "artist": "", "position_ms": 0, "duration_ms": 0,
+                      "playing": False}
+        try:
+            for document in window.descendants(control_type="Document"):
+                for element in document.descendants():
+                    name = (element.window_text() or "").strip()
+                    kind = element.element_info.control_type
+                    if not info["title"] and name.lower().startswith("now playing:"):
+                        rest = name.split(":", 1)[1].strip()
+                        title, _, artist = rest.rpartition(" by ")
+                        info["title"], info["artist"] = (title or rest).strip(), artist.strip()
+                    elif kind == "Slider" and name.lower() == "change progress":
+                        try:
+                            info["position_ms"] = int(element.iface_range_value.CurrentValue)
+                            info["duration_ms"] = int(element.iface_range_value.CurrentMaximum)
+                        except Exception:
+                            pass
+                    elif kind == "Button" and name.lower() == "pause":
+                        info["playing"] = True
+                break
+        except Exception:
+            return None
+        return info if info["title"] else None
 
     @staticmethod
     def address(window) -> str:

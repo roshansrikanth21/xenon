@@ -378,8 +378,13 @@ class OrbAppTests(unittest.TestCase):
 
         from xenon import orb
 
+        import os
         import tkinter
+        from unittest import mock
 
+        env = mock.patch.dict(os.environ, {"XENON_COMPANION": "off"})  # no port clash with a live orb
+        env.start()
+        self.addCleanup(env.stop)
         try:
             app = orb.OrbApp(lambda: backend, None, tray=False)
         except tkinter.TclError as error:  # no interactive desktop

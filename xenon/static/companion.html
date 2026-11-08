@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#06070c">
+<title>Xenon</title>
+<style>
+  :root {
+    --bg: #06070c;
+    --ink: #eef1fa;
+    --dim: rgba(238, 241, 250, 0.42);
+    --faint: rgba(238, 241, 250, 0.16);
+    --hue: 265;
+    --accent: hsl(var(--hue) 90% 68%);
+    --accent-2: hsl(calc(var(--hue) + 55) 85% 62%);
+    --state: #7dd3fc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--ink); overflow: hidden; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+
+  /* Ambient colour: big soft gradients that drift. Cheap on old GPUs. */
+  .blob {
+    position: fixed; width: 90vmax; height: 90vmax; border-radius: 50%;
+    opacity: .55; will-change: transform; transition: background 2.5s ease;
+    pointer-events: none;
+  }
+  .b1 { left: -35vmax; top: -40vmax; background: radial-gradient(circle, hsl(var(--hue) 85% 45% / .55), transparent 62%); animation: drift1 26s ease-in-out infinite alternate; }
+  .b2 { right: -40vmax; bottom: -45vmax; background: radial-gradient(circle, hsl(calc(var(--hue) + 60) 85% 50% / .45), transparent 62%); animation: drift2 31s ease-in-out infinite alternate; }
+  .b3 { left: 20vw; top: 30vh; width: 60vmax; height: 60vmax; background: radial-gradient(circle, hsl(calc(var(--hue) - 40) 80% 55% / .22), transparent 65%); animation: drift3 22s ease-in-out infinite alternate; }
+  @keyframes drift1 { to { transform: translate(18vw, 14vh) scale(1.12); } }
+  @keyframes drift2 { to { transform: translate(-16vw, -12vh) scale(1.08); } }
+  @keyframes drift3 { to { transform: translate(-22vw, 10vh) scale(.9); } }
+
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column; padding: 4.5vh 5vw; opacity: 0; transition: opacity .8s ease; }
+  .screen.on { opacity: 1; }
+
+  /* ---------- music ---------- */
+  .track { display: flex; align-items: center; gap: 1.2vw; font-size: clamp(14px, 2vw, 22px); color: var(--dim); min-height: 3em; }
+  .track .note { width: .9em; height: .9em; border-radius: 50%; background: var(--accent); box-shadow: 0 0 18px var(--accent); flex: none; animation: beat 1.2s ease-in-out infinite; }
+  .track .title { color: var(--ink); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60vw; }
+  .track .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .paused .track .note { animation: none; opacity: .5; }
+  @keyframes beat { 0%,100% { transform: scale(.85); } 50% { transform: scale(1.15); } }
+
+  .stage { flex: 1; position: relative; display: flex; flex-direction: column; justify-content: center; }
+  .line { position: absolute; left: 0; right: 0; text-align: left; line-height: 1.12; letter-spacing: -.01em; }
+  .line.prev { top: 14%; font-size: clamp(16px, 2.6vw, 30px); color: var(--faint); transform-origin: left; animation: up .9s ease forwards; }
+  .line.next { bottom: 12%; font-size: clamp(16px, 2.6vw, 30px); color: var(--dim); }
+  .line.cur  { top: 50%; transform: translateY(-50%); font-size: clamp(30px, 7.2vw, 96px); font-weight: 800; }
+  @keyframes up { from { transform: translateY(40%); opacity: .9; } to { transform: translateY(0); opacity: 1; } }
+
+  .w { display: inline-block; opacity: 0; will-change: transform, opacity; margin-right: .26em; }
+  .w.hot { background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  /* Four entrance styles, rotated per line so it never feels repetitive. */
+  .s0 .w { animation: pop .55s cubic-bezier(.2, 1.6, .4, 1) forwards; }
+  .s1 .w { animation: slide .6s cubic-bezier(.2, .9, .3, 1) forwards; }
+  .s2 .w { animation: drop .65s cubic-bezier(.3, 1.4, .5, 1) forwards; }
+  .s3 .w { animation: spread .8s ease forwards; }
+  @keyframes pop    { from { opacity: 0; transform: translateY(.45em) scale(.6); } to { opacity: 1; transform: none; } }
+  @keyframes slide  { from { opacity: 0; transform: translateX(-1.2em) skewX(-12deg); } to { opacity: 1; transform: none; } }
+  @keyframes drop   { from { opacity: 0; transform: translateY(-.8em) rotate(-6deg); } to { opacity: 1; transform: none; } }
+  @keyframes spread { from { opacity: 0; letter-spacing: .5em; filter: none; } to { opacity: 1; letter-spacing: 0; } }
+
+  .breath { display: flex; gap: 1.6vw; }
+  .breath i { width: 2.2vw; height: 2.2vw; min-width: 12px; min-height: 12px; border-radius: 50%; background: var(--accent); opacity: .3; animation: dot 1.4s ease-in-out infinite; }
+  .breath i:nth-child(2) { animation-delay: .2s; } .breath i:nth-child(3) { animation-delay: .4s; }
+  @keyframes dot { 50% { opacity: 1; transform: translateY(-40%); } }
+
+  /* No synced lyrics: the title itself becomes the visual. */
+  .kinetic { font-size: clamp(34px, 8vw, 110px); font-weight: 800; line-height: 1.02; }
+  .kinetic .w { opacity: 1; animation: float 6s ease-in-out infinite; }
+  @keyframes float { 0%,100% { transform: translateY(0) rotate(0); } 50% { transform: translateY(-.12em) rotate(-1.5deg); } }
+  .bars { display: flex; align-items: flex-end; gap: .8vw; height: 9vh; margin-top: 5vh; }
+  .bars span { width: 1.4vw; min-width: 6px; background: linear-gradient(var(--accent-2), var(--accent)); border-radius: 4px; height: 20%; animation: bar 1s ease-in-out infinite alternate; }
+  .paused .bars span { animation-play-state: paused; }
+  @keyframes bar { to { height: 100%; } }
+
+  .progress { height: 4px; border-radius: 4px; background: var(--faint); overflow: hidden; }
+  .progress b { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 1s linear; }
+
+  /* ---------- home ---------- */
+  .home { justify-content: space-between; }
+  .clock { font-size: clamp(64px, 19vw, 260px); font-weight: 200; letter-spacing: -.04em; line-height: .9; }
+  .clock small { font-size: .28em; color: var(--dim); margin-left: .2em; letter-spacing: 0; }
+  .date { font-size: clamp(16px, 2.8vw, 34px); color: var(--dim); margin-top: 1.5vh; }
+  .pill { display: inline-flex; align-items: center; gap: .7em; padding: .55em 1.1em; border-radius: 999px; background: rgba(255,255,255,.06); font-size: clamp(14px, 2vw, 24px); }
+  .pill i { width: .75em; height: .75em; border-radius: 50%; background: var(--state); box-shadow: 0 0 14px var(--state); }
+  .live .pill i { animation: beat 1s ease-in-out infinite; }
+  .detail { color: var(--dim); margin-left: .4em; max-width: 50vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .timers { display: grid; gap: 1.6vh; margin-top: 3vh; }
+  .timer { font-size: clamp(16px, 2.4vw, 28px); }
+  .timer .bar { height: 6px; border-radius: 6px; background: var(--faint); margin-top: .5em; overflow: hidden; }
+  .timer .bar b { display: block; height: 100%; background: #fbbf24; transition: width 1s linear; }
+  .answer { font-size: clamp(15px, 2.2vw, 26px); color: var(--dim); max-width: 80vw; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+  .offline { position: fixed; right: 3vw; bottom: 2.5vh; font-size: 13px; color: #f87171; opacity: 0; transition: opacity .4s; }
+  .offline.on { opacity: 1; }
+  .hint { position: fixed; left: 50%; bottom: 2.5vh; transform: translateX(-50%); font-size: 12px; color: var(--faint); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .blob, .w, .kinetic .w, .bars span, .track .note, .breath i { animation: none !important; opacity: 1; }
+  }
+</style>
+</head>
+<body>
+  <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+
+  <section class="screen home" id="home">
+    <div>
+      <div class="clock" id="clock">--:--</div>
+      <div class="date" id="date"></div>
+    </div>
+    <div>
+      <div class="pill"><i></i><span id="stateLabel">Xenon</span><span class="detail" id="stateDetail"></span></div>
+      <div class="timers" id="timers"></div>
+    </div>
+    <div class="answer" id="answer"></div>
+  </section>
+
+  <section class="screen music" id="music">
+    <div class="track"><span class="note"></span><span class="title" id="title"></span><span class="artist" id="artist"></span></div>
+    <div class="stage" id="stage"></div>
+    <div class="progress"><b id="bar"></b></div>
+  </section>
+
+  <div class="offline" id="offline">Xenon is not reachable</div>
+  <div class="hint" id="hint">tap for full screen</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var STATE_COLORS = {
+    idle: "#7dd3fc", standby: "#34d399", listening: "#34d399", heard: "#93c5fd",
+    thinking: "#fbbf24", searching: "#22d3ee", speaking: "#c084fc", error: "#f87171"
+  };
+  var STATE_TEXT = {
+    idle: "Xenon", standby: "Say “Xenon”", listening: "Listening", heard: "Got it",
+    thinking: "Thinking", searching: "Searching", speaking: "Speaking", error: "Something went wrong"
+  };
+
+  var track = "", lyrics = null, lineIndex = -2, basePos = 0, baseAt = 0, playing = false, duration = 0;
+  var mode = "";
+
+  function hash(text) {
+    var h = 0;
+    for (var i = 0; i < text.length; i++) { h = (h * 31 + text.charCodeAt(i)) | 0; }
+    return Math.abs(h);
+  }
+  function setHue(h) { document.documentElement.style.setProperty("--hue", String(h % 360)); }
+
+  function show(which) {
+    if (mode === which) { return; }
+    mode = which;
+    $("home").classList.toggle("on", which === "home");
+    $("music").classList.toggle("on", which === "music");
+  }
+
+  // Build a line as word spans with staggered entrances.
+  function wordsLine(text, cls, style) {
+    var line = document.createElement("div");
+    line.className = "line " + cls + (style !== undefined ? " s" + style : "");
+    var words = text.split(/\s+/).filter(Boolean);
+    var longest = words.reduce(function (a, b) { return b.length > a.length ? b : a; }, "");
+    words.forEach(function (word, i) {
+      var span = document.createElement("span");
+      span.className = "w" + (cls === "cur" && word === longest && words.length > 2 ? " hot" : "");
+      span.textContent = word;
+      if (cls === "cur") { span.style.animationDelay = (i * 70) + "ms"; } else { span.style.opacity = 1; }
+      line.appendChild(span);
+    });
+    return line;
+  }
+
+  function renderLine(i) {
+    var stage = $("stage");
+    stage.innerHTML = "";
+    var prev = i > 0 ? lyrics[i - 1][1] : "";
+    var cur = i >= 0 ? lyrics[i][1] : "";
+    var next = i + 1 < lyrics.length ? lyrics[i + 1][1] : "";
+    if (prev) { stage.appendChild(wordsLine(prev, "prev")); }
+    if (cur) {
+      stage.appendChild(wordsLine(cur, "cur", i % 4));
+    } else {
+      var rest = document.createElement("div");
+      rest.className = "line cur breath";
+      rest.innerHTML = "<i></i><i></i><i></i>";
+      stage.appendChild(rest);
+    }
+    if (next) { stage.appendChild(wordsLine(next, "next")); }
+    setHue(hash(track) + Math.max(i, 0) * 9);  // colour drifts as the song moves on
+  }
+
+  function renderKinetic(title, artist) {
+    var stage = $("stage");
+    stage.innerHTML = "";
+    var box = document.createElement("div");
+    box.className = "kinetic";
+    title.split(/\s+/).filter(Boolean).slice(0, 9).forEach(function (word, i) {
+      var span = document.createElement("span");
+      span.className = "w" + (i % 3 === 1 ? " hot" : "");
+      span.textContent = word;
+      span.style.animationDelay = (-i * 0.7) + "s";
+      box.appendChild(span);
+    });
+    stage.appendChild(box);
+    var bars = document.createElement("div");
+    bars.className = "bars";
+    for (var b = 0; b < 16; b++) {
+      var bar = document.createElement("span");
+      bar.style.animationDuration = (0.45 + (hash(title + b) % 70) / 100) + "s";
+      bar.style.animationDelay = (-(b % 5) * 0.13) + "s";
+      bars.appendChild(bar);
+    }
+    stage.appendChild(bars);
+  }
+
+  function position() {
+    return playing ? basePos + (performance.now() - baseAt) : basePos;
+  }
+
+  function tick() {
+    if (mode !== "music") { return; }
+    var pos = position();
+    if (duration) { $("bar").style.width = Math.min(100, pos / duration * 100) + "%"; }
+    if (!lyrics) { return; }
+    var i = -1;
+    for (var k = 0; k < lyrics.length; k++) { if (lyrics[k][0] <= pos + 150) { i = k; } else { break; } }
+    if (i !== lineIndex) { lineIndex = i; renderLine(i); }
+  }
+
+  function renderHome(x, now) {
+    var d = new Date(now * 1000);
+    var hh = d.getHours(), mm = d.getMinutes();
+    var h12 = hh % 12 || 12;
+    $("clock").innerHTML = h12 + ":" + (mm < 10 ? "0" : "") + mm + "<small>" + (hh < 12 ? "AM" : "PM") + "</small>";
+    $("date").textContent = d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+    var state = (x && x.state) || "idle";
+    document.documentElement.style.setProperty("--state", STATE_COLORS[state] || "#7dd3fc");
+    document.body.classList.toggle("live", state !== "idle");
+    $("stateLabel").textContent = STATE_TEXT[state] || state;
+    $("stateDetail").textContent = (x && x.detail && state !== "idle" && state !== "standby") ? x.detail : "";
+    var timers = $("timers");
+    timers.innerHTML = "";
+    ((x && x.timers) || []).forEach(function (t) {
+      var row = document.createElement("div");
+      row.className = "timer";
+      var left = Math.max(0, Math.round(t.remaining_s));
+      var label = document.createElement("div");
+      label.textContent = (t.name || "Timer") + " · " + Math.floor(left / 60) + ":" + ("0" + left % 60).slice(-2);
+      var bar = document.createElement("div");
+      bar.className = "bar";
+      bar.innerHTML = "<b></b>";
+      bar.firstChild.style.width = (t.total_s ? left / t.total_s * 100 : 0) + "%";
+      row.appendChild(label); row.appendChild(bar);
+      timers.appendChild(row);
+    });
+    $("answer").textContent = (x && x.last) || "";
+  }
+
+  var pausedSince = 0;
+  function apply(data) {
+    var m = data.music;
+    // Paused for a while: back to the clock instead of a frozen lyric.
+    if (m && !m.playing) {
+      pausedSince = pausedSince || performance.now();
+      if (performance.now() - pausedSince > 20000) { m = null; }
+    } else {
+      pausedSince = 0;
+    }
+    if (m && m.title) {
+      show("music");
+      document.body.classList.toggle("paused", !m.playing);
+      basePos = m.position_ms || 0; baseAt = performance.now();
+      playing = !!m.playing; duration = m.duration_ms || 0;
+      if (m.track !== track) {
+        track = m.track; lyrics = null; lineIndex = -2;
+        $("title").textContent = m.title;
+        $("artist").textContent = m.artist ? "— " + m.artist : "";
+        setHue(hash(track));
+        renderKinetic(m.title, m.artist);
+      }
+      if (m.lyrics && m.lyrics.length) { lyrics = m.lyrics; lineIndex = -2; }
+      if (!lyrics && m.lyrics_state !== "loading" && !$("stage").querySelector(".kinetic")) {
+        renderKinetic(m.title, m.artist);
+      }
+    } else {
+      show("home");
+      renderHome(data.xenon, data.time);
+    }
+  }
+
+  function poll() {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", "/state?have=" + encodeURIComponent(lyrics ? track : ""), true);
+    xhr.timeout = 4000;
+    xhr.onload = function () {
+      $("offline").classList.remove("on");
+      try { apply(JSON.parse(xhr.responseText)); } catch (e) { /* keep last frame */ }
+      setTimeout(poll, 1000);
+    };
+    xhr.onerror = xhr.ontimeout = function () {
+      $("offline").classList.add("on");
+      setTimeout(poll, 3000);
+    };
+    xhr.send();
+  }
+
+  document.body.addEventListener("click", function () {
+    var el = document.documentElement;
+    var go = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (go && !document.fullscreenElement) { go.call(el); }
+    $("hint").style.display = "none";
+  });
+
+  show("home");
+  renderHome(null, Date.now() / 1000);
+  setInterval(tick, 100);
+  poll();
+})();
+</script>
+</body>
+</html>

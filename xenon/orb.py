@@ -467,6 +467,9 @@ class Tray:
                  checked=lambda _i: not app.hidden),
             item("Start at sign-in", self._toggle_startup,
                  checked=lambda _i: self._startup.enabled()),
+            item(lambda _i: f"Companion screen: {app.companion_url or 'off'}",
+                 lambda: app.companion_url and webbrowser.open(app.companion_url),
+                 enabled=lambda _i: bool(app.companion_url)),
             pystray.Menu.SEPARATOR,
             item("Quit Xenon", lambda: app.post(app.quit)),
         )
@@ -832,6 +835,22 @@ class OrbApp:
         self._timers = quick.TIMERS
         self._timers.listen(self._on_timer_thread)
         self.hidden = False
+        self.companion_url = ""
+        self._companion = None
+        if os.environ.get("XENON_COMPANION", "on").strip().lower() not in {"0", "off", "false", "no"}:
+            try:
+                from xenon.companion import DEFAULT_PORT, Companion
+                from xenon.lyrics import LyricsFinder
+                from xenon.webplayer import WebPlayer
+
+                port = int(os.environ.get("XENON_COMPANION_PORT", DEFAULT_PORT))
+                self._companion = Companion(
+                    self.companion_state, WebPlayer().now_playing, LyricsFinder().find, port=port
+                )
+                self.companion_url = self._companion.start()
+                print(f"companion screen: {self.companion_url}", flush=True)
+            except Exception as error:
+                print(f"companion screen unavailable: {error}", file=sys.stderr, flush=True)
         self.dimmer = ScreenDimmer(self.root)
         self._last_overlays: list = []
         try:
@@ -935,6 +954,24 @@ class OrbApp:
                 return hwnd
             hwnd = user32.GetWindow(hwnd, GW_HWNDNEXT)
         return None
+
+    def companion_state(self) -> dict:
+        """What the companion screen shows when no music plays (read-only)."""
+        from xenon.orb_model import STATE_LABELS
+
+        timers = [
+            {"name": t.name, "remaining_s": t.remaining(), "total_s": t.seconds}
+            for t in self._timers.active()
+        ]
+        last = self._history[-1][1] if self._history else ""
+        return {
+            "state": self.model.state,
+            "label": STATE_LABELS.get(self.model.state, self.model.state),
+            "detail": self.model.detail,
+            "voice": self.model.voice_on,
+            "timers": timers,
+            "last": last[:400],
+        }
 
     def _sync_dimmer(self) -> None:
         """Follow brightness changes made by voice, Ask or the CLI."""
@@ -1397,6 +1434,11 @@ class OrbApp:
             self._hotkeys.stop()
         self._timers.unlisten(self._on_timer_thread)
         self.dimmer.clear()
+        if self._companion is not None:
+            try:
+                self._companion.stop()
+            except Exception:
+                pass
         if self._tray is not None:
             self._tray.stop()
         save_position(self.x, self.y)
