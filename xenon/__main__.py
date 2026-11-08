@@ -522,6 +522,7 @@ class _OrbBackend:
 
     def __init__(self, config) -> None:
         self._store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
+        self._chat = OpenAICompatibleChat(config) if config is not None else None
         self._assistant = (
             Assistant(_observer(), self._store, OpenAICompatibleChat(config))
             if config is not None
@@ -546,9 +547,9 @@ class _OrbBackend:
         from xenon.orb import OrbReply
 
         text = _without_wake(text)
-        fast = _voice_fast_reply(text)
+        fast, understood = _smart_reply(text, self._chat)
         if fast is not None:
-            return OrbReply(fast, note="fast path")
+            return OrbReply(fast, note=f"did: {understood}" if understood else "fast path")
         return self._answer(text)
 
     def screen(self):
@@ -640,6 +641,7 @@ def _orb_voice_runner(config):
         from xenon.wake import DEFAULT_TTL_S
 
         gate = WakeGate(wake_word, aliases=aliases, always=always)
+        router_model = OpenAICompatibleChat(config) if config is not None else None
         armed_until = 0.0
 
         def waiting() -> None:
@@ -682,7 +684,7 @@ def _orb_voice_runner(config):
                 shown_armed = False
                 chime.play("heard")
                 hooks.state("heard", command)
-                fast = _voice_fast_reply(command)
+                fast, _understood = _smart_reply(command, router_model)
                 if fast is not None:
                     reply = fast
                 else:
@@ -849,6 +851,31 @@ def _run_actions(goal: str, actions, args: argparse.Namespace, verifier=None) ->
     return 0 if outcome.status == "succeeded" else 1
 
 
+def _recognised(command: str) -> bool:
+    """Can a deterministic parser run this? (Keeps the router honest.)"""
+    from xenon import brightness, music, quick
+
+    command = _without_wake(command)
+    return any(
+        parser(command) is not None
+        for parser in (quick.parse, brightness.parse, music.parse, fastpath.parse)
+    )
+
+
+def _smart_reply(text: str, model=None) -> tuple[str | None, str | None]:
+    """Run a request as a command if possible: instant parsers first, then
+    the model's reading of it. Returns (reply, understood_command)."""
+    reply = _voice_fast_reply(text)
+    if reply is not None or model is None:
+        return reply, None
+    from xenon import router
+
+    command = router.route(_without_wake(text), model.complete, _recognised)
+    if command is None:
+        return None, None
+    return _voice_fast_reply(command), command
+
+
 def _voice_fast_reply(
     command: str, backend=None, search_fn=None, music_controller=None
 ) -> str | None:
@@ -955,6 +982,16 @@ def _do(args: argparse.Namespace) -> int:
     from xenon import music
 
     from xenon import quick
+
+    if not _recognised(goal):
+        do_config = chat_config_from_env()
+        if do_config is not None:
+            from xenon import router
+
+            routed = router.route(goal, OpenAICompatibleChat(do_config).complete, _recognised)
+            if routed:
+                print(f"understood as: {routed}")
+                goal = routed
 
     quick_command = quick.parse(goal)
     if quick_command is not None:

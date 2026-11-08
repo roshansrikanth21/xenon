@@ -379,11 +379,17 @@ def apply(action: str, value: int = 0, **kwargs) -> str:
     """Text-only version for the CLI and one-shot commands."""
     outcome = apply_detailed(action, value, **kwargs)
     if outcome.ignored:
-        return (
-            outcome.reply + " Your monitor kept its own brightness (Windows HDR or "
-            "a locked picture mode does this), so Xenon's orb dims it on screen "
-            "instead."
-        )
+        # Explain the on-screen dimming once, not on every step.
+        state_path = kwargs.get("state_path")
+        saved = _load_saved(state_path)
+        if not saved.get("explained_software"):
+            saved["explained_software"] = True
+            _save(saved, state_path)
+            return (
+                outcome.reply + " Your monitor kept its own brightness (Windows HDR or "
+                "a locked picture mode does this), so Xenon's orb dims it on screen "
+                "instead."
+            )
     return outcome.reply
 
 
@@ -396,34 +402,67 @@ class BrightnessCommand:
     value: int = 0
 
 
-_SCREEN = r"(?:(?:the\s+|my\s+)?(?:screen|screens|monitor|monitors|display|displays|brightness))"
-_FILLER = r"^(?:please\s+|can you\s+|could you\s+)?"
-_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("min", re.compile(_FILLER + rf"(?:dim|darken|minimi[sz]e)\s+{_SCREEN}(?:\s+(?:all the way|completely|fully|to (?:the )?(?:minimum|lowest)))?$")),
-    ("min", re.compile(_FILLER + r"(?:minimum|lowest|min)\s+brightness$")),
-    ("min", re.compile(_FILLER + r"(?:brightness|screen)\s+(?:to\s+)?(?:minimum|lowest|min|zero|off)$")),
-    ("max", re.compile(_FILLER + r"(?:maximum|max|full|highest)\s+brightness$")),
-    ("max", re.compile(_FILLER + r"(?:brightness|screen)\s+(?:to\s+)?(?:maximum|max|full|highest)$")),
-    ("max", re.compile(_FILLER + rf"(?:brighten|maximi[sz]e)\s+{_SCREEN}(?:\s+(?:all the way|fully))?$")),
-    ("restore", re.compile(_FILLER + r"(?:undim|restore|reset)\s+(?:the\s+|my\s+)?(?:screen|screens|monitor|monitors|brightness)$")),
-    ("up", re.compile(_FILLER + rf"(?:brightness\s+up|brighter|turn\s+up\s+(?:the\s+)?brightness|make\s+{_SCREEN}\s+brighter|increase\s+(?:the\s+)?brightness)$")),
-    ("down", re.compile(_FILLER + rf"(?:brightness\s+down|darker|dimmer|turn\s+down\s+(?:the\s+)?brightness|make\s+{_SCREEN}\s+(?:darker|dimmer)|decrease\s+(?:the\s+)?brightness|lower\s+(?:the\s+)?brightness)$")),
-]
-_SET_RE = re.compile(
-    _FILLER + r"(?:set\s+)?(?:the\s+|my\s+)?(?:screen\s+|monitor\s+)?brightness\s+(?:to\s+|at\s+)?(?P<n>\d{1,3})\s*(?:%|percent)?$"
+_SCREEN_WORDS = {"brightness", "screen", "screens", "monitor", "monitors", "display", "displays"}
+# Things that are dimmed but are not screens: leave them to other handlers.
+_NOT_SCREENS = {"light", "lights", "lamp", "lamps", "bulb", "bulbs", "music", "volume", "sound", "voice"}
+_LEAD = re.compile(
+    r"^(?:(?:hey|ok|okay)\s+)?(?:(?:can|could|would|will)\s+you\s+|please\s+|i\s+(?:want|need)\s+you\s+to\s+)*"
 )
+_MIN_WORDS = ("minimum", "lowest", "all the way down", "completely", "fully", "zero")
+_MAX_WORDS = ("maximum", "highest", "full", "all the way up")
+_DOWN = re.compile(r"\b(?:lower|reduce|decrease|down|dim|dimmer|darker|darken|less bright)\b")
+_UP = re.compile(r"\b(?:raise|increase|up|brighter|brighten|more bright|boost)\b")
+_RESTORE = re.compile(r"\b(?:undim|un-dim|restore|reset|back to normal|normal brightness)\b")
+_NUMBER = re.compile(r"\b(?P<n>\d{1,3})\s*(?:%|percent)?(?!\w)")
 
 
 def parse(text: str) -> BrightnessCommand | None:
-    phrase = " ".join(text.lower().strip().strip(".!?").split())
+    """Understand brightness requests however they are phrased.
+
+    "can you lower my brightness", "turn my screen down a bit", "dim my
+    monitor", "brightness 30", "make it brighter", "restore brightness".
+    """
+    phrase = " ".join(text.lower().replace("\u2019", "'").strip().strip(".!?").split())
+    phrase = _LEAD.sub("", phrase).strip()
     if not phrase:
         return None
-    match = _SET_RE.match(phrase)
-    if match:
-        return BrightnessCommand("set", clamp(int(match.group("n"))))
-    for action, pattern in _PATTERNS:
-        if pattern.match(phrase):
-            return BrightnessCommand(action)
+    words = set(re.findall(r"[a-z]+", phrase))
+    if words & _NOT_SCREENS:
+        return None
+    if phrase.startswith(("what", "how", "why", "is ", "does ")):
+        return None  # a question about brightness, not a request
+    about_screen = bool(words & _SCREEN_WORDS)
+    # "dim it", "make it darker", "brighter": allowed without naming the
+    # screen only when the sentence is short and has no other object.
+    bare = not about_screen and len(phrase.split()) <= 4 and re.search(
+        r"\b(?:dim|dimmer|darker|darken|brighter|brighten)\b", phrase
+    )
+    if not about_screen and not bare:
+        return None
+
+    if _RESTORE.search(phrase):
+        return BrightnessCommand("restore")
+    number = _NUMBER.search(phrase)
+    if number and about_screen:
+        return BrightnessCommand("set", clamp(int(number.group("n"))))
+    down = bool(_DOWN.search(phrase))
+    up = bool(_UP.search(phrase)) and not down
+    if (any(word in phrase for word in _MIN_WORDS) or re.search(r"\bmin\b", phrase)) and not up:
+        return BrightnessCommand("min")
+    if (any(word in phrase for word in _MAX_WORDS) or re.search(r"\bmax\b", phrase)) and not down:
+        return BrightnessCommand("max")
+    if re.search(r"\bminimi[sz]e\b", phrase):
+        return BrightnessCommand("min")
+    if re.search(r"\bmaximi[sz]e\b", phrase):
+        return BrightnessCommand("max")
+    # "dim my monitor" on its own means as dark as it goes.
+    if re.match(r"^(?:dim|darken|minimi[sz]e)\s+(?:the\s+|my\s+|all\s+)?(?:screen|screens|monitor|monitors|display|displays)$", phrase):
+        return BrightnessCommand("min")
+    step = 5 if re.search(r"\b(?:a bit|a little|slightly|a touch)\b", phrase) else 25 if "a lot" in phrase else 0
+    if down:
+        return BrightnessCommand("down", step)
+    if up:
+        return BrightnessCommand("up", step)
     return None
 
 
