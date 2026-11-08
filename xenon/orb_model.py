@@ -33,6 +33,13 @@ IDLE_AFTER_S = 120.0
 IDLE_SCALE = 0.55
 IDLE_FADE = 0.72
 QUIET_STATES = frozenset({"idle", "standby"})
+# Notch mode: the orb lives at the top centre of the monitor. Idle, it folds
+# into a slim pill flush with the screen's top edge; hover it and it drops
+# down into the full circle with the options fanning downward.
+NOTCH_DROP = ORB_RADIUS + 16      # screen top edge -> orb centre (logical px)
+NOTCH_WIDTH = 124
+NOTCH_HEIGHT = 46                 # half of it sits above the screen edge
+NOTCH_IDLE_S = 6.0
 OPEN_SPEED = 5.5   # progress units per second
 CLOSE_SPEED = 4.0
 STAGGER = 0.07     # each satellite starts this much progress later
@@ -172,6 +179,8 @@ class OrbModel:
     state_since: float = 0.0
     idle_after: float = IDLE_AFTER_S
     shrink: float = 1.0            # 1 = full size .. IDLE_SCALE when idle
+    notch: bool = False
+    dock: float = 0.0              # notch mode: 0 = circle .. 1 = folded pill
     last_active: float = 0.0
 
     def __post_init__(self) -> None:
@@ -219,6 +228,11 @@ class OrbModel:
             distance = math.hypot(x - CENTER, y - CENTER)
         if distance <= OPEN_RADIUS + 10:
             self.mark_active()
+        on_notch = x is not None and y is not None and self.in_notch(x, y)
+        if on_notch:
+            # Hovering the folded notch unfolds it straight into the fan.
+            self.mark_active()
+            distance = 0.0
         limit = STAY_OPEN_RADIUS if self.progress > 0.05 else OPEN_RADIUS
         if self._suppressed:
             # Stay folded until the pointer has left the orb once.
@@ -244,6 +258,17 @@ class OrbModel:
         if math.hypot(x - CENTER, y - CENTER) <= ORB_RADIUS:
             return "orb"
         return None
+
+    @staticmethod
+    def notch_edge() -> float:
+        """Window y of the screen's top edge in notch mode."""
+        return CENTER - NOTCH_DROP
+
+    def in_notch(self, x: float, y: float) -> bool:
+        if not self.notch or self.dock < 0.3:
+            return False
+        edge = self.notch_edge()
+        return (abs(x - CENTER) <= NOTCH_WIDTH / 2 + 10) and (y <= edge + NOTCH_HEIGHT / 2 + 10)
 
     def mark_active(self) -> None:
         """Something happened: stay (or become) full size."""
@@ -282,12 +307,22 @@ class OrbModel:
         # Shrink slowly when idle, grow back quickly when needed.
         if self.state not in QUIET_STATES:
             self.mark_active()
-        target = IDLE_SCALE if self.is_idle else 1.0
-        rate = 0.6 if target < self.shrink else 5.0
-        if self.shrink < target:
-            self.shrink = min(target, self.shrink + rate * dt)
+        if self.notch:
+            # Fold into the notch when idle; unfold fast when needed.
+            target = 1.0 if self.is_idle else 0.0
+            rate = 2.2 if target > self.dock else 6.0
+            if self.dock < target:
+                self.dock = min(target, self.dock + rate * dt)
+            else:
+                self.dock = max(target, self.dock - rate * dt)
+            self.shrink = 1.0
         else:
-            self.shrink = max(target, self.shrink - rate * dt)
+            target = IDLE_SCALE if self.is_idle else 1.0
+            rate = 0.6 if target < self.shrink else 5.0
+            if self.shrink < target:
+                self.shrink = min(target, self.shrink + rate * dt)
+            else:
+                self.shrink = max(target, self.shrink - rate * dt)
         self.level = max(0.0, self.level - dt * 1.6)
 
         count = len(self.satellites)

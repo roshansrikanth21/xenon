@@ -17,6 +17,10 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 from xenon.orb_model import (
+    NOTCH_DROP,
+    NOTCH_HEIGHT,
+    NOTCH_WIDTH,
+    ease_in_out,
     IDLE_FADE,
     IDLE_SCALE,
     ACTIONS,
@@ -102,6 +106,7 @@ class OrbRenderer:
         self._build_static()
         self._build_effects()
         self._build_satellites()
+        self._build_notch()
 
     # ----- one-off assets ----------------------------------------------
 
@@ -213,6 +218,54 @@ class OrbRenderer:
         ImageDraw.Draw(glow).ellipse((gc - gr, gc - gr, gc + gr, gc + gr), fill=255)
         self._badge_glow = glow.filter(ImageFilter.GaussianBlur(2.2 * s))
 
+    def _build_notch(self) -> None:
+        """The folded pill: a rounded bar whose top half is above the screen."""
+        s = self.scale
+        w, h = int(NOTCH_WIDTH * s), int(NOTCH_HEIGHT * s)
+        big = Image.new("L", (w * STATIC_SS, h * STATIC_SS), 0)
+        ImageDraw.Draw(big).rounded_rectangle(
+            (0, 0, w * STATIC_SS - 1, h * STATIC_SS - 1), radius=h * STATIC_SS // 2, fill=255
+        )
+        self._notch_mask = big.resize((w, h), Image.LANCZOS)
+        ring = Image.new("L", (w * STATIC_SS, h * STATIC_SS), 0)
+        ImageDraw.Draw(ring).rounded_rectangle(
+            (0, 0, w * STATIC_SS - 1, h * STATIC_SS - 1), radius=h * STATIC_SS // 2,
+            outline=255, width=int(1.4 * s * STATIC_SS),
+        )
+        self._notch_ring = ring.resize((w, h), Image.LANCZOS)
+        glow = Image.new("L", (w + int(24 * s), h + int(24 * s)), 0)
+        pad = int(12 * s)
+        ImageDraw.Draw(glow).rounded_rectangle((pad, pad, pad + w, pad + h), radius=h // 2, fill=255)
+        self._notch_glow = glow.filter(ImageFilter.GaussianBlur(7 * s))
+        self._notch_font = _font(("segoeuisb.ttf", "segoeui.ttf"), max(7, int(8.5 * s)))
+
+    def _draw_notch(self, frame: Image.Image, model: OrbModel, core, accent, alpha: float) -> None:
+        s = self.scale
+        w, h = self._notch_mask.size
+        cx = self.size / 2
+        edge = (self.size / 2) - NOTCH_DROP * s  # screen top edge in window pixels
+        left, top = int(cx - w / 2), int(edge - h / 2)
+        breath = 0.5 + 0.5 * math.sin(model.time * 1.8)
+        gx = left - (self._notch_glow.width - w) // 2
+        gy = top - (self._notch_glow.height - h) // 2
+        frame.alpha_composite(_tint(self._notch_glow, accent, alpha * (0.35 + 0.2 * breath)), (max(gx, 0), max(gy, 0)))
+        body = Image.new("RGBA", (w, h), GLASS + (0,))
+        body.putalpha(_scale_alpha(self._notch_mask, 0.96 * alpha))
+        frame.alpha_composite(body, (left, top))
+        frame.alpha_composite(_tint(self._notch_ring, accent, 0.65 * alpha), (left, top))
+        # Visible half: a status dot and the name, letter-spaced.
+        visible_mid = int(edge + h / 4)
+        listening = model.voice_on and model.state in {"standby", "listening"}
+        dot_color = (74, 222, 128) if listening else core
+        r = max(2, int(3.2 * s * (0.85 + 0.25 * breath)))
+        dot_x = int(cx - w / 2 + h * 0.55)
+        dot = Image.new("L", frame.size, 0)
+        ImageDraw.Draw(dot).ellipse((dot_x - r, visible_mid - r, dot_x + r, visible_mid + r), fill=255)
+        frame.alpha_composite(_tint(dot, dot_color, alpha))
+        label = Image.new("L", frame.size, 0)
+        ImageDraw.Draw(label).text((cx + r, visible_mid), "X E N O N", font=self._notch_font, fill=255, anchor="mm")
+        frame.alpha_composite(_tint(label, (225, 230, 245), 0.8 * alpha))
+
     def _build_satellites(self) -> None:
         s = self.scale
         self._sat_px = int(round((SATELLITE_RADIUS + 8) * 2 * s))
@@ -282,7 +335,23 @@ class OrbRenderer:
             self._draw_timer_ring(frame, model)
         if model.voice_on:
             self._draw_badge(frame, model)
+        if model.notch and model.dock > 0.001:
+            frame = self._fold_into_notch(frame, model, core, accent)
         return frame
+
+    def _fold_into_notch(self, frame: Image.Image, model: OrbModel, core, accent) -> Image.Image:
+        """Morph: the circle shrinks, rises and fades into the notch pill."""
+        d = ease_in_out(model.dock)
+        out = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+        if d < 0.999:
+            scale = 1 - 0.8 * d
+            px = max(4, int(self.size * scale))
+            shrunk = frame.resize((px, px), Image.BILINEAR)
+            shrunk.putalpha(_scale_alpha(shrunk.getchannel("A"), (1 - d) ** 1.4))
+            cy = self.size / 2 - d * NOTCH_DROP * self.scale
+            out.alpha_composite(shrunk, (int(self.size / 2 - px / 2), max(0, int(cy - px / 2))))
+        self._draw_notch(out, model, core, accent, min(1.0, d * 1.3))
+        return out
 
     def _draw_ripples(self, frame: Image.Image, model: OrbModel, color) -> None:
         """Sonar rings: slow pings on standby, fast and bold while listening."""

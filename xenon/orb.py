@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from xenon.orb_model import (
+    NOTCH_DROP,
+    NOTCH_IDLE_S,
     CENTER,
     ORB_RADIUS,
     SATELLITE_DISTANCE,
@@ -788,12 +790,16 @@ class OrbApp:
         self.size = int(round(WINDOW * self.scale))
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
-        position = load_position()
-        if position is None or not self._on_screen(*position):
-            position = (
-                self.screen_w - self.size - int(8 * self.scale),
-                self.screen_h - self.size - int(40 * self.scale),
-            )
+        self.notch = os.environ.get("XENON_ORB_NOTCH", "on").strip().lower() not in {"0", "off", "false", "no"}
+        if self.notch:
+            position = self._notch_position()
+        else:
+            position = load_position()
+            if position is None or not self._on_screen(*position):
+                position = (
+                    self.screen_w - self.size - int(8 * self.scale),
+                    self.screen_h - self.size - int(40 * self.scale),
+                )
         self.x, self.y = position
         self.root.geometry(f"{self.size}x{self.size}+{self.x}+{self.y}")
         # Mark the window "never activate" before it is first shown; showing
@@ -805,12 +811,16 @@ class OrbApp:
         self.root.attributes("-topmost", True)
         self._give_back_focus(previous)
 
-        self.model = OrbModel()
+        self.model = OrbModel(notch=self.notch)
+        default_idle = NOTCH_IDLE_S if self.notch else self.model.idle_after
         try:
-            self.model.idle_after = float(os.environ.get("XENON_ORB_IDLE_S", self.model.idle_after))
+            self.model.idle_after = float(os.environ.get("XENON_ORB_IDLE_S", default_idle))
         except ValueError:
-            pass
-        self._update_direction()
+            self.model.idle_after = default_idle
+        if self.notch:
+            self.model.set_direction(math.pi / 2)  # options fan down from the top edge
+        else:
+            self._update_direction()
         self.renderer = OrbRenderer(self.scale)
         self.pill = InputPill(self.root)
         self.panel = AnswerPanel(self.root, self.scale)
@@ -1066,6 +1076,27 @@ class OrbApp:
         """Run ``callback`` on the Tk thread (safe from any thread)."""
         self._events.put(callback)
 
+    def _notch_position(self) -> tuple[int, int]:
+        """Window position that centres the notch on the primary monitor's top edge."""
+        left, top, right = 0, 0, self.screen_w
+        try:
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+            user32 = ctypes.windll.user32
+            user32.MonitorFromPoint.restype = wintypes.HMONITOR
+            monitor = user32.MonitorFromPoint(wintypes.POINT(0, 0), 1)  # primary
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                left, top, right = info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right
+        except Exception:
+            pass
+        x = (left + right) // 2 - self.size // 2
+        y = top + int(NOTCH_DROP * self.scale) - self.size // 2
+        return x, y
+
     def _on_screen(self, x: int, y: int) -> bool:
         return -self.size // 2 < x < self.screen_w - self.size // 2 and -self.size // 2 < y < self.screen_h - self.size // 2
 
@@ -1181,6 +1212,8 @@ class OrbApp:
         self._dragged = False
 
     def _on_drag(self, event) -> None:
+        if self.notch:
+            return  # the notch stays centred on the top edge
         if self._drag_origin is None or self._press_target != "orb":
             return
         sx, sy, wx, wy = self._drag_origin

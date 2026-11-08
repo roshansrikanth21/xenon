@@ -314,7 +314,16 @@ picture modes lock it); for those the orb lays a click-through dark overlay
 on that screen instead, and it stays dimmed across restarts until you restore
 it.
 
-### Shrinks when idle
+### Notch mode (default)
+
+The orb lives at the top centre of your primary monitor, measured from the
+monitor's real bounds. After `XENON_ORB_IDLE_S` seconds untouched (default 6)
+and not listening, thinking or speaking, it folds into a slim notch flush with
+the screen's top edge; put the cursor on the notch and it drops down into the
+circle with the options fanning downward. `XENON_ORB_NOTCH=off` restores the
+free-floating, draggable orb.
+
+### Shrinks when idle (free-floating mode)
 
 After two minutes untouched (and not listening, thinking or speaking), the
 orb eases down to about half size and fades a little, then grows back the
