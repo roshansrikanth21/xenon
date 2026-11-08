@@ -788,9 +788,14 @@ class OrbApp:
             )
         self.x, self.y = position
         self.root.geometry(f"{self.size}x{self.size}+{self.x}+{self.y}")
+        # Mark the window "never activate" before it is first shown; showing
+        # it first made the orb the active window, so the first question after
+        # startup read the orb instead of the user's app.
+        previous = ctypes.windll.user32.GetForegroundWindow()
+        self.window = LayeredWindow(_toplevel_hwnd(self.root))
         self.root.deiconify()
         self.root.attributes("-topmost", True)
-        self.window = LayeredWindow(_toplevel_hwnd(self.root))
+        self._give_back_focus(previous)
 
         self.model = OrbModel()
         try:
@@ -879,6 +884,53 @@ class OrbApp:
         nearest = active[0]
         self.model.timer_fraction = nearest.remaining() / max(1, nearest.seconds)
 
+    def _give_back_focus(self, previous=None) -> None:
+        """The orb must never be the active window; hand focus back.
+
+        Tk's show call activates the window despite WS_EX_NOACTIVATE, and at
+        startup the window that was active is often gone (the old orb), so
+        fall back to the next real window underneath.
+        """
+        try:
+            self.root.update_idletasks()
+            user32 = ctypes.windll.user32
+            if user32.GetForegroundWindow() != self.window.hwnd:
+                return
+            target = previous if previous and user32.IsWindow(previous) else None
+            if target in self._own_hwnds_safe():
+                target = None
+            target = target or self._next_real_window()
+            if target:
+                user32.SetForegroundWindow(target)
+        except Exception:
+            pass
+
+    def _own_hwnds_safe(self) -> set:
+        return getattr(self, "_own_hwnds", {self.window.hwnd})
+
+    def _next_real_window(self):
+        """The first visible, titled, normal window below the orb in Z-order."""
+        user32 = ctypes.windll.user32
+        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetWindow.restype = wintypes.HWND
+        GW_HWNDNEXT = 2
+        hwnd = user32.GetWindow(self.window.hwnd, GW_HWNDNEXT)
+        own = self._own_hwnds_safe()
+        for _ in range(500):
+            if not hwnd:
+                return None
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if (
+                hwnd not in own
+                and user32.IsWindowVisible(hwnd)
+                and not user32.IsIconic(hwnd)
+                and user32.GetWindowTextLengthW(hwnd) > 0
+                and not style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
+            ):
+                return hwnd
+            hwnd = user32.GetWindow(hwnd, GW_HWNDNEXT)
+        return None
+
     def _sync_dimmer(self) -> None:
         """Follow brightness changes made by voice, Ask or the CLI."""
         try:
@@ -908,8 +960,10 @@ class OrbApp:
             self.panel.hide()
             self.root.withdraw()
         else:
+            previous = ctypes.windll.user32.GetForegroundWindow()
             self.root.deiconify()
             self.root.attributes("-topmost", True)
+            self._give_back_focus(previous)
         if self._tray is not None:
             self._tray._icon.update_menu()
 
@@ -1002,6 +1056,10 @@ class OrbApp:
             return
         if hwnd and hwnd not in self._own_hwnds:
             self._last_external = hwnd
+        elif hwnd == self.window.hwnd:
+            # The orb itself should never hold focus (only the pill and cards
+            # may, while you type in them).
+            self._give_back_focus(self._last_external)
 
     def _return_focus(self) -> None:
         """Hand focus back to the user's window before Xenon reads the screen."""
