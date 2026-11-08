@@ -111,6 +111,11 @@ class WakeGate:
     def speaking(self) -> bool:
         return self._speaking
 
+    def arm(self) -> None:
+        """Take the next utterance as a command (push-to-talk)."""
+        self._armed_at = self._clock()
+        self._last_ignored = None
+
     def set_speaking(self, speaking: bool) -> None:
         """Mute detection while the assistant's own audio is playing."""
         self._speaking = speaking

@@ -258,6 +258,8 @@ class VoiceHooks:
     state: Callable[[str, str], None]
     level: Callable[[float], None]
     exchange: Callable[[str, str], None]
+    # Set by the push-to-talk hotkey: listen now, without the wake word.
+    listen_now: threading.Event | None = None
 
 
 # Builds a voice session on its own thread and runs until ``stop`` is set.
@@ -322,6 +324,8 @@ DEFAULT_HOTKEYS: dict[str, tuple[int, int]] = {
     "voice": (MOD_CONTROL | MOD_ALT, ord("V")),
     # Ctrl+Alt+B drops every screen to minimum; again restores.
     "dim": (MOD_CONTROL | MOD_ALT, ord("B")),
+    # Ctrl+Alt+Space: listen now (no wake word), music turned down.
+    "listen": (MOD_CONTROL | MOD_ALT, 0x20),
     "brighter": (MOD_CONTROL | MOD_ALT, VK_PRIOR),
     "darker": (MOD_CONTROL | MOD_ALT, VK_NEXT),
 }
@@ -772,6 +776,7 @@ class OrbApp:
         self._worker = Worker(backend_factory)
         self._voice_runner = voice_runner
         self._voice_stop: threading.Event | None = None
+        self._listen_event: threading.Event | None = None
         self._history: list[tuple[str, str]] = []
         self._busy = False
 
@@ -978,8 +983,17 @@ class OrbApp:
                 self._action("ask")
         elif key == "voice":
             self._action("voice")
+        elif key == "listen":
+            self._push_to_talk()
         elif key in {"dim", "brighter", "darker"}:
             self._brightness({"dim": "toggle", "brighter": "up", "darker": "down"}[key])
+
+    def _push_to_talk(self) -> None:
+        """Listen right now; starts voice first if it is off."""
+        if self._voice_stop is None:
+            self._toggle_voice()
+        if self._listen_event is not None:
+            self._listen_event.set()
 
     def _brightness(self, action: str, value: int = 0) -> None:
         """DDC/CI writes take ~100 ms per monitor, so they run off the Tk thread."""
@@ -1328,6 +1342,8 @@ class OrbApp:
             return
         stop = threading.Event()
         self._voice_stop = stop
+        self._listen_event = threading.Event()
+        listen_event = self._listen_event
         self.model.voice_on = True
         self.model.set_state("thinking", "loading voice")
 
@@ -1357,7 +1373,7 @@ class OrbApp:
 
         def run() -> None:
             try:
-                self._voice_runner(VoiceHooks(on_state, on_level, on_exchange), stop)
+                self._voice_runner(VoiceHooks(on_state, on_level, on_exchange, listen_event), stop)
             except Exception as error:
                 message = str(error)
 

@@ -35,6 +35,7 @@ Rules:
 - Questions about the music are commands: "who sings this", "what song is this" -> "what's playing".
 - Questions about timers are commands: "time left on my timer" -> "how long is left".
 - Questions about the clock are commands: "got the time?" -> "what time is it".
+- The text is a speech transcript and may include song lyrics, TV or other people in the background. Ignore those and find the user's own request: "Under city lights we sing. What time is it? Dancing in the rain" -> "what time is it".
 - If it is a question, a chat message, a request about what is on screen, or anything not in the list, the command is null.
 - Reply with JSON only: {"command": "<command>"} or {"command": null}"""
 

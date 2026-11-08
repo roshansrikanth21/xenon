@@ -611,10 +611,13 @@ def _orb_voice_runner(config):
         source = MicrophoneSource(device=mic)
 
         def make_detector():
+            # Adaptive: with music playing, speech is whatever rises clearly
+            # above the music, and a sentence ends when it falls back to it.
             return UtteranceDetector(
                 threshold=env_number("XENON_VAD_THRESHOLD", 0.015, float),
                 silence_ms=min(max(env_number("XENON_SILENCE_MS", 350, int), 120), 2000),
                 min_speech_ms=200,
+                adaptive=True,
             )
 
         detector = make_detector()
@@ -653,10 +656,24 @@ def _orb_voice_runner(config):
             else:
                 hooks.state("standby", f"say “{wake_word}” anywhere in a sentence")
 
+        from xenon.duck import make_ducker
+
+        ducker = make_ducker()
+        listen_now = getattr(hooks, "listen_now", None)
         try:
             waiting()
             shown_armed = False
             while not stop.is_set():
+                if listen_now is not None and listen_now.is_set():
+                    # Push-to-talk: listen now, no wake word, music turned down.
+                    listen_now.clear()
+                    gate.arm()
+                    ducker.duck()
+                    detector.reset()
+                    armed_until = time.monotonic() + DEFAULT_TTL_S
+                    shown_armed = True
+                    chime.play("wake")
+                    waiting()
                 frame = source.read_frame()
                 if frame:
                     rms = _math.sqrt(sum(v * v for v in frame) / len(frame))
@@ -664,6 +681,7 @@ def _orb_voice_runner(config):
                 # Drop back to standby once the armed window runs out.
                 if shown_armed and time.monotonic() >= armed_until:
                     shown_armed = False
+                    ducker.restore()
                     waiting()
                 pcm = detector.feed(frame)
                 if pcm is None:
@@ -677,11 +695,16 @@ def _orb_voice_runner(config):
                         # Heard just the name: chime and wait for the command.
                         armed_until = time.monotonic() + DEFAULT_TTL_S
                         shown_armed = True
+                        # Like a smart speaker: turn the music down while
+                        # listening for the command.
+                        ducker.duck()
+                        detector.reset()
                         chime.play("wake")
                         waiting()
                     continue
                 armed_until = 0.0
                 shown_armed = False
+                ducker.duck()  # keep it down while thinking and replying
                 chime.play("heard")
                 hooks.state("heard", command)
                 fast, _understood = _smart_reply(command, router_model)
@@ -711,8 +734,10 @@ def _orb_voice_runner(config):
                 # reopening it drops that audio so it cannot answer itself.
                 source.close()
                 detector = make_detector()
+                ducker.restore()
                 waiting()
         finally:
+            ducker.restore()
             source.close()
             store.close()
 

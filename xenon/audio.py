@@ -46,7 +46,15 @@ class UtteranceDetector:
         min_speech_ms: int = 200,
         max_utterance_ms: int = 15000,
         pre_roll_ms: int = 300,
+        adaptive: bool = False,
+        start_ratio: float = 2.4,
+        end_ratio: float = 1.6,
     ) -> None:
+        """``adaptive`` tracks the background level (music, a fan, a TV) and
+        only treats sound clearly louder than it as speech: speech starts at
+        ``start_ratio`` x the floor and ends when it falls under ``end_ratio``
+        x the floor. Without it, steady music never counts as silence, so an
+        utterance never ends."""
         if frame_ms <= 0 or sample_rate <= 0:
             raise ValueError("frame_ms and sample_rate must be positive")
 
@@ -63,6 +71,15 @@ class UtteranceDetector:
         self._speech_frames = 0
         self._quiet_run = 0
         self._speaking = False
+        self.adaptive = adaptive
+        self.start_ratio = start_ratio
+        self.end_ratio = end_ratio
+        self.noise_floor = threshold / 2
+        # Recent frame levels (about 3 s). The floor is a low percentile of
+        # them, updated on every frame, even mid-utterance: speech has gaps
+        # between words, so the percentile stays at the music's level while
+        # someone talks, and steady music can never freeze it.
+        self._levels: deque[float] = deque(maxlen=max(10, 3000 // frame_ms))
 
     @property
     def speaking(self) -> bool:
@@ -75,9 +92,20 @@ class UtteranceDetector:
         self._quiet_run = 0
         self._speaking = False
 
+    def _track_floor(self, level: float) -> None:
+        self._levels.append(level)
+        ordered = sorted(self._levels)
+        self.noise_floor = ordered[int(len(ordered) * 0.2)]
+
     def feed(self, frame: SampleFrame) -> bytes | None:
         """Return completed 16-bit mono PCM for one utterance, or ``None``."""
-        loud = rms(frame) >= self.threshold
+        level = rms(frame)
+        if self.adaptive:
+            self._track_floor(level)
+            ratio = self.end_ratio if self._speaking else self.start_ratio
+            loud = level >= max(self.threshold, self.noise_floor * ratio)
+        else:
+            loud = level >= self.threshold
 
         if not self._speaking:
             if not loud:
