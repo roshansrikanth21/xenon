@@ -275,8 +275,8 @@ class OrbRenderer:
         width = min(max(want / s, NOTCH_WIDTH), NOTCH_MAX_WIDTH)
         return info, main, sub, main_w, width
 
-    def _notch_content(self, model: OrbModel, width_px: int, core, accent) -> Image.Image:
-        info, main, sub, main_w, _ = self._notch_layout(model)
+    def _notch_content(self, model: OrbModel, width_px: int, core, accent, layout=None) -> Image.Image:
+        info, main, sub, main_w, _ = layout or self._notch_layout(model)
         s = self.scale
         h = int(NOTCH_HEIGHT * s)
         sh = int(NOTCH_SHOULDER * s)
@@ -358,9 +358,24 @@ class OrbRenderer:
             return 0.0
         return ImageDraw.Draw(Image.new("L", (1, 1))).textlength(text, font=font)
 
-    def _draw_notch(self, frame: Image.Image, model: OrbModel, core, accent, alpha: float) -> None:
+    def _notch_extras(self, width_px: int, shape: Image.Image):
+        """Glow and rim for a width, built once (blurs are expensive)."""
+        key = ("extras", width_px)
+        cached = self._notch_shapes.get(key)
+        if cached is None:
+            s = self.scale
+            glow = shape.filter(ImageFilter.GaussianBlur(6 * s))
+            rim = ImageChops.subtract(
+                shape, shape.transform(shape.size, Image.AFFINE, (1, 0, 0, 0, 1, int(1.2 * s)))
+            )
+            cached = (glow, rim)
+            self._notch_shapes[key] = cached
+        return cached
+
+    def _draw_notch(self, frame: Image.Image, model: OrbModel, core, accent, alpha: float,
+                    layout=None) -> None:
         s = self.scale
-        width_px = max(10, int(model.notch_width * s))
+        width_px = max(10, int(round(model.notch_width * s / 2)) * 2)
         shape = self._notch_shape(width_px)
         sh = int(NOTCH_SHOULDER * s)
         edge = int(self.size / 2 - NOTCH_DROP * s)  # the screen's top edge
@@ -368,16 +383,16 @@ class OrbRenderer:
         info = model.notch_info or {}
         if info.get("music", {}) and info["music"].get("playing"):
             # A soft glow under the notch that breathes while music plays.
-            glow = shape.filter(ImageFilter.GaussianBlur(6 * s))
+            glow = self._notch_extras(width_px, shape)[0]
             pulse = 0.25 + 0.15 * abs(math.sin(model.time * 3.1))
             frame.alpha_composite(_tint(glow, accent, pulse * alpha), (left, edge + int(2 * s)))
         body = Image.new("RGBA", shape.size, (0, 0, 0, 0))
         body.putalpha(_scale_alpha(shape, alpha))
         frame.alpha_composite(body, (left, edge))
         # Hairline highlight along the bottom curve.
-        rim = ImageChops.subtract(shape, shape.transform(shape.size, Image.AFFINE, (1, 0, 0, 0, 1, int(1.2 * s))))
+        rim = self._notch_extras(width_px, shape)[1]
         frame.alpha_composite(_tint(rim, (255, 255, 255), 0.10 * alpha), (left, edge))
-        content = self._notch_content(model, width_px, core, accent)
+        content = self._notch_content(model, width_px, core, accent, layout)
         content.putalpha(ImageChops.multiply(content.getchannel("A"), _scale_alpha(shape, alpha)))
         frame.alpha_composite(content, (left, edge))
 
@@ -418,6 +433,13 @@ class OrbRenderer:
 
     def render(self, model: OrbModel) -> Image.Image:
         core, accent = model.colors()
+        if model.notch and model.dock >= 0.999:
+            # Fully folded: the orb is invisible, so don't draw it at all.
+            layout = self._notch_layout(model)
+            model.notch_target_width = layout[4]
+            frame = Image.new("RGBA", (self.size, self.size), (0, 0, 0, 0))
+            self._draw_notch(frame, model, core, accent, 1.0, layout)
+            return frame
         frame = Image.new("RGBA", (self.size, self.size), (0, 0, 0, 0))
 
         breath = 0.5 + 0.5 * math.sin(model.time * 1.6)

@@ -20,6 +20,7 @@ import math
 import os
 import queue
 import sys
+import zlib
 import threading
 import time
 import tkinter as tk
@@ -284,15 +285,21 @@ class Worker:
         self._jobs.put((job, fail))
 
     def _run(self) -> None:
-        try:
-            self._backend = self._factory()
-        except Exception as error:
-            self.error = f"Xenon could not start: {error}"
+        # The backend (model client, screen reader, memory) is built on the
+        # first request, not at startup: an orb that just sits in the notch
+        # stays small in memory.
+        started = False
         while True:
             item = self._jobs.get()
             if item is None:
                 break
             job, fail = item
+            if not started:
+                started = True
+                try:
+                    self._backend = self._factory()
+                except Exception as error:
+                    self.error = f"Xenon could not start: {error}"
             if self._backend is None:
                 fail(self.error or "Xenon could not start")
                 continue
@@ -831,6 +838,7 @@ class OrbApp:
         self._last_external = 0
         self._frame = 0
         self._render_failed = False
+        self._last_frame: tuple | None = None
         self._drag_origin: tuple[int, int, int, int] | None = None
         self._dragged = False
         self._press_target: str | None = None
@@ -1234,12 +1242,20 @@ class OrbApp:
             return
         try:
             frame = self.renderer.render(self.model)
-            self.window.update(premultiplied_bgra(frame), frame.width, frame.height, self.x, self.y)
+            data = premultiplied_bgra(frame)
+            signature = (zlib.crc32(data), self.x, self.y)
+            if signature != self._last_frame:
+                self._last_frame = signature
+                self.window.update(data, frame.width, frame.height, self.x, self.y)
         except Exception as error:
             if not self._render_failed:
                 self._render_failed = True
                 print(f"orb render failed: {error!r}", file=sys.stderr, flush=True)
-        delay = int(1000 / self.FPS)
+        fps = self.FPS
+        if self.notch and self.model.dock >= 0.999:
+            music = (self.model.notch_info or {}).get("music")
+            fps = 12 if music else 4  # bars and scrolling title vs a slow breathing dot
+        delay = int(1000 / fps)
         self.root.after(max(5, delay - int((time.perf_counter() - now) * 1000)), self._tick)
 
     # ----- input --------------------------------------------------------

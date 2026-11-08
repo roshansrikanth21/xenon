@@ -158,7 +158,8 @@ class Companion:
                             self._track_lyrics.pop(track, None)
                 else:
                     self._music = None
-            self._stop.wait(2.0 if wanted else 1.0)
+            tablet = time.monotonic() - self._last_request < 15
+            self._stop.wait(2.0 if tablet else 6.0 if wanted else 1.0)
 
     # ----- server --------------------------------------------------------
 

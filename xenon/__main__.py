@@ -567,11 +567,14 @@ class _OrbBackend:
 
 def _orb_voice_runner(config):
     """Return a runner for the orb's Voice toggle, or None without the extras."""
-    try:
-        import sounddevice  # noqa: F401
-        import faster_whisper  # noqa: F401
-    except Exception:
+    import importlib.util
+
+    # Only check that the voice packages exist. Importing faster-whisper here
+    # reserved ~512 MB (numpy, its math library, the speech engine) at every
+    # startup even with voice off; it now loads when voice is switched on.
+    if importlib.util.find_spec("sounddevice") is None or importlib.util.find_spec("faster_whisper") is None:
         return None
+
     def run(hooks, stop) -> None:
         import math as _math
         import time

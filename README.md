@@ -327,6 +327,12 @@ with the options fanning downward (sweeping past, e.g. to a browser tab, does
 nothing). Scroll on the notch to change the volume. `XENON_ORB_NOTCH=off`
 restores the free-floating, draggable orb.
 
+Resource use, folded in the notch and idle (measured on this machine): about
+**1.4% of one CPU core and 81 MB of RAM** (48 MB private). The folded notch
+renders only itself at 4 fps (12 with music), unchanged frames are not sent
+to Windows, the Spotify tab is remembered instead of searched for, and the
+model, screen reader and speech engine load only when first used.
+
 ### Shrinks when idle (free-floating mode)
 
 After two minutes untouched (and not listening, thinking or speaking), the

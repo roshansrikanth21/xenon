@@ -31,7 +31,38 @@ class WebPlayer:
     # ----- finding things ------------------------------------------------
 
     def window(self):
-        """The browser window whose active tab is the Spotify web player."""
+        """The browser window whose active tab is the Spotify web player.
+
+        The last match is remembered and checked first; when there is none,
+        the full search (which asks each browser window for its address)
+        runs at most every 30 seconds.
+        """
+        cached = getattr(self, "_cached_window", None)
+        if cached is not None:
+            try:
+                title = (cached.window_text() or "").lower()
+                if cached.is_visible() and (
+                    "spotify" in title or self.address(cached).startswith("https://open.spotify.com")
+                ):
+                    return cached
+            except Exception:
+                pass
+            self._cached_window = None
+        now = time.monotonic()
+        if now < getattr(self, "_next_search", 0.0):
+            return None
+        found = self._search_window()
+        self._cached_window = found
+        if found is None:
+            self._next_search = now + 30.0
+        return found
+
+    def forget(self) -> None:
+        """Search again right away (after Xenon opened a Spotify page)."""
+        self._cached_window = None
+        self._next_search = 0.0
+
+    def _search_window(self):
         browsers = []
         for window in self._candidate_windows():
             title = (window.window_text() or "").lower()
@@ -87,6 +118,24 @@ class WebPlayer:
             pass
         return seen
 
+    def _player_bar(self, window):
+        """The 'Now playing bar' found natively by UI Automation (FindFirst),
+        instead of walking every element of the page in Python."""
+        try:
+            from pywinauto.uia_defines import IUIA
+
+            uia = IUIA()
+            condition = uia.iuia.CreatePropertyCondition(30005, "Now playing bar")  # Name
+            element = window.element_info.element.FindFirst(4, condition)  # descendants
+            if not element:
+                return None
+            from pywinauto.controls.uiawrapper import UIAWrapper
+            from pywinauto.uia_element_info import UIAElementInfo
+
+            return UIAWrapper(UIAElementInfo(element))
+        except Exception:
+            return None
+
     def now_playing(self) -> dict | None:
         """Title, artist and position from the player bar, or None."""
         window = self.window()
@@ -94,8 +143,10 @@ class WebPlayer:
             return None
         info: dict = {"title": "", "artist": "", "position_ms": 0, "duration_ms": 0,
                       "playing": False}
+        bar = self._player_bar(window)
         try:
-            for document in window.descendants(control_type="Document"):
+            scopes = [bar] if bar is not None else window.descendants(control_type="Document")[:1]
+            for document in scopes:
                 for element in document.descendants():
                     name = (element.window_text() or "").strip()
                     kind = element.element_info.control_type
@@ -126,7 +177,9 @@ class WebPlayer:
         return ""
 
     def wait_for_window(self, timeout_s: float = 10.0):
+        self.forget()
         for _ in range(max(1, int(timeout_s / 0.4))):
+            self.forget()
             window = self.window()
             if window is not None:
                 return window
@@ -172,6 +225,10 @@ class WebPlayer:
     CONTROLS = {"pause": "pause", "resume": "play", "next": "next", "previous": "previous"}
 
     def control(self, kind: str) -> bool | None:
+        self.forget()
+        return self._control(kind)
+
+    def _control(self, kind: str) -> bool | None:
         """Press the player bar's own button. None when no web player is open.
 
         Browsers do not always route Windows media keys to the Spotify tab
@@ -202,6 +259,7 @@ class WebPlayer:
 
     def play(self, wanted: str, open_page: Callable[[], object] | None = None) -> str | None:
         """Press 'Play <wanted>'. Returns what played, or None if it couldn't."""
+        self.forget()  # a command is worth a fresh search
         window = self.window()
         if window is None and open_page is not None:
             open_page()
