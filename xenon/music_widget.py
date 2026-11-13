@@ -369,6 +369,7 @@ class _LayeredSurface:
         self._bitmap = 0
         self._bits = None
         self._push_size: tuple[int, int] | None = None
+        self.opacity = 255         # whole-window alpha, from the settings
 
     # -- declarations -------------------------------------------------------
     def _declare(self) -> None:
@@ -546,7 +547,7 @@ class _LayeredSurface:
             # region to the top-left corner, its local origin, each push).
             size = wintypes.SIZE(width, height)
             src_point = wintypes.POINT(0, 0)
-            blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+            blend = BLENDFUNCTION(AC_SRC_OVER, 0, max(0, min(255, self.opacity)), AC_SRC_ALPHA)
             ok = bool(user.UpdateLayeredWindow(
                 self.hwnd, screen_dc, None, ctypes.byref(size),
                 self._gdi_dc, ctypes.byref(src_point), 0, ctypes.byref(blend), ULW_ALPHA,
@@ -625,14 +626,36 @@ class MusicWidget:
         self._spin = 0.0           # accumulated play time driving the rotation
         self._last_tick = time.monotonic()
         self.overlay = False       # Ctrl+Alt+Shift+M floats the player above windows
+        from .music_settings import SettingsWatcher
+
+        self._settings = SettingsWatcher()
+        self._surfaces: dict = {}
+        self._ready = threading.Event()
+        self._mutex = None
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> bool:
+        """Start the render thread and wait (at most a few seconds) until the
+        layers exist. Only one widget runs per user session: a second start
+        (e.g. the orb plus a manual ``xenon music-widget``) returns False."""
+        if self.running:
+            return True
+        if not self._claim_instance():
+            print("music widget: already running", flush=True)
+            return False
         self._stop.clear()
+        self._ready.clear()
         self._thread = threading.Thread(target=self._run, name="xenon-music", daemon=True)
         self._thread.start()
-        self._thread.join(timeout=6.0)
-        return self._surface is not None
+        self._ready.wait(timeout=6.0)
+        if self._surface is None:
+            self.stop()
+            return False
+        return True
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def stop(self) -> None:
         self._stop.set()
@@ -640,6 +663,30 @@ class MusicWidget:
         if thread and thread is not threading.current_thread():
             thread.join(timeout=3.0)
         self._thread = None
+        self._release_instance()
+
+    def _claim_instance(self) -> bool:
+        # A named mutex marks "a widget is running in this session"; it dies
+        # with the last handle, so a crashed widget never blocks a new one.
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel.CreateMutexW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.CreateMutexW(None, False, "Local\\XenonMusicWidget")
+        if not handle:
+            return True  # cannot tell; do not block the widget on it
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel.CloseHandle(handle)
+            return False
+        self._mutex = handle
+        return True
+
+    def _release_instance(self) -> None:
+        if self._mutex:
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle(self._mutex)
+            self._mutex = None
 
     # -- commands (voice fast-path hooks land here later) --------------------
     def play_pause(self) -> None:
@@ -654,11 +701,12 @@ class MusicWidget:
     # -- worker -------------------------------------------------------------
     def _run(self) -> None:
         """Three transparent layers over the wallpaper (see ``music_scene``):
-        the orb (cover disc + spectrum rays, the only thing animating every
+        the orb (cover disc + visualizer, the only thing animating every
         frame), the lyrics (redrawn when a word lights up or a line enters),
-        and the now-playing card (redrawn about once a second)."""
-        from . import music_scene as scene
+        and the now-playing card (redrawn about once a second).
 
+        Settings (``music_settings``) are re-read live; a change that moves
+        the layers (side, orb size) tears the windows down and rebuilds."""
         user = ctypes.windll.user32
         width = user.GetSystemMetrics(0)
         height = user.GetSystemMetrics(1)
@@ -668,42 +716,65 @@ class MusicWidget:
         self._now_playing.start()
         audio_ok, _ = self._audio.start()
 
-        layout = scene.scene_layout(width, height)
+        user.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+        user.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+        hotkey_ok = bool(user.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_M))
+        if not hotkey_ok:
+            print("music widget: Ctrl+Alt+Shift+M is taken by another app", flush=True)
+        try:
+            while not self._stop.is_set():
+                if self._scene(width, height, audio_ok) != "rebuild":
+                    break
+        finally:
+            self._ready.set()
+            if hotkey_ok:
+                user.UnregisterHotKey(None, HOTKEY_ID)
+            self._surface = None
+            self._player_surface = None
+            self._player_rect = None
+            self._audio.stop()
+            self._now_playing.stop()
+
+    def _scene(self, width: int, height: int, audio_ok: bool) -> str:
+        """Build the layers for the current layout and drive them until the
+        widget stops ("stop") or the layout changes ("rebuild")."""
+        from . import music_scene as scene
+
+        settings = self._settings.current
+        layout = scene.scene_layout(width, height, settings.side, settings.orb_size)
         boxes = {"lyrics": layout.lyric_box, "card": layout.card_box, "orb": layout.orb_box}
-        surfaces = {}
+        surfaces: dict[str, _LayeredSurface] = {}
         for name, box in boxes.items():
             surface = _LayeredSurface(box.w, box.h, x=box.x, y=box.y)
             if not surface.create():
                 for made in surfaces.values():
                     made.close()
-                return
+                return "stop"
+            surface.opacity = int(255 * settings.opacity)
             surfaces[name] = surface
         self._surfaces = surfaces
         self._surface = surfaces["lyrics"]
         self._player_surface = surfaces["orb"]
         self._player_rect = (layout.orb_box.x, layout.orb_box.y, layout.orb_box.w, layout.orb_box.h)
         for surface in surfaces.values():
-            attach_behind_icons(surface.hwnd)
+            if self.overlay:
+                self._float(surface)
+            else:
+                attach_behind_icons(surface.hwnd)
+        self._ready.set()
 
-        user.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
-        user.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
-        hotkey_ok = bool(user.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_M))
-        if not hotkey_ok:
-            print("music widget: Ctrl+Alt+Shift+M is taken by another app", flush=True)
-
+        user = ctypes.windll.user32
+        blank = {name: Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0)) for name, box in boxes.items()}
         last_attach = time.monotonic()
         last_coverage = 0.0
         covered = False
-        next_orb = 0.0
-        next_lyric = 0.0
-        next_card = 0.0
-        lyric_key = object()
-        card_key = object()
+        next_orb = next_lyric = next_card = 0.0
+        lyric_key = card_key = object()
         orb_art = None
         orb_art_key = None
-        spin = 0.0
         last_tick = time.monotonic()
         orb_idle_done = False
+        result = "stop"
 
         try:
             while not self._stop.is_set():
@@ -714,6 +785,20 @@ class MusicWidget:
                     lyric_key = card_key = object()
                     orb_idle_done = False
 
+                if self._settings.poll(now):
+                    fresh = self._settings.current
+                    if fresh.layout_key() != settings.layout_key():
+                        result = "rebuild"
+                        break
+                    settings = fresh
+                    for surface in surfaces.values():
+                        surface.opacity = int(255 * settings.opacity)
+                    lyric_key = card_key = object()
+                    orb_art_key = None
+                    orb_idle_done = False
+                    if not settings.pause_when_covered:
+                        covered = False
+
                 if not self.overlay and now - last_attach >= _REATTACH_SECONDS:
                     last_attach = now
                     from .wallpaper import get_parent
@@ -721,7 +806,8 @@ class MusicWidget:
                         if not get_parent(surface.hwnd):
                             attach_behind_icons(surface.hwnd)
 
-                if not self.overlay and now - last_coverage >= _COVERAGE_CHECK_SECONDS:
+                if (settings.pause_when_covered and not self.overlay
+                        and now - last_coverage >= _COVERAGE_CHECK_SECONDS):
                     last_coverage = now
                     covered = is_covered(surfaces["orb"].hwnd, (0, 0, width, height))
 
@@ -736,17 +822,21 @@ class MusicWidget:
                     lyric_key = card_key = object()
                     orb_idle_done = False
 
-                accent = scene.accent_from_palette(self._palette)
+                accent = settings.accent_rgb(scene.accent_from_palette(self._palette))
                 position = timeline.position_now() if timeline else 0
                 duration = timeline.duration_ms if timeline else 0
 
                 # -- lyrics: only when what is lit actually changes ------------
                 if now >= next_lyric:
-                    lines = (self._lyrics.result() or {}).get("lines") or [] if track else []
-                    frame = scene.lyric_frame(lines, position, duration) if (track and lines) else None
+                    frame = None
+                    if track and settings.show_lyrics:
+                        lines = (self._lyrics.result() or {}).get("lines") or []
+                        frame = scene.lyric_frame(lines, position, duration) if lines else None
                     if frame != lyric_key:
                         lyric_key = frame
-                        surfaces["lyrics"].push(scene.render_lyrics(layout.lyric_box, frame, accent, height))
+                        image = (scene.render_lyrics(layout.lyric_box, frame, accent, height, settings)
+                                 if frame is not None else blank["lyrics"])
+                        surfaces["lyrics"].push(image)
                         self._has_frame = True
                         next_lyric = now + 1.0 / 30
                     else:
@@ -756,20 +846,22 @@ class MusicWidget:
                 if now >= next_card:
                     next_card = now + 1.0
                     progress = (position / duration) if duration else 0.0
-                    key = (self._track_key, playing, int(progress * 300))
+                    key = (self._track_key, playing, int(progress * 300), settings.show_card)
                     if key != card_key:
                         card_key = key
-                        if track:
+                        if track and settings.show_card:
                             image = scene.render_card(layout.card_box, track.title, track.artist,
                                                       self._cover, progress, playing, accent)
                         else:
-                            image = Image.new("RGBA", (layout.card_box.w, layout.card_box.h), (0, 0, 0, 0))
+                            image = blank["card"]
                         surfaces["card"].push(image)
 
                 # -- orb: every frame while playing, settle when paused --------
-                art_key = (id(self._cover), layout.orb_diameter, accent)
+                art_key = (id(self._cover), layout.orb_diameter, accent, settings.disc,
+                           settings.halo, settings.backdrop)
                 if orb_art_key != art_key:
-                    orb_art = scene.OrbArt(layout.orb_diameter, self._cover, accent)
+                    orb_art = scene.OrbArt(layout.orb_diameter, self._cover, accent,
+                                           settings.disc, settings.halo, settings.backdrop)
                     orb_art_key = art_key
                     orb_idle_done = False
                 active = playing or max(map(abs, self._bars), default=0.0) >= 0.004
@@ -777,33 +869,37 @@ class MusicWidget:
                     if now < next_orb:
                         time.sleep(min(0.02, max(0.003, next_orb - now)))
                         continue
-                    next_orb = now + 1.0 / _PLAYING_FPS
+                    next_orb = now + 1.0 / settings.fps
                     if audio_ok and playing:
                         samples = self._audio.read_latest(2048)
                         rate = self._audio.format.sample_rate if self._audio.format else 48000
-                        target = spectrum_bars(samples, rate, 64)
+                        target = [min(1.2, v * settings.sensitivity) for v in spectrum_bars(samples, rate, 64)]
                     else:
                         target = [0.0] * 64
-                    self._bars = smooth_bars(self._bars, target, attack=0.55, decay=0.14 if playing else 0.35)
+                    keep = settings.smoothing
+                    self._bars = smooth_bars(
+                        self._bars, target,
+                        attack=0.8 - 0.55 * keep,
+                        decay=(0.4 - 0.36 * keep) if playing else 0.35,
+                    )
                     dt = min(now - last_tick, 0.25)
                     last_tick = now
                     if playing:
-                        spin = (spin - dt * 9.0) % 360.0
+                        self._spin = (self._spin - dt * settings.spin_speed) % 360.0
                     energy = sum(self._bars[:12]) / 12 if self._bars else 0.0
                     surfaces["orb"].push(scene.render_orb(
-                        layout.orb_box, layout, orb_art, self._bars, spin, playing, energy, accent, height,
+                        layout.orb_box, layout, orb_art, self._bars, self._spin, playing, energy,
+                        accent, height, settings,
                     ))
                     if not active:
                         orb_idle_done = True
                 elif not track and not orb_idle_done:
-                    surfaces["orb"].push(Image.new("RGBA", (layout.orb_box.w, layout.orb_box.h), (0, 0, 0, 0)))
+                    surfaces["orb"].push(blank["orb"])
                     orb_idle_done = True
                 else:
                     last_tick = now
                     time.sleep(0.03)
         finally:
-            if hotkey_ok:
-                user.UnregisterHotKey(None, HOTKEY_ID)
             from .wallpaper import detach_from_desktop
             for surface in surfaces.values():
                 try:
@@ -811,37 +907,32 @@ class MusicWidget:
                     surface.close()
                 except Exception:
                     pass
-            self._surface = None
-            self._player_surface = None
-            self._player_rect = None
-            self._audio.stop()
-            self._now_playing.stop()
+            self._surfaces = {}
+        del user
+        return result
+
+    def _float(self, surface: "_LayeredSurface") -> None:
+        from .wallpaper import WS_EX_TRANSPARENT, detach_from_desktop, send_to_top_most, show
+        user = ctypes.windll.user32
+        detach_from_desktop(surface.hwnd)
+        style = user.GetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE)
+        user.SetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT)
+        send_to_top_most(surface.hwnd)
+        show(surface.hwnd)
 
     def _toggle_overlay(self, *surfaces) -> None:
         """Wallpaper <-> floating overlay for every layer. The overlay is
         click-through and never takes focus, so it can stay up while you work."""
-        from .wallpaper import (
-            WS_EX_TRANSPARENT,
-            clear_top_most,
-            detach_from_desktop,
-            send_to_top_most,
-            show,
-        )
-        user = ctypes.windll.user32
+        from .wallpaper import clear_top_most
         self.overlay = not self.overlay
         self._needs_frame = True
         for surface in surfaces:
             if self.overlay:
-                detach_from_desktop(surface.hwnd)
-                style = user.GetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE)
-                user.SetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT)
-                send_to_top_most(surface.hwnd)
-                show(surface.hwnd)
+                self._float(surface)
             else:
                 clear_top_most(surface.hwnd)
                 attach_behind_icons(surface.hwnd)
 
-    # -- assets -------------------------------------------------------------
     def _refresh_assets(self, track, timeline) -> None:
         if not track:
             if self._track_key is not None:

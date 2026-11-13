@@ -1,0 +1,202 @@
+"""User settings for the desktop music widget.
+
+Stored as JSON in ``%APPDATA%\\xenon\\music_widget.json``. The settings window
+writes the file and the running widget re-reads it when its mtime changes, so
+every change shows up live without a restart. Unknown keys are ignored and
+bad values fall back to the defaults, so a hand-edited file can never stop
+the widget from starting.
+"""
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass, fields, replace
+
+VISUALIZERS = ("rays", "dots", "wave", "blocks", "none")
+DISCS = ("glow", "vinyl", "square", "none")
+SIDES = ("right", "left")
+LYRIC_STYLES = ("reveal", "karaoke", "stack", "fade")
+LYRIC_CASES = ("upper", "original")
+LYRIC_ALIGNS = ("left", "center")
+# Theme presets: name -> glow colour. "album" follows the cover art,
+# "custom" uses ``custom_color``.
+THEMES = {
+    "album": None,
+    "white": (255, 255, 255),
+    "ice": (170, 225, 255),
+    "aurora": (130, 245, 200),
+    "sunset": (255, 170, 120),
+    "violet": (190, 150, 255),
+    "rose": (255, 140, 180),
+    "custom": None,
+}
+ACCENTS = tuple(THEMES)
+
+# (min, max) for numeric fields; anything outside is clamped.
+_RANGES = {
+    "lyric_size": (0.5, 1.6),
+    "unsung_opacity": (0.0, 1.0),
+    "glow": (0.0, 2.0),
+    "spin_speed": (0.0, 60.0),
+    "sensitivity": (0.3, 3.0),
+    "fps": (10, 60),
+    "bar_count": (36, 200),
+    "orb_size": (0.6, 1.4),
+    "opacity": (0.15, 1.0),
+    "ray_length": (0.3, 2.0),
+    "smoothing": (0.0, 0.95),
+    "backdrop": (0.0, 1.0),
+}
+_CHOICES = {
+    "visualizer": VISUALIZERS,
+    "disc": DISCS,
+    "side": SIDES,
+    "accent": ACCENTS,
+    "lyric_style": LYRIC_STYLES,
+    "lyric_case": LYRIC_CASES,
+    "lyric_align": LYRIC_ALIGNS,
+}
+
+
+@dataclass(frozen=True)
+class MusicSettings:
+    # startup / behaviour
+    start_with_orb: bool = True
+    pause_when_covered: bool = True
+    # layout
+    side: str = "right"              # where the orb sits; lyrics take the other side
+    orb_size: float = 1.0
+    opacity: float = 1.0             # whole widget
+    # orb
+    disc: str = "glow"               # glow | vinyl | square | none
+    visualizer: str = "rays"         # rays | dots | wave | bars | none
+    bar_count: int = 120
+    ray_length: float = 1.0
+    sensitivity: float = 1.0
+    smoothing: float = 0.5           # 0 = twitchy, 0.95 = very slow fall
+    spin_speed: float = 9.0          # degrees per second
+    fps: int = 20
+    halo: bool = True                # album-art glow behind the disc
+    backdrop: float = 0.0            # dark pool of shade behind the orb
+    # lyrics
+    show_lyrics: bool = True
+    lyric_style: str = "reveal"      # reveal | karaoke | stack | fade
+    show_upcoming: bool = True
+    lyric_size: float = 1.0
+    lyric_case: str = "upper"
+    lyric_align: str = "left"
+    unsung_opacity: float = 0.18
+    glow: float = 1.0
+    # card
+    show_card: bool = True
+    # colour
+    accent: str = "album"            # album | white | custom
+    custom_color: str = "#8fd3ff"
+
+    def layout_key(self) -> tuple:
+        """Fields that move or resize the windows; a change rebuilds them."""
+        return (self.side, round(self.orb_size, 3))
+
+    def accent_rgb(self, palette_accent: tuple[int, int, int]) -> tuple[int, int, int]:
+        if self.accent == "custom":
+            return parse_color(self.custom_color) or (255, 255, 255)
+        return THEMES.get(self.accent) or palette_accent
+
+
+def parse_color(text: str) -> tuple[int, int, int] | None:
+    value = (text or "").strip().lstrip("#")
+    if len(value) == 3:
+        value = "".join(c * 2 for c in value)
+    if len(value) != 6:
+        return None
+    try:
+        return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+    except ValueError:
+        return None
+
+
+def coerce(data: dict) -> MusicSettings:
+    """Build settings from untrusted JSON: wrong types and out-of-range
+    values fall back to (or are clamped towards) the defaults."""
+    base = MusicSettings()
+    clean = {}
+    for f in fields(MusicSettings):
+        if f.name not in data:
+            continue
+        default = getattr(base, f.name)
+        value = data[f.name]
+        if isinstance(default, bool):
+            if isinstance(value, bool):
+                clean[f.name] = value
+            continue
+        if isinstance(default, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            lo, hi = _RANGES.get(f.name, (value, value))
+            value = max(lo, min(hi, value))
+            clean[f.name] = int(round(value)) if isinstance(default, int) else float(value)
+            continue
+        if isinstance(default, str) and isinstance(value, str):
+            choices = _CHOICES.get(f.name)
+            if choices is not None and value not in choices:
+                continue
+            if f.name == "custom_color" and parse_color(value) is None:
+                continue
+            clean[f.name] = value
+    return replace(base, **clean)
+
+
+def settings_path() -> str:
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "xenon", "music_widget.json")
+
+
+def load(path: str | None = None) -> MusicSettings:
+    path = path or settings_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return MusicSettings()
+    return coerce(data) if isinstance(data, dict) else MusicSettings()
+
+
+def save(settings: MusicSettings, path: str | None = None) -> None:
+    path = path or settings_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(asdict(settings), handle, indent=2)
+    os.replace(tmp, path)
+
+
+class SettingsWatcher:
+    """Cheap change detection for the render loop: stat the file at most
+    every ``interval`` seconds and reload when its mtime moves."""
+
+    def __init__(self, path: str | None = None, interval: float = 0.5) -> None:
+        self.path = path or settings_path()
+        self.interval = interval
+        self._mtime: float | None = self._stat()
+        self._next = 0.0
+        self.current = load(self.path)
+
+    def _stat(self) -> float | None:
+        try:
+            return os.stat(self.path).st_mtime
+        except OSError:
+            return None
+
+    def poll(self, now: float) -> bool:
+        """True when the settings changed since the last poll."""
+        if now < self._next:
+            return False
+        self._next = now + self.interval
+        mtime = self._stat()
+        if mtime == self._mtime:
+            return False
+        self._mtime = mtime
+        fresh = load(self.path)
+        changed = fresh != self.current
+        self.current = fresh
+        return changed

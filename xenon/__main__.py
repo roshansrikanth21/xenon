@@ -1191,6 +1191,12 @@ def _orb(args: argparse.Namespace) -> int:
         _orb_voice_runner(config),
         task_services=_orb_task_services(config),
     )
+    from xenon import music_settings
+
+    if music_settings.load().start_with_orb and os.environ.get("XENON_MUSIC_WIDGET", "").strip().lower() not in {"0", "off", "false", "no"}:
+        from xenon.orb import start_music_widget_async
+
+        app.root.after(1500, lambda: start_music_widget_async(app))
     if getattr(args, "voice", False) or os.environ.get("XENON_VOICE_AUTO", "").strip().lower() in {"1", "true", "yes", "on"}:
         app.root.after(1200, lambda: app._toggle_voice() if app._voice_runner is not None else None)
     print(
@@ -1211,6 +1217,11 @@ def _music_widget(args: argparse.Namespace) -> int:
     if not is_windows():
         print("xenon music-widget requires Windows", file=sys.stderr)
         return 2
+    if getattr(args, "settings", False):
+        from xenon.music_settings_ui import SettingsWindow
+
+        SettingsWindow().run()
+        return 0
     try:
         from xenon.music_widget import MusicWidget
     except ImportError as error:
@@ -2135,7 +2146,11 @@ def main(argv: list[str] | None = None) -> int:
 
     music_widget = subparsers.add_parser(
         "music-widget",
-        help="desktop music interface on the wallpaper (vinyl player)",
+        help="desktop music interface on the wallpaper (lyrics, orb, visualizer)",
+    )
+    music_widget.add_argument(
+        "--settings", action="store_true",
+        help="open the settings window (changes apply live to a running widget)",
     )
     music_widget.set_defaults(handler=_music_widget)
 

@@ -39,22 +39,27 @@ class SceneLayout:
     card_box: Box      # window region of the now-playing card
 
 
-def scene_layout(width: int, height: int) -> SceneLayout:
-    """Lyrics own the left ~55%, the orb sits right of centre, the card in
-    the lower left. Proportions follow the reference, scaled to the screen."""
-    diameter = int(min(height * 0.36, width * 0.24))
-    cx = int(width * 0.70)
+def scene_layout(width: int, height: int, side: str = "right", orb_size: float = 1.0) -> SceneLayout:
+    """Lyrics own one side (~55%), the orb sits on the other, the card in
+    the lower corner under the lyrics. Proportions follow the reference,
+    scaled to the screen; ``side`` says where the orb goes."""
+    diameter = int(min(height * 0.36, width * 0.24) * orb_size)
+    right = side != "left"
+    cx = int(width * (0.70 if right else 0.27))
     cy = int(height * 0.50)
-    reach = int(diameter / 2 + diameter * 0.06 + height * 0.17)
-    half = reach + 24
+    reach = int(diameter / 2 + diameter * 0.06 + height * 0.17 * max(1.0, orb_size))
+    half = max(reach + 24, int(diameter * 1.15))
     ox, oy = max(0, cx - half), max(0, cy - half)
     orb_box = Box(ox, oy, min(half * 2, width - ox), min(half * 2, height - oy))
 
-    lx = int(width * 0.05)
-    lyric_box = Box(lx, int(height * 0.16), int(width * 0.50), int(height * 0.50))
+    lw = int(width * (0.50 if right else 0.46))
+    lx = int(width * 0.05) if right else int(width * 0.96) - lw
+    lyric_box = Box(lx, int(height * 0.16), lw, int(height * 0.50))
 
     cw, ch = int(min(width * 0.20, height * 0.42)), int(height * 0.085)
-    card_box = Box(lx, int(height * 0.80), max(cw, 260), max(ch, 72))
+    cw, ch = max(cw, 260), max(ch, 72)
+    cx_card = lx if right else int(width * 0.95) - cw
+    card_box = Box(cx_card, int(height * 0.80), cw, ch)
     return SceneLayout(cx, cy, diameter, orb_box, lyric_box, card_box)
 
 
@@ -142,6 +147,7 @@ class LyricFrame:
     reveal: tuple[int, ...]   # per word: 0 (unsung) .. STEPS (fully lit)
     entry: int                # line entrance 0..STEPS
     upcoming: str
+    previous: str = ""
 
 
 REVEAL_STEPS = 5
@@ -159,15 +165,16 @@ def lyric_frame(lines: list[tuple[int, str]], position_ms: int, duration_ms: int
     text = text.strip()
     end = lines[index + 1][0] if index + 1 < len(lines) else (duration_ms or start + 5000)
     upcoming = lines[index + 1][1].strip() if index + 1 < len(lines) else ""
+    previous = lines[index - 1][1].strip() if index > 0 else ""
     if not text:
-        return LyricFrame("", (), REVEAL_STEPS, upcoming)
+        return LyricFrame("", (), REVEAL_STEPS, upcoming, previous)
     words = text.split()
     reveal = []
     for word_start in word_starts(start, end, words):
         progress = (position_ms - word_start) / WORD_FADE_MS
         reveal.append(max(0, min(REVEAL_STEPS, int(progress * REVEAL_STEPS + 0.999))))
     entry = max(0, min(REVEAL_STEPS, int((position_ms - start) / LINE_ENTRY_MS * REVEAL_STEPS + 0.999)))
-    return LyricFrame(text, tuple(reveal), entry, upcoming)
+    return LyricFrame(text, tuple(reveal), entry, upcoming, previous)
 
 
 def _wrap(words: list[str], fnt, max_width: int, draw) -> list[list[int]]:
@@ -188,70 +195,108 @@ def _wrap(words: list[str], fnt, max_width: int, draw) -> list[list[int]]:
     return lines
 
 
-def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), screen_height: int = 1440) -> Image.Image:
-    """The lyric layer: heavy uppercase words, sung ones bright with a glow,
-    unsung ones faint, the next line small and dim beneath."""
+def _settings(settings):
+    if settings is None:
+        from .music_settings import MusicSettings
+        return MusicSettings()
+    return settings
+
+
+def _case(text: str, settings) -> str:
+    return text.upper() if (settings.lyric_case == "upper" and text.isascii()) else text
+
+
+def _blur_quarter(mask: Image.Image, radius: float, gain: float) -> Image.Image:
+    """Gaussian blur at quarter size (16x cheaper), scaled back up."""
+    small = mask.resize((max(1, mask.width // 4), max(1, mask.height // 4)), Image.BILINEAR)
+    small = small.filter(ImageFilter.GaussianBlur(max(2, radius)))
+    return small.resize(mask.size, Image.BILINEAR).point(lambda v: min(255, int(v * gain)))
+
+
+def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), screen_height: int = 1440,
+                  settings=None) -> Image.Image:
+    """The lyric layer: heavy words, sung ones bright with a glow, unsung
+    ones faint, the next line small and dim beneath. ``settings`` picks the
+    style (reveal / karaoke / stack / fade), size, case, alignment, glow."""
+    st = _settings(settings)
     image = Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0))
     if frame is None:
         return image
-    text = frame.text.upper() if frame.text.isascii() else frame.text
+    text = _case(frame.text, st)
     words = text.split()
     draw = ImageDraw.Draw(image)
+    centered = st.lyric_align == "center"
+    style = st.lyric_style
 
-    size = int(screen_height / 8.5)
+    size = int(screen_height / 8.5 * st.lyric_size)
     fnt = font(text, size)
-    rows = _wrap(words, fnt, int(box.w * 0.96), draw) if words else []
-    while len(rows) > 3 and size > 48:
+    max_w = int(box.w * 0.96)
+    rows = _wrap(words, fnt, max_w, draw) if words else []
+    while len(rows) > 3 and size > 40:
         size = int(size * 0.86)
         fnt = font(text, size)
-        rows = _wrap(words, fnt, int(box.w * 0.96), draw)
+        rows = _wrap(words, fnt, max_w, draw)
 
     line_h = int(size * 1.02)
     block_h = line_h * len(rows)
-    # Rise into place as the line enters.
-    rise = int((1 - frame.entry / REVEAL_STEPS) * size * 0.35)
+    rise = 0 if style in ("karaoke",) else int((1 - frame.entry / REVEAL_STEPS) * size * 0.35)
     top = max(0, int(box.h * 0.46 - block_h / 2)) + rise
+    unsung = int(255 * st.unsung_opacity)
+    entry_alpha = frame.entry / REVEAL_STEPS
 
     glyphs = Image.new("RGBA", image.size, (0, 0, 0, 0))
     gdraw = ImageDraw.Draw(glyphs)
     lit = Image.new("L", image.size, 0)
     ldraw = ImageDraw.Draw(lit)
     space = draw.textlength(" ", font=fnt)
-    entry_alpha = frame.entry / REVEAL_STEPS
+
+    if style == "stack" and frame.previous:
+        prev = _case(frame.previous, st)
+        pf = font(prev, max(20, int(size * 0.42)), "black")
+        pw = draw.textlength(prev, font=pf)
+        px = (box.w - pw) / 2 if centered else 0
+        py = max(0, top - rise - int(pf.size * 1.5))
+        gdraw.text((px, py), prev, font=pf, fill=(255, 255, 255, int(110 * entry_alpha + 40)))
+
     for r, row in enumerate(rows):
-        x = 0.0
+        row_w = sum(draw.textlength(words[i], font=fnt) for i in row) + space * (len(row) - 1)
+        x = (box.w - row_w) / 2 if centered else 0.0
         y = top + r * line_h
         for i in row:
             word = words[i]
             level = frame.reveal[i] / REVEAL_STEPS if i < len(frame.reveal) else 0.0
-            alpha = int((46 + (255 - 46) * level) * entry_alpha)
-            gdraw.text((x, y), word, font=fnt, fill=(255, 255, 255, alpha))
+            if style == "fade":
+                level = 1.0
+            if style == "karaoke":
+                # Sung words take the accent colour at full strength; the
+                # line itself is always fully there.
+                alpha = int(unsung + (255 - unsung) * level) if level else max(unsung, 120)
+                colour = tuple(int(255 + (c - 255) * level) for c in accent) if level else (255, 255, 255)
+                gdraw.text((x, y), word, font=fnt, fill=colour + (alpha,))
+            else:
+                alpha = int((unsung + (255 - unsung) * level) * entry_alpha)
+                gdraw.text((x, y), word, font=fnt, fill=(255, 255, 255, alpha))
             if level > 0:
-                ldraw.text((x, y), word, font=fnt, fill=int(255 * level * entry_alpha))
+                ldraw.text((x, y), word, font=fnt, fill=int(255 * level * (1 if style == "karaoke" else entry_alpha)))
             x += draw.textlength(word, font=fnt) + space
 
-    # Glow from the sung words only, blurred at quarter size (16x cheaper).
-    small = lit.resize((max(1, lit.width // 4), max(1, lit.height // 4)), Image.BILINEAR)
-    small = small.filter(ImageFilter.GaussianBlur(max(2, size / 22)))
-    glow_mask = small.resize(lit.size, Image.BILINEAR).point(lambda v: int(v * 0.75))
-    glow = Image.new("RGBA", image.size, accent + (0,))
-    glow.putalpha(glow_mask)
     # A soft dark shadow under every word keeps white text readable on a
-    # bright wallpaper; it shares the quarter-size blur trick.
-    shade = glyphs.getchannel("A")
-    shade = shade.resize((max(1, shade.width // 4), max(1, shade.height // 4)), Image.BILINEAR)
-    shade = shade.filter(ImageFilter.GaussianBlur(max(2, size / 30)))
+    # bright wallpaper; then the glow from the sung words, then the words.
     shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    shadow.putalpha(shade.resize(image.size, Image.BILINEAR).point(lambda v: int(v * 0.55)))
+    shadow.putalpha(_blur_quarter(glyphs.getchannel("A"), size / 30, 0.55))
     image = Image.alpha_composite(image, shadow)
-    image = Image.alpha_composite(image, glow)
+    if st.glow > 0:
+        glow = Image.new("RGBA", image.size, accent + (0,))
+        glow.putalpha(_blur_quarter(lit, size / 22, 0.75 * st.glow))
+        image = Image.alpha_composite(image, glow)
     image = Image.alpha_composite(image, glyphs)
 
-    if frame.upcoming:
-        up = frame.upcoming.upper() if frame.upcoming.isascii() else frame.upcoming
+    if frame.upcoming and st.show_upcoming:
+        up = _case(frame.upcoming, st)
         ufnt = font(up, max(22, size // 3), "bold")
         uy = min(box.h - ufnt.size - 6, top - rise + block_h + int(size * 0.28))
-        ImageDraw.Draw(image).text((2, uy), up, font=ufnt, fill=(255, 255, 255, 90))
+        ux = (box.w - draw.textlength(up, font=ufnt)) / 2 if centered else 2
+        ImageDraw.Draw(image).text((ux, uy), up, font=ufnt, fill=(255, 255, 255, 90))
     return image
 
 
@@ -279,48 +324,133 @@ def ring_values(bars: list[float], count: int = BAR_COUNT) -> list[float]:
 
 
 class OrbArt:
-    """Cached static parts of the orb for one cover and size."""
+    """Cached static parts of the orb for one cover, size and look.
 
-    def __init__(self, diameter: int, cover: Image.Image | None, accent=(255, 255, 255)) -> None:
+    ``disc`` picks how the cover is shown: ``glow`` (a lit spinning globe),
+    ``vinyl`` (a record with the cover as its spinning label), ``square``
+    (the cover itself, still) or ``none`` (just the visualizer)."""
+
+    def __init__(self, diameter: int, cover: Image.Image | None, accent=(255, 255, 255),
+                 disc: str = "glow", halo: bool = True, backdrop: float = 0.0) -> None:
         self.diameter = diameter
+        self.disc = disc
+        self.spins = disc in ("glow", "vinyl")
         d = diameter
-        if cover is not None:
-            art = cover.convert("RGB").resize((d, d), Image.LANCZOS)
-        else:
-            art = Image.new("RGB", (d, d), (40, 42, 52))
-        # Sphere shading: brighter centre, darker limb, so flat art reads
-        # as a lit globe like the reference.
-        shade = Image.radial_gradient("L").resize((d, d))
-        shade = shade.point(lambda v: int(255 - v * 0.55))
-        art = ImageChops.multiply(art, Image.merge("RGB", (shade, shade, shade)))
-        mask = Image.new("L", (d * 2, d * 2), 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, d * 2 - 1, d * 2 - 1), fill=255)
-        self.mask = mask.resize((d, d), Image.LANCZOS)
-        self.art = art.convert("RGBA")
-        self.art.putalpha(self.mask)
-        # Halo: a big soft light behind the disc.
-        size = int(d * 2.1)
-        halo = Image.new("L", (size, size), 0)
-        hd = ImageDraw.Draw(halo)
-        for k in range(14, 0, -1):
-            r = d / 2 * (1 + 0.075 * k)
+        self.label = None
+        self.art = None
+        self.dim = None
+        self.rim = None
+
+        def cover_rgb():
+            if cover is not None:
+                return cover.convert("RGB").resize((d, d), Image.LANCZOS)
+            return Image.new("RGB", (d, d), (40, 42, 52))
+
+        if disc == "glow":
+            # Sphere shading: brighter centre, darker limb, so flat art reads
+            # as a lit globe like the reference.
+            shade = Image.radial_gradient("L").resize((d, d)).point(lambda v: int(255 - v * 0.55))
+            art = ImageChops.multiply(cover_rgb(), Image.merge("RGB", (shade, shade, shade)))
+            self.art = art.convert("RGBA")
+            self.art.putalpha(_circle_mask(d))
+        elif disc == "vinyl":
+            from .music_widget import build_vinyl
+            record, label = build_vinyl(d, cover)
+            self.art = record           # static grooves
+            self.label = label          # spins
+        elif disc == "square":
+            mask = Image.new("L", (d * 2, d * 2), 0)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, d * 2 - 1, d * 2 - 1), radius=d // 6, fill=255)
+            self.art = cover_rgb().convert("RGBA")
+            self.art.putalpha(mask.resize((d, d), Image.LANCZOS))
+
+        if self.art is not None and disc != "vinyl":
+            dim = Image.eval(self.art.convert("RGB"), lambda v: int(v * 0.8)).convert("RGBA")
+            dim.putalpha(self.art.getchannel("A"))
+            self.dim = dim
+        if disc == "glow":
+            rim = Image.new("RGBA", (d, d), (0, 0, 0, 0))
+            ImageDraw.Draw(rim).ellipse((1, 1, d - 2, d - 2), outline=accent + (110,), width=max(2, d // 160))
+            self.rim = rim.filter(ImageFilter.GaussianBlur(1.2))
+
+        # Halo: a big soft light behind the disc (the album-art glow), and
+        # an optional dark pool under everything so it reads on any wallpaper.
+        size = int(d * 2.2)
+        self.halo = None
+        if halo or backdrop > 0:
+            layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
             c = size / 2
-            hd.ellipse((c - r, c - r, c + r, c + r), fill=int(150 * (1 - k / 15) ** 2))
-        halo = halo.filter(ImageFilter.GaussianBlur(d / 14))
-        self.halo = Image.new("RGBA", (size, size), accent + (0,))
-        self.halo.putalpha(halo)
-        # Rim light.
-        rim = Image.new("RGBA", (d, d), (0, 0, 0, 0))
-        ImageDraw.Draw(rim).ellipse((1, 1, d - 2, d - 2), outline=accent + (110,), width=max(2, d // 160))
-        self.rim = rim.filter(ImageFilter.GaussianBlur(1.2))
-        dim = self.art.copy()
-        dim = Image.eval(dim.convert("RGB"), lambda v: int(v * 0.8)).convert("RGBA")
-        dim.putalpha(self.mask)
-        self.dim = dim
+            if backdrop > 0:
+                pool = Image.new("L", (size, size), 0)
+                pd = ImageDraw.Draw(pool)
+                for k in range(16, 0, -1):
+                    r = d / 2 * (1 + 0.06 * k)
+                    pd.ellipse((c - r, c - r, c + r, c + r), fill=int(200 * backdrop * (1 - k / 17)))
+                pool = pool.filter(ImageFilter.GaussianBlur(d / 16))
+                dark = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                dark.putalpha(pool)
+                layer.alpha_composite(dark)
+            if halo:
+                light = Image.new("L", (size, size), 0)
+                hd = ImageDraw.Draw(light)
+                for k in range(14, 0, -1):
+                    r = d / 2 * (1 + 0.075 * k)
+                    hd.ellipse((c - r, c - r, c + r, c + r), fill=int(150 * (1 - k / 15) ** 2))
+                light = light.filter(ImageFilter.GaussianBlur(d / 14))
+                glow = Image.new("RGBA", (size, size), accent + (0,))
+                glow.putalpha(light)
+                layer.alpha_composite(glow)
+            self.halo = layer
+
+
+def _circle_mask(d: int) -> Image.Image:
+    mask = Image.new("L", (d * 2, d * 2), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, d * 2 - 1, d * 2 - 1), fill=255)
+    return mask.resize((d, d), Image.LANCZOS)
+
+
+def _draw_visualizer(draw: ImageDraw.ImageDraw, style: str, values: list[float], cx: float, cy: float,
+                     inner: float, reach: float, d: int) -> None:
+    count = len(values)
+    if style == "none" or not count:
+        return
+    bar_w = max(2, int(math.pi * d / count * 0.30))
+    if style == "wave":
+        # A closed, smoothed outline round the disc, filled faintly.
+        smooth = [(values[i - 1] + 2 * values[i] + values[(i + 1) % count]) / 4 for i in range(count)]
+        pts = []
+        for i, v in enumerate(smooth):
+            angle = math.pi / 2 + 2 * math.pi * i / count
+            r = inner + d * 0.01 + max(0.0, v) * reach
+            pts.append((cx + math.cos(angle) * r, cy + math.sin(angle) * r))
+        draw.polygon(pts, fill=60)
+        draw.line(pts + [pts[0]], fill=255, width=max(2, d // 110), joint="curve")
+        return
+    for i, v in enumerate(values):
+        angle = math.pi / 2 + 2 * math.pi * i / count   # start at the bottom
+        ca, sa = math.cos(angle), math.sin(angle)
+        length = inner + d * 0.012 + max(0.0, v) * reach
+        level = int(150 + 105 * min(1.0, v))
+        if style == "dots":
+            r = max(2, bar_w * 0.8)
+            x, y = cx + ca * length, cy + sa * length
+            draw.ellipse((x - r, y - r, x + r, y + r), fill=level)
+        elif style == "blocks":
+            seg = max(4.0, reach / 14)
+            t = inner
+            while t + seg * 0.6 <= length:
+                draw.line((cx + ca * t, cy + sa * t, cx + ca * (t + seg * 0.6), cy + sa * (t + seg * 0.6)),
+                          fill=level, width=bar_w + 1)
+                t += seg
+        else:  # rays
+            draw.line((cx + ca * inner, cy + sa * inner, cx + ca * length, cy + sa * length),
+                      fill=level, width=bar_w)
 
 
 def render_orb(box: Box, layout: SceneLayout, art: OrbArt, bars: list[float], spin_deg: float,
-               playing: bool, energy: float = 0.0, accent=(255, 255, 255), screen_height: int = 1440) -> Image.Image:
+               playing: bool, energy: float = 0.0, accent=(255, 255, 255), screen_height: int = 1440,
+               settings=None) -> Image.Image:
+    st = _settings(settings)
     cx, cy = layout.orb_cx - box.x, layout.orb_cy - box.y
     d = art.diameter
 
@@ -329,39 +459,43 @@ def render_orb(box: Box, layout: SceneLayout, art: OrbArt, bars: list[float], sp
     base_key = (box.w, box.h, cx, cy)
     if getattr(art, "_base_key", None) != base_key:
         base = Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0))
-        base.alpha_composite(art.halo, (int(cx - art.halo.width / 2), int(cy - art.halo.height / 2)))
+        if art.halo is not None:
+            base.alpha_composite(art.halo, (int(cx - art.halo.width / 2), int(cy - art.halo.height / 2)))
         art._base = base
         art._base_key = base_key
     image = art._base.copy()
 
-    values = ring_values(bars)
-    inner = d / 2 + d * 0.05
-    reach = screen_height * 0.15 * (1.0 if playing else 0.35) * (1.0 + 0.15 * min(1.0, energy))
-    count = len(values)
-    bar_w = max(2, int(math.pi * d / count * 0.30))
-    rays = Image.new("L", image.size, 0)
-    rdraw = ImageDraw.Draw(rays)
-    for i, v in enumerate(values):
-        angle = math.pi / 2 + 2 * math.pi * i / count   # start at the bottom
-        length = inner + d * 0.012 + max(0.0, v) * reach
-        ca, sa = math.cos(angle), math.sin(angle)
-        rdraw.line((cx + ca * inner, cy + sa * inner, cx + ca * length, cy + sa * length),
-                   fill=int(150 + 105 * min(1.0, v)), width=bar_w)
-    # Light bleed around the rays, blurred at quarter size, merged with the
-    # crisp rays into one alpha so the whole ring is a single composite.
-    q = rays.resize((max(1, rays.width // 4), max(1, rays.height // 4)), Image.BILINEAR)
-    q = q.filter(ImageFilter.GaussianBlur(max(2, d / 90)))
-    bleed = q.resize(rays.size, Image.BILINEAR).point(lambda v: min(255, int(v * 1.6)))
-    alpha = ImageChops.lighter(bleed, rays)
-    ring = Image.new("RGBA", image.size, accent + (0,))
-    ring.putalpha(alpha)
-    image.alpha_composite(ring)
+    if st.visualizer != "none":
+        values = ring_values(bars, st.bar_count)
+        inner = d / 2 + d * 0.05
+        reach = (screen_height * 0.15 * st.ray_length * (1.0 if playing else 0.35)
+                 * (1.0 + 0.15 * min(1.0, energy)))
+        shapes = Image.new("L", image.size, 0)
+        _draw_visualizer(ImageDraw.Draw(shapes), st.visualizer, values, cx, cy, inner, reach, d)
+        # Light bleed around the shapes, blurred at quarter size, merged
+        # with the crisp shapes into one alpha: one composite for the ring.
+        bleed = _blur_quarter(shapes, d / 90, 1.6 * max(0.2, st.glow))
+        ring = Image.new("RGBA", image.size, accent + (0,))
+        ring.putalpha(ImageChops.lighter(bleed, shapes))
+        image.alpha_composite(ring)
 
-    disc = art.art.rotate(spin_deg, resample=Image.BILINEAR) if spin_deg else art.art
-    if not playing:
-        disc = art.dim if hasattr(art, "dim") else disc
-    image.alpha_composite(disc, (int(cx - d / 2), int(cy - d / 2)))
-    image.alpha_composite(art.rim, (int(cx - d / 2), int(cy - d / 2)))
+    if art.art is not None:
+        origin = (int(cx - d / 2), int(cy - d / 2))
+        if art.disc == "vinyl":
+            image.alpha_composite(art.art, origin)
+            if art.label is not None:
+                label = art.label.rotate(spin_deg, resample=Image.BILINEAR) if spin_deg else art.label
+                lw = label.width
+                image.alpha_composite(label, (int(cx - lw / 2), int(cy - lw / 2)))
+        else:
+            disc = art.art
+            if not playing and art.dim is not None:
+                disc = art.dim
+            if art.spins and spin_deg:
+                disc = disc.rotate(spin_deg, resample=Image.BILINEAR)
+            image.alpha_composite(disc, origin)
+        if art.rim is not None:
+            image.alpha_composite(art.rim, origin)
     return image
 
 

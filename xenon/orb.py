@@ -996,6 +996,29 @@ class ScreenDimmer:
 # ------------------------------------------------------------------ tray --
 
 
+def start_music_widget_async(app: "OrbApp") -> None:
+    """Start the desktop music widget off the Tk thread (it takes a moment
+    to build its layers) and hand it to the orb. Missing extras (numpy,
+    winsdk, pyaudiowpatch) or a widget already running elsewhere just leave
+    it off; the orb never fails because of the widget."""
+
+    def run() -> None:
+        try:
+            from xenon.music_widget import MusicWidget
+        except ImportError as error:
+            print(f"music widget off: pip install -e \".[music]\" ({error})", flush=True)
+            return
+        try:
+            widget = MusicWidget()
+            if widget.start():
+                app.music_widget = widget
+                print("music widget running (tray > Music widget settings…)", flush=True)
+        except Exception as error:  # never take the orb down with it
+            print(f"music widget could not start: {error}", flush=True)
+
+    threading.Thread(target=run, daemon=True, name="xenon-music-start").start()
+
+
 class Tray:
     """Notification-area icon: shows Xenon is running and holds its menu.
 
@@ -1020,6 +1043,9 @@ class Tray:
                  checked=lambda _i: not app.hidden),
             item("Start at sign-in", self._toggle_startup,
                  checked=lambda _i: self._startup.enabled()),
+            item("Music widget", lambda: app.post(app.toggle_music_widget),
+                 checked=lambda _i: app.music_widget_running()),
+            item("Music widget settings…", lambda: app.post(app.open_music_settings)),
             item(lambda _i: f"Companion screen: {app.companion_url or 'off'}" + (
                      f" ({app._companion.lan_note})" if app._companion is not None and app._companion.lan_note
                      else ""),
@@ -1343,6 +1369,8 @@ class OrbApp:
         self._listen_event: threading.Event | None = None
         self._history: list[tuple[str, str]] = []
         self._busy = False
+        self.music_widget = None        # desktop music widget, started by __main__
+        self._music_settings_window = None
 
         hwnd = _toplevel_hwnd(self.root)
         self.scale = _dpi_scale(hwnd)
@@ -2358,10 +2386,50 @@ class OrbApp:
 
     # ----- lifecycle ----------------------------------------------------
 
+    # ----- music widget -------------------------------------------------
+
+    def music_widget_running(self) -> bool:
+        return self.music_widget is not None and self.music_widget.running
+
+    def toggle_music_widget(self) -> None:
+        """Tray switch: start/stop the widget, and remember the choice so the
+        next orb start does the same."""
+        from xenon import music_settings as ms
+
+        want = not self.music_widget_running()
+        try:
+            ms.save(ms.coerce({**ms.asdict(ms.load()), "start_with_orb": want}))
+        except OSError:
+            pass
+        if want:
+            start_music_widget_async(self)
+        elif self.music_widget is not None:
+            widget = self.music_widget
+            threading.Thread(target=widget.stop, daemon=True, name="xenon-music-stop").start()
+
+    def open_music_settings(self) -> None:
+        window = self._music_settings_window
+        if window is not None:
+            try:
+                window.top.deiconify()
+                window.top.lift()
+                window.top.focus_force()
+                return
+            except tk.TclError:
+                self._music_settings_window = None
+        from xenon.music_settings_ui import SettingsWindow
+
+        self._music_settings_window = SettingsWindow(self.root)
+
     def quit(self) -> None:
         if self._closing:
             return
         self._closing = True
+        if self.music_widget is not None:
+            try:
+                self.music_widget.stop()
+            except Exception:
+                pass
         if self._voice_stop is not None:
             self._voice_stop.set()
         if self.tasks is not None:
