@@ -482,7 +482,7 @@ def _voice(args: argparse.Namespace) -> int:
                 "always listening" if always else f"wake word: {wake_word}",
             )
         mode = "always listening" if always else f"wake word: {wake_word}"
-        print(f"{mode}; close the status window to stop", flush=True)
+        print(f"{mode}; Stop button (or Ctrl+C here) stops", flush=True)
         try:
             while not stop_event.is_set():
                 loop.tick()

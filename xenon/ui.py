@@ -135,7 +135,14 @@ class VoiceIndicator:
         self._detail.pack(fill="x", padx=10, pady=(0, 8))
 
         tk.Button(self.root, text="Stop", command=self._on_close).pack(pady=(0, 8))
+        tk.Label(
+            self.root, text="Closing this window just minimizes it — use Stop to quit.",
+            font=("Segoe UI", 8), fg="#6b7280", bg="#111827",
+        ).pack(pady=(0, 6))
 
+        # The assistant keeps running behind the taskbar: ✕/minimize hides the
+        # window, only the Stop button ends the session.
+        self.root.protocol("WM_DELETE_WINDOW", self._minimize)
         self._poll()
 
     def set(self, state: str, detail: str = "") -> None:
@@ -154,6 +161,13 @@ class VoiceIndicator:
             self._detail.config(text=self.model.detail)
         try:
             self.root.after(100, self._poll)
+        except tk.TclError:
+            pass
+
+    def _minimize(self) -> None:
+        """✕ closes the window to the taskbar; the assistant keeps listening."""
+        try:
+            self.root.iconify()
         except tk.TclError:
             pass
 
