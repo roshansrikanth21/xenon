@@ -301,6 +301,47 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
+# Segoe UI has no Indic or CJK glyphs, so Hindi/Telugu/Tamil lyrics drew as
+# empty boxes. Pick a Windows font that covers the text's script.
+_SCRIPT_FONTS = (
+    ((0x0900, 0x0DFF), ("Nirmala.ttc", 1), ("Nirmala.ttc", 0)),   # Indic scripts
+    ((0x3040, 0x30FF), ("YuGothB.ttc", 0), ("YuGothM.ttc", 0)),   # kana
+    ((0xAC00, 0xD7AF), ("malgunbd.ttf", 0), ("malgun.ttf", 0)),   # Hangul
+    ((0x4E00, 0x9FFF), ("msyhbd.ttc", 0), ("msyh.ttc", 0)),       # CJK ideographs
+)
+
+
+def script_font_file(text: str, bold: bool) -> tuple[str, int] | None:
+    """The font file (and face index) covering the first non-Latin script in
+    ``text``, or None when Segoe UI is fine."""
+    for ch in text or "":
+        code = ord(ch)
+        for (lo, hi), bold_face, regular_face in _SCRIPT_FONTS:
+            if lo <= code <= hi:
+                return bold_face if bold else regular_face
+    return None
+
+
+_font_cache: dict = {}
+
+
+def font_for(text: str, size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    face = script_font_file(text, bold)
+    key = (face, size, bold)
+    if key in _font_cache:
+        return _font_cache[key]
+    font = None
+    if face is not None:
+        try:
+            font = ImageFont.truetype(face[0], size, index=face[1])
+        except OSError:
+            font = None
+    if font is None:
+        font = _font(size, bold)
+    _font_cache[key] = font
+    return font
+
+
 # ------------------------------------------------------------ window layer
 
 # One wndproc per registered class name; RegisterClassW fails if the same
@@ -468,10 +509,6 @@ class _LayeredSurface:
         from .orb_render import premultiplied_bgra
 
         width, height = image.size
-        if self._gdi_dc is None:
-            screen_dc = user.GetDC(None)
-            self._gdi_dc = gdi.CreateCompatibleDC(screen_dc)
-            user.ReleaseDC(None, screen_dc)
         if self._push_size != (width, height):
             self._release_push_gdi()
             screen_dc = user.GetDC(None)
@@ -492,8 +529,14 @@ class _LayeredSurface:
                 return False
             self._bits = bits.value
             self._push_size = (width, height)
+        # Created after the size check: _release_push_gdi() above also drops
+        # the DC, so creating it first left every push without one.
+        if self._gdi_dc is None:
+            screen_dc = user.GetDC(None)
+            self._gdi_dc = gdi.CreateCompatibleDC(screen_dc)
+            user.ReleaseDC(None, screen_dc)
         ok = False
-        if self._bits:
+        if self._bits and self._gdi_dc:
             previous = gdi.SelectObject(self._gdi_dc, self._bitmap)
             ctypes.memmove(self._bits, premultiplied_bgra(image), width * height * 4)
 
@@ -1021,23 +1064,24 @@ class MusicWidget:
             box = draw.textbbox((0, 0), text, font=font)
             draw.text((cx - (box[2] - box[0]) / 2, y), text, font=font, fill=fill)
 
-        centered(title, base_y, self._font_title, (245, 245, 250, alpha))
+        centered(title, base_y, font_for(title, self._font_title.size, True), (245, 245, 250, alpha))
         if artist:
-            centered(artist, base_y + height // 28, self._font_artist, (215, 215, 225, alpha - 60))
+            centered(artist, base_y + height // 28, font_for(artist, self._font_artist.size),
+                     (215, 215, 225, alpha - 60))
 
     def _draw_lyric(self, draw: ImageDraw.Draw, frame, width, height, line, position, lines) -> None:
         """The line being sung now, near the bottom. The next line ghosts in
         beneath it just before it starts."""
-        self._font_lyric = self._font_lyric or _font(max(24, height // 28), bold=True)
         cx = width // 2
         y = int(height * 0.80)
 
-        box = draw.textbbox((0, 0), line, font=self._font_lyric)
+        font = font_for(line, max(24, height // 28), bold=True)
+        box = draw.textbbox((0, 0), line, font=font)
         if box[2] - box[0] > width * 0.86:
-            self._font_lyric = _font(max(18, height // 38), bold=True)
-            box = draw.textbbox((0, 0), line, font=self._font_lyric)
+            font = font_for(line, max(18, height // 38), bold=True)
+            box = draw.textbbox((0, 0), line, font=font)
         draw.text(
-            (cx - (box[2] - box[0]) / 2, y), line, font=self._font_lyric,
+            (cx - (box[2] - box[0]) / 2, y), line, font=font,
             fill=(250, 250, 255, 235),
         )
 
@@ -1049,7 +1093,7 @@ class MusicWidget:
             if lead <= 1500:
                 fade = int(120 * (1 - lead / 1500))
                 if fade > 8:
-                    font_next = _font(max(16, height // 44))
+                    font_next = font_for(next_text, max(16, height // 44))
                     nbox = draw.textbbox((0, 0), next_text, font=font_next)
                     draw.text(
                         (cx - (nbox[2] - nbox[0]) / 2, y + height // 22),

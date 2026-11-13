@@ -182,13 +182,21 @@ def attach_behind_icons(hwnd: int) -> int:
         return 0
     user.SendMessageTimeoutW(progman, WM_SPAWN_WORKER, 0, 0, 0, 1000, None)
 
-    if user.FindWindowExW(progman, 0, "SHELLDLL_DefView", None):
+    def_view = user.FindWindowExW(progman, 0, "SHELLDLL_DefView", None)
+    if def_view:
         # 24H2 layout: icons and wallpaper WorkerW are both under Progman.
-        user.SetParent(hwnd, progman)
-        if get_parent(hwnd) != progman:
+        # Measured on this build: windows parented to Progman or WorkerW are
+        # composed away (invisible) whatever their z-order; the only slot DWM
+        # still shows is a WS_CHILD inside the icon view itself, at the
+        # bottom of its children so the icon list stays on top. It is made
+        # click-through so empty-desktop clicks still reach the shell.
+        _set_child_style(hwnd, True)
+        user.SetParent(hwnd, def_view)
+        if get_parent(hwnd) != def_view:
+            _set_child_style(hwnd, False)
             return 0
         restack_behind_icons(hwnd)
-        return progman
+        return def_view
 
     worker = find_wallpaper_worker_w()
     if not worker or worker == progman:
@@ -201,6 +209,11 @@ def restack_behind_icons(hwnd: int) -> None:
     """Slot a window attached by ``attach_behind_icons`` under the icons."""
     parent = get_parent(hwnd)
     if not parent:
+        return
+    if class_name_of(parent) == "SHELLDLL_DefView":
+        _user32().SetWindowPos(
+            hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+        )
         return
     def_view = _user32().FindWindowExW(parent, 0, "SHELLDLL_DefView", None)
     if not def_view:
@@ -215,6 +228,31 @@ def detach_from_desktop(hwnd: int) -> None:
     if get_parent(hwnd) == 0:
         return
     _user32().SetParent(hwnd, 0)
+    _set_child_style(hwnd, False)
+
+
+GWL_STYLE = -16
+WS_CHILD = 0x40000000
+WS_POPUP = 0x80000000
+
+
+def _set_child_style(hwnd: int, child: bool) -> None:
+    """Swap WS_POPUP for WS_CHILD (and back). A popup re-parented into the
+    icon view keeps top-level semantics and is not drawn there."""
+    user = _user32()
+    user.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    user.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    style = user.GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+    ex = user.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
+    if child:
+        style = (style & ~WS_POPUP) | WS_CHILD
+        ex |= WS_EX_TRANSPARENT
+    else:
+        style = (style & ~WS_CHILD) | WS_POPUP
+    user.SetWindowLongPtrW(hwnd, GWL_STYLE, ctypes.c_long(style).value)
+    user.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ctypes.c_long(ex).value)
 
 
 def make_tool_window(hwnd: int) -> None:

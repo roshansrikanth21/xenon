@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import unittest
 
 from PIL import Image
 
@@ -93,3 +94,13 @@ class TestLayout:
         assert 0 < diameter < 1080
         cx2, cy2, diameter2 = cover_rect(2560, 1440)
         assert diameter2 > diameter
+
+
+class ScriptFontTests(unittest.TestCase):
+    def test_latin_uses_segoe_and_indic_uses_nirmala(self) -> None:
+        from xenon.music_widget import script_font_file
+
+        self.assertIsNone(script_font_file("Dil Haareya", bold=True))
+        self.assertEqual(script_font_file("दिल हारेया", bold=True), ("Nirmala.ttc", 1))
+        self.assertEqual(script_font_file("దిల్", bold=False), ("Nirmala.ttc", 0))
+        self.assertEqual(script_font_file("사랑", bold=False), ("malgun.ttf", 0))

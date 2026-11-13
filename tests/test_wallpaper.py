@@ -1,6 +1,7 @@
 """wallpaper.is_covered — the coverage gate that stops wasted rendering."""
 from __future__ import annotations
 
+import unittest
 import pytest
 
 from xenon import wallpaper
@@ -116,3 +117,25 @@ def test_cloaked_windows_do_not_cover(gate, monkeypatch):
 
 def test_no_rect_means_no_render_anyway(gate):
     assert wallpaper.is_covered(1, None, windows=[]) is False
+
+
+class ChildStyleTests(unittest.TestCase):
+    def test_child_style_swaps_popup_for_child_and_adds_click_through(self) -> None:
+        import sys
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        from unittest import mock
+        from xenon import wallpaper
+
+        state = {-16: wallpaper.WS_POPUP | 0x10000000, -20: 0x80000}
+        fake = mock.MagicMock()
+        fake.GetWindowLongPtrW.side_effect = lambda h, i: state[i]
+        fake.SetWindowLongPtrW.side_effect = lambda h, i, v: state.__setitem__(i, v & 0xFFFFFFFF)
+        with mock.patch.object(wallpaper, "_user32", return_value=fake):
+            wallpaper._set_child_style(1, True)
+            self.assertTrue(state[-16] & wallpaper.WS_CHILD)
+            self.assertFalse(state[-16] & wallpaper.WS_POPUP)
+            self.assertTrue(state[-20] & wallpaper.WS_EX_TRANSPARENT)
+            wallpaper._set_child_style(1, False)
+            self.assertTrue(state[-16] & wallpaper.WS_POPUP)
+            self.assertFalse(state[-16] & wallpaper.WS_CHILD)
