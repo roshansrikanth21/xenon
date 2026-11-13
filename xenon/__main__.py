@@ -267,245 +267,18 @@ def _voice(args: argparse.Namespace) -> int:
         except (TypeError, ValueError):
             pass
 
-    from xenon.audio import (
-        MicrophoneSource,
-        SapiSpeaker,
-        UtteranceDetector,
-        WhisperTranscriber,
-        listen_once,
-    )
-    from xenon.voice import VoiceLoop
-    from xenon.wake import WakeGate
-
-    wake_word = os.environ.get("XENON_WAKE_WORD", "xenon")
-    aliases = tuple(
-        part.strip()
-        for part in os.environ.get("XENON_WAKE_ALIASES", "").split(",")
-        if part.strip()
-    )
-
-    # Build the floating indicator first so the user gets immediate feedback.
-    indicator = None
-    try:
-        from xenon.ui import VoiceIndicator
-
-        indicator = VoiceIndicator()
-        indicator.root.deiconify()
-        indicator.root.lift()
-        indicator.root.attributes("-topmost", True)
-        indicator.root.focus_force()
-        print("status window opened", flush=True)
-    except Exception as error:  # pragma: no cover - environment dependent
-        print(f"voice indicator unavailable: {error}", file=sys.stderr)
-
-    _voice_state: dict = {"indicator": indicator}
-
-    def _ind() -> object | None:
-        return _voice_state["indicator"]
-
-    import threading
-
-    stop_event = threading.Event()
-
-    # Terminal-only fallback when Tk is unavailable: everything stays on this thread.
-    if indicator is None:
-        try:
-            speaker = SapiSpeaker()
-        except Exception as error:
-            print(f"speech output unavailable: {error}", file=sys.stderr)
-            return 1
-        source = MicrophoneSource(device=mic_device)
-        detector = UtteranceDetector(
-            threshold=vad_threshold, silence_ms=silence_ms, min_speech_ms=200
-        )
-        transcriber = WhisperTranscriber(
-            os.environ.get("XENON_WHISPER_MODEL", "base.en"),
-            os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
-            os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
-            initial_prompt=os.environ.get(
-                "XENON_WHISPER_PROMPT",
-                _whisper_hint(wake_word),
-            ),
-            beam_size=beam_size,
-        )
-        model = OpenAICompatibleChat(config)
-        print("warming the model so the first answer is not a cold start...", flush=True)
-        if not model.warm_up():
-            print(
-                "model warm-up failed; the first answer may be slow or fail",
-                file=sys.stderr,
-            )
-        from xenon.apps import default_catalog
-
-        default_catalog().prewarm()
-        store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
-        assistant = Assistant(
-            _observer(),
-            store,
-            model,
-            max_memories=2,
-            max_context_chars=1800,
-        )
-
-        def handle(command: str) -> str:
-            print(f"you: {command}")
-            fast_reply = _voice_fast_reply(command)
-            if fast_reply is not None:
-                print(f"xenon (fast path): {fast_reply}")
-                return _speakable(fast_reply)
-            answer = assistant.ask(command, brief=True)
-            print(f"xenon: {answer.text}")
-            return _speakable(answer.text)
-
-        def transcribe() -> str | None:
-            text = listen_once(source, detector, transcriber)
-            if text:
-                print(f"heard: {text!r}", flush=True)
-            return text
-
-        loop = VoiceLoop(
-            gate=WakeGate(wake_word, aliases=aliases, always=always),
-            transcribe=transcribe,
-            speak=speaker.speak,
-            on_command=handle,
-        )
-        mode = "always listening" if always else f"wake word: {wake_word}"
-        print(f"{mode}; press Ctrl+C to stop", flush=True)
-        try:
-            while True:
-                loop.tick()
-        except KeyboardInterrupt:
-            print("\nstopped")
-        finally:
-            source.close()
-            store.close()
-        return 0
-
-    # GUI path: run the whole audio stack inside the worker thread so the SQLite
-    # connection and COM objects stay on one thread.
-    def worker() -> None:
-        _worker_state: dict = {"last_transcript": None}
-        # expose via closure scope
-        globals()["_worker_state"] = _worker_state
-        try:
-            speaker = SapiSpeaker()
-        except Exception as error:
-            if indicator is not None:
-                indicator.set("error", str(error))
-            print(f"speech output unavailable: {error}", file=sys.stderr)
-            stop_event.set()
-            return
-        source = MicrophoneSource(device=mic_device)
-        detector = UtteranceDetector(
-            threshold=vad_threshold, silence_ms=silence_ms, min_speech_ms=200
-        )
-        transcriber = WhisperTranscriber(
-            os.environ.get("XENON_WHISPER_MODEL", "base.en"),
-            os.environ.get("XENON_WHISPER_DEVICE", "cpu"),
-            os.environ.get("XENON_WHISPER_COMPUTE", "int8"),
-            initial_prompt=os.environ.get(
-                "XENON_WHISPER_PROMPT",
-                _whisper_hint(wake_word),
-            ),
-            beam_size=beam_size,
-        )
-        model = OpenAICompatibleChat(config)
-        ind = _ind()
-        if ind is not None:
-            ind.set("working", "warming model")
-        print("warming the model so the first answer is not a cold start...", flush=True)
-        if model.warm_up():
-            print("model warm", flush=True)
-        else:
-            print(
-                "model warm-up failed; the first answer may be slow or fail",
-                file=sys.stderr,
-            )
-        from xenon.apps import default_catalog
-
-        if ind is not None:
-            ind.set("working", "indexing apps")
-        default_catalog().prewarm()
-        store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
-        assistant = Assistant(
-            _observer(),
-            store,
-            model,
-            max_memories=2,
-            max_context_chars=1800,
-        )
-
-        def handle(command: str) -> str:
-            ind = _ind()
-            if ind is not None:
-                ind.set("working", command)
-            print(f"you: {command}")
-            fast_reply = _voice_fast_reply(command)
-            if fast_reply is not None:
-                print(f"xenon (fast path): {fast_reply}")
-                return _speakable(fast_reply)
-            answer = assistant.ask(command, brief=True)
-            print(f"xenon: {answer.text}")
-            ind = _ind()
-            if ind is not None:
-                ind.set("speaking", answer.text[:120])
-            return _speakable(answer.text)
-
-        def transcribe() -> str | None:
-            ind = _ind()
-            if ind is not None:
-                ind.set("listening", "always listening" if always else f"wake word: {wake_word}")
-            text = listen_once(source, detector, transcriber)
-            if text:
-                print(f"heard: {text!r}", flush=True)
-                ind = _ind()
-                if ind is not None:
-                    ind.set("heard", text)
-            return text
-
-        def speak(text: str) -> None:
-            ind = _ind()
-            if ind is not None:
-                ind.set("speaking", text[:120])
-            speaker.speak(_speakable(text))
-
-        loop = VoiceLoop(
-            gate=WakeGate(wake_word, aliases=aliases, always=always),
-            transcribe=transcribe,
-            speak=speak,
-            on_command=handle,
-        )
-
-        if indicator is not None:
-            indicator.set(
-                "listening",
-                "always listening" if always else f"wake word: {wake_word}",
-            )
-        mode = "always listening" if always else f"wake word: {wake_word}"
-        print(f"{mode}; Stop button (or Ctrl+C here) stops", flush=True)
-        try:
-            while not stop_event.is_set():
-                loop.tick()
-        except Exception as error:
-            if indicator is not None:
-                indicator.set("error", str(error))
-            print(f"voice loop error: {error}", file=sys.stderr)
-        finally:
-            source.close()
-            store.close()
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    try:
-        indicator.run_mainloop()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop_event.set()
-        thread.join(timeout=5)
-    print("stopped")
-    return 0
-
+    # Wire voice into the orb UI instead of the separate Tk status window:
+    # push the CLI choices into the environment so the orb's voice runner
+    # (which reads XENON_*) picks them up, then run the orb as the voice UI.
+    if mic_device is not None:
+        os.environ["XENON_MIC_DEVICE"] = str(mic_device)
+    os.environ["XENON_VAD_THRESHOLD"] = str(vad_threshold)
+    os.environ["XENON_SILENCE_MS"] = str(silence_ms)
+    os.environ["XENON_WAKE_MODE"] = "always" if always else "wake"
+    os.environ["XENON_WHISPER_BEAM"] = str(beam_size)
+    args.voice = True
+    args.startup = None
+    return _orb(args)
 
 _NO_MODEL = (
     "No model configured. Export GROQ_API_KEY or GEMINI_API_KEY (or set "
@@ -1120,6 +893,8 @@ def _sweep_snapshots_once() -> None:
 
 FOCUS_LISTEN_S = 8.0
 
+FOCUS_LISTEN_S = 8.0
+
 
 def _next_announcement(hooks) -> tuple[str, str] | None:
     """A queued ("say" | "ask", text) from the orb (task results, questions)."""
@@ -1395,7 +1170,6 @@ def _orb_voice_runner(config):
 
     return run
 
-
 def _orb(args: argparse.Namespace) -> int:
     if not is_windows():
         print("xenon orb requires Windows", file=sys.stderr)
@@ -1417,6 +1191,8 @@ def _orb(args: argparse.Namespace) -> int:
         _orb_voice_runner(config),
         task_services=_orb_task_services(config),
     )
+    if getattr(args, "voice", False) or os.environ.get("XENON_VOICE_AUTO", "").strip().lower() in {"1", "true", "yes", "on"}:
+        app.root.after(1200, lambda: app._toggle_voice() if app._voice_runner is not None else None)
     print(
         "orb running: hover for options, drag to move, Ctrl+Alt+X to ask "
         "(\"do ...\" runs a task), Ctrl+Alt+V for voice, Ctrl+Alt+Esc stops a task, "
@@ -2350,6 +2126,10 @@ def main(argv: list[str] | None = None) -> int:
     orb.add_argument(
         "--startup", choices=("on", "off"),
         help="start the orb when you sign in to Windows (no console window)",
+    )
+    orb.add_argument(
+        "--voice", action="store_true",
+        help="start voice listening automatically when the orb opens",
     )
     orb.set_defaults(handler=_orb)
 
