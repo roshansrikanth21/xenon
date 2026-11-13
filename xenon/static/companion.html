@@ -97,6 +97,7 @@
   .timer { font-size: clamp(16px, 2.4vw, 28px); }
   .timer .bar { height: 6px; border-radius: 6px; background: var(--faint); margin-top: .5em; overflow: hidden; }
   .timer .bar b { display: block; height: 100%; background: #fbbf24; transition: width 1s linear; }
+  .answer.private { font-style: italic; opacity: .7; }
   .answer { font-size: clamp(15px, 2.2vw, 26px); color: var(--dim); max-width: 80vw; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 
   .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 3vh; padding: 6vh 6vw; background: rgba(6, 7, 12, .92); z-index: 5; text-align: center; }
@@ -269,7 +270,10 @@
       row.appendChild(label); row.appendChild(bar);
       timers.appendChild(row);
     });
+    // The PC already replaced private answers with "Private"; italics make
+    // it read as a placeholder rather than as the answer itself.
     $("answer").textContent = (x && x.last) || "";
+    $("answer").classList.toggle("private", !!(x && x.private));
   }
 
   // Anything the PC pushed to this screen (text, an image or a page).

@@ -88,5 +88,38 @@ class ModelPlannerTests(unittest.TestCase):
         self.assertIn("never", prompt.lower())
 
 
+class CatalogOnlyTests(unittest.TestCase):
+    def catalog(self):
+        from xenon.apps import AppCatalog, AppEntry
+
+        return AppCatalog(
+            entries=[AppEntry(name="Spotify", app_id="SpotifyAB.SpotifyMusic!Spotify")],
+            which=lambda name: r"C:\Windows\evil.exe",
+        )
+
+    def test_planner_open_app_must_be_catalog_id(self) -> None:
+        good = FakeModel(encoded([{"kind": "open_app", "target": "spotify"}]))
+        plan = ModelPlanner(good, catalog=self.catalog()).plan("play music")
+        self.assertEqual(plan.actions[0].target, "spotify")
+
+        for target in ("ms-settings:privacy", "https://evil.example", r"\\server\share\x.exe",
+                       r"C:\Windows\System32\cmd.exe", "%COMSPEC%", "evil", "file:///C:/x"):
+            with self.subTest(target=target):
+                model = FakeModel(encoded([
+                    {"kind": "observe"},
+                    {"kind": "open_app", "target": target},
+                ]))
+                with self.assertRaises(PlannerError):
+                    ModelPlanner(model, catalog=self.catalog()).plan("open it")
+
+    def test_plans_without_open_app_never_touch_the_catalog(self) -> None:
+        class Exploding:
+            def is_catalog_id(self, name):
+                raise AssertionError("catalog should not be consulted")
+
+        plan = ModelPlanner(FakeModel(VALID), catalog=Exploding()).plan("write a note")
+        self.assertEqual(len(plan), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

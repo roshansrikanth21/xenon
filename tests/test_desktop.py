@@ -99,5 +99,133 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(AgentDesktop(exe="ad.exe", runner=runner).find_window("calculator")["id"], "w-2")
 
 
+class IntegrityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from xenon import desktop
+
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.exe = str(Path(folder.name, "agent-desktop-win32-x64.exe"))
+        Path(self.exe).write_bytes(b"not the pinned build")
+        patcher = mock.patch.dict(os.environ, {"AGENT_DESKTOP_EXE": self.exe})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        desktop._HASH_CACHE.clear()
+
+    def test_desktop_rejects_hash_mismatch(self) -> None:
+        from xenon import desktop
+
+        self.assertIsNone(desktop.find_exe())
+        found, verified, detail = desktop.locate_exe()
+        self.assertEqual(found, self.exe)
+        self.assertIsNone(verified)
+        self.assertIn("mismatch", detail)
+        # Without a verified exe the bridge is simply unavailable.
+        with self.assertRaises(desktop.DesktopUnavailable):
+            desktop.AgentDesktop().run("version")
+
+    def test_matching_hash_is_accepted_and_hashed_once(self) -> None:
+        import hashlib
+        from unittest import mock
+
+        from xenon import desktop
+
+        pinned = hashlib.sha256(b"not the pinned build").hexdigest()
+        with mock.patch.object(desktop, "PINNED_SHA256", pinned), \
+                mock.patch("xenon.desktop.hashlib.sha256", wraps=hashlib.sha256) as hasher:
+            self.assertEqual(desktop.find_exe(), self.exe)
+            self.assertEqual(desktop.find_exe(), self.exe)
+        self.assertEqual(hasher.call_count, 1)  # cached per path + mtime
+
+    def test_the_pin_is_the_audited_value(self) -> None:
+        from xenon.desktop import PINNED_SHA256
+
+        self.assertEqual(PINNED_SHA256, "d274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3")
+
+
+class SessionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+
+    def make_dir(self, *parts: str, files=("refmap.json",)):
+        folder = self.root.joinpath(*parts)
+        folder.mkdir(parents=True)
+        for name in files:
+            (folder / name).write_text('{"inner": {}}', encoding="utf-8")
+        return folder
+
+    def test_every_call_carries_the_session(self) -> None:
+        runner = FakeRunner([{"ok": True, "command": "click", "data": {}},
+                             {"ok": True, "command": "set-value", "data": {}}])
+        desktop = AgentDesktop(exe="ad.exe", runner=runner, session="xenon-t1")
+        desktop.click("@s1:e2")
+        desktop.set_value("@s1:e6", "hi")
+        self.assertEqual(runner.calls[0][0], ["click", "--session", "xenon-t1", "@s1:e2"])
+        self.assertEqual(runner.calls[1][0], ["set-value", "--session", "xenon-t1", "@s1:e6", "--stdin"])
+
+    def test_bad_session_ids_are_refused(self) -> None:
+        for bad in ("", "../x", "a b", "x" * 65):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                AgentDesktop(exe="ad.exe", runner=FakeRunner([]), session=bad)
+        from xenon.desktop import new_session_id
+
+        self.assertEqual(new_session_id("task 7/ok"), "xenon-task-7-ok")
+
+    def test_session_snapshot_dirs_deleted(self) -> None:
+        mine_session = self.make_dir("sessions", "xenon-t1", "snapshots", "sabc1234")
+        mine_global = self.make_dir("snapshots", "sglobal01")
+        other_global = self.make_dir("snapshots", "sother001")
+        other_session = self.make_dir("sessions", "claude-t9")
+        runner = FakeRunner([
+            {"ok": True, "command": "snapshot", "data": {"snapshot_id": "sglobal01", "tree": {}}},
+            {"ok": True, "command": "session", "data": {}},
+        ])
+        desktop = AgentDesktop(exe="ad.exe", runner=runner, session="xenon-t1", state_dir=self.root)
+        desktop.snapshot(app="calc")
+
+        removed = desktop.end_session()
+
+        self.assertEqual(removed, 2)
+        self.assertFalse(mine_session.parent.parent.exists())
+        self.assertFalse(mine_global.exists())
+        self.assertTrue(other_global.exists())
+        self.assertTrue(other_session.exists())
+        self.assertEqual(runner.calls[1][0], ["session", "--session", "xenon-t1", "end", "xenon-t1"])
+
+    def test_sweep_removes_only_stale_refmaps_of_known_shape(self) -> None:
+        import os
+        import time
+
+        from xenon.desktop import sweep_stale_snapshots
+
+        old = [self.make_dir("snapshots", "s159dt9rjx0b3v"), self.make_dir("sessions", "xenon-old")]
+        fresh = self.make_dir("snapshots", "sfresh0001")
+        foreign_session = self.make_dir("sessions", "invoice-bot")
+        odd_shape = self.make_dir("snapshots", "soddshape1", files=("refmap.json", "notes.txt"))
+        not_ours = self.make_dir("snapshots", "keepme")
+        stamp = time.time() - 7200
+        for folder in (*old, foreign_session, odd_shape, not_ours):
+            for path in (folder, *folder.rglob("*")):
+                os.utime(path, (stamp, stamp))
+
+        removed = sweep_stale_snapshots(max_age_s=3600, root=self.root)
+
+        self.assertEqual(removed, 2)
+        for folder in old:
+            self.assertFalse(folder.exists())
+        for folder in (fresh, foreign_session, odd_shape, not_ours):
+            self.assertTrue(folder.exists(), folder)
+
+
 if __name__ == "__main__":
     unittest.main()

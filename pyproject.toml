@@ -8,6 +8,7 @@ requires-python = ">=3.11"
 uia = ["pywinauto>=0.6.9", "pywin32>=306"]
 capture = ["mss>=9", "pillow>=10"]
 orb = ["pillow>=10", "pystray>=0.19", "pywin32>=306", "pycaw>=20240316"]
+music = ["pillow>=10", "numpy>=1.26", "winsdk>=1.0.0b10", "pyaudiowpatch>=0.2.12.6"]
 voice = ["sounddevice>=0.4", "faster-whisper>=1.0", "pywin32>=306"]
 dev = ["pytest>=8"]
 
@@ -23,3 +24,6 @@ xenon = ["static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tcl reads its own library files; under fd capture it intermittently cannot,
+# which made the Tk card safety tests skip at random.
+addopts = "--capture=sys"

@@ -17,17 +17,42 @@ This module:
 
 Actions are headless by default: they use accessibility calls, so they do
 not move the mouse or steal focus from what the user is doing.
+
+Phase 0 hardening:
+
+* integrity: every path ``find_exe`` resolves must hash to ``PINNED_SHA256``
+  (agent-desktop 1.2.0, win32-x64). The ``.sha256`` file npm ships next to the
+  exe travels in the same package, so it proves nothing; the pin lives here.
+  A mismatch disables the feature instead of falling back to another copy;
+* privacy: ``refmap.json`` stores element names and window titles in plain
+  text. With ``session`` set every call runs in ``--session <id>`` so its
+  refmaps land under ``<state root>/sessions/<id>/``, and ``end_session``
+  deletes them. ``sweep_stale_snapshots`` removes leftovers at startup.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 SUPPORTED_MAJOR_MINOR = ("1.2",)
+# sha256 of agent-desktop-win32-x64.exe 1.2.0. Change it only after checking
+# the new binary against the GitHub release asset, not the npm .sha256 file.
+PINNED_SHA256 = "d274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3"
+# agent-desktop's own rule for session ids: 1-64 ASCII letters, digits, - or _.
+_SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Xenon only ever names its sessions "xenon-<id>", so that prefix is the
+# proof of ownership the cleanup code needs.
+SESSION_PREFIX = "xenon-"
+# Global snapshot dirs look like "s159dt9rjx0b3v".
+_SNAPSHOT_ID = re.compile(r"^s[a-z0-9]{4,40}$")
 MAX_ELEMENTS = 70
 MAX_NAME = 60
 MAX_VALUE = 80
@@ -36,19 +61,176 @@ MAX_VALUE = 80
 # ----------------------------------------------------------------- finding --
 
 
-def find_exe() -> str | None:
-    """The agent-desktop native exe, or None when it is not installed."""
+_HASH_CACHE: dict[str, tuple[int, int, str]] = {}
+
+
+def file_sha256(path: str) -> str:
+    """sha256 of ``path``, computed once per (path, mtime, size)."""
+    stat = os.stat(path)
+    key = os.path.normcase(os.path.abspath(path))
+    cached = _HASH_CACHE.get(key)
+    if cached is not None and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+        return cached[2]
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    value = digest.hexdigest()
+    _HASH_CACHE[key] = (stat.st_mtime_ns, stat.st_size, value)
+    return value
+
+
+def verify_binary(path: str, expected: str | None = None) -> tuple[bool, str]:
+    """Is ``path`` the pinned agent-desktop build? (ok, human detail)."""
+    expected = expected or PINNED_SHA256
+    try:
+        actual = file_sha256(path)
+    except OSError as error:
+        return False, f"cannot read {path}: {error}"
+    if actual == expected.lower():
+        return True, "sha256 ok"
+    return False, f"sha256 mismatch for {path}: got {actual[:16]}..., pinned {expected[:16]}..."
+
+
+def _candidates() -> list[str]:
     configured = os.environ.get("AGENT_DESKTOP_EXE", "").strip()
     candidates = [configured] if configured else []
     appdata = os.environ.get("APPDATA", "")
-    candidates.append(os.path.join(appdata, "npm", "node_modules", "agent-desktop", "bin",
-                                   "agent-desktop-win32-x64.exe"))
+    if appdata:
+        candidates.append(os.path.join(appdata, "npm", "node_modules", "agent-desktop", "bin",
+                                       "agent-desktop-win32-x64.exe"))
     candidates.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                    "vendor", "agent-desktop-win32-x64.exe"))
-    for path in candidates:
+    return candidates
+
+
+def locate_exe() -> tuple[str | None, str | None, str]:
+    """(found path, verified path or None, detail) for doctor and find_exe.
+
+    The first existing candidate decides. A copy that fails the hash check
+    disables the feature: silently falling back to some other copy would let
+    whoever swapped the first one choose what runs next.
+    """
+    for path in _candidates():
         if path and os.path.isfile(path):
-            return path
-    return shutil.which("agent-desktop")
+            ok, detail = verify_binary(path)
+            return path, (path if ok else None), detail
+    shim = shutil.which("agent-desktop")
+    if shim:
+        # The npm shim is a script, not the pinned exe, so it can never pass.
+        ok, detail = verify_binary(shim)
+        return shim, (shim if ok else None), detail
+    return None, None, "agent-desktop is not installed"
+
+
+def find_exe() -> str | None:
+    """The verified agent-desktop native exe, or None (missing or mismatched)."""
+    return locate_exe()[1]
+
+
+def state_root() -> Path:
+    """agent-desktop's state directory (``AGENT_DESKTOP_HOME`` relocates it)."""
+    configured = os.environ.get("AGENT_DESKTOP_HOME", "").strip()
+    if configured and os.path.isabs(configured):
+        return Path(configured)
+    return Path.home() / ".agent-desktop"
+
+
+def new_session_id(task_id: str) -> str:
+    """``xenon-<task_id>`` squeezed into agent-desktop's id alphabet."""
+    clean = re.sub(r"[^A-Za-z0-9_-]+", "-", task_id).strip("-") or f"{int(time.time())}"
+    return (SESSION_PREFIX + clean)[:64]
+
+
+def _is_link(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    checker = getattr(os.path, "isjunction", None)  # 3.12+
+    try:
+        return bool(checker(path)) if checker else False
+    except OSError:
+        return True
+
+
+def _inside(child: Path, parent: Path) -> bool:
+    """``child`` is a real directory directly under ``parent`` (no links)."""
+    try:
+        if _is_link(child) or not child.is_dir():
+            return False
+        return os.path.normcase(os.path.realpath(child.parent)) == os.path.normcase(
+            os.path.realpath(parent)
+        )
+    except OSError:
+        return False
+
+
+def _remove_tree(path: Path) -> bool:
+    try:
+        shutil.rmtree(path)
+        return True
+    except OSError:
+        return False
+
+
+def _newest_mtime(path: Path) -> float:
+    newest = 0.0
+    try:
+        newest = path.stat().st_mtime
+        for child in path.rglob("*"):
+            try:
+                newest = max(newest, child.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return newest
+
+
+def sweep_stale_snapshots(max_age_s: float = 3600, root: str | Path | None = None,
+                          now: float | None = None) -> int:
+    """Delete leftover refmaps older than ``max_age_s``; returns how many dirs.
+
+    Only two shapes are touched: ``sessions/xenon-*`` (Xenon's by name) and
+    global ``snapshots/s<id>`` dirs that hold nothing but ``refmap.json``.
+    Refs die with the process that captured them, so a refmap older than an
+    hour is useless to anyone and only keeps names and titles on disk.
+    """
+    base = Path(root) if root is not None else state_root()
+    current = time.time() if now is None else now
+    removed = 0
+    sessions = base / "sessions"
+    if sessions.is_dir():
+        for entry in list(sessions.iterdir()):
+            if not entry.name.startswith(SESSION_PREFIX) or not _SESSION_ID.match(entry.name):
+                continue
+            if _inside(entry, sessions) and current - _newest_mtime(entry) > max_age_s:
+                removed += _remove_tree(entry)
+    snapshots = base / "snapshots"
+    if snapshots.is_dir():
+        for entry in list(snapshots.iterdir()):
+            if not _SNAPSHOT_ID.match(entry.name) or not _inside(entry, snapshots):
+                continue
+            try:
+                names = {child.name for child in entry.iterdir()}
+            except OSError:
+                continue
+            if names - {"refmap.json"}:
+                continue  # not the shape we know; leave it alone
+            if current - _newest_mtime(entry) > max_age_s:
+                removed += _remove_tree(entry)
+    return removed
+
+
+def leftover_snapshots(root: str | Path | None = None) -> int:
+    """How many refmap dirs exist right now (doctor)."""
+    base = Path(root) if root is not None else state_root()
+    count = 0
+    for folder, pattern in ((base / "snapshots", _SNAPSHOT_ID), (base / "sessions", _SESSION_ID)):
+        try:
+            count += sum(1 for entry in folder.iterdir() if pattern.match(entry.name))
+        except OSError:
+            continue
+    return count
 
 
 # --------------------------------------------------------------- envelopes --
@@ -197,10 +379,18 @@ def flatten(tree: dict, include_offscreen: bool = False, limit: int = MAX_ELEMEN
 
 
 class AgentDesktop:
-    def __init__(self, exe: str | None = None, runner=None, timeout_s: float = 40.0) -> None:
+    def __init__(self, exe: str | None = None, runner=None, timeout_s: float = 40.0,
+                 session: str | None = None, state_dir: str | Path | None = None) -> None:
+        # An explicit ``exe`` is a code-supplied seam (tests); anything found
+        # on disk goes through find_exe and its hash check.
         self.exe = exe or find_exe()
         self._runner = runner or self._run_process
         self._timeout_s = timeout_s
+        if session is not None and not _SESSION_ID.match(session):
+            raise ValueError("session ids are 1-64 letters, digits, - or _")
+        self.session = session
+        self._state_dir = Path(state_dir) if state_dir is not None else None
+        self._snapshot_ids: set[str] = set()
 
     @property
     def available(self) -> bool:
@@ -221,6 +411,9 @@ class AgentDesktop:
                 "or set AGENT_DESKTOP_EXE"
             )
         argv = [self.exe, *[str(a) for a in args]]
+        if self.session and args:
+            # Right after the subcommand, so it can never be read as a value.
+            argv[2:2] = ["--session", self.session]
         try:
             code, out, err = self._runner(argv, stdin, timeout or self._timeout_s)
         except subprocess.TimeoutExpired:
@@ -235,7 +428,41 @@ class AgentDesktop:
             return Envelope(False, args[0] if args else "", error={
                 "code": "NO_OUTPUT", "message": (err or out or f"exit {code}").strip()[:300],
                 "disposition": {"delivery": "delivery_uncertain", "retry": "unknown"}})
-        return Envelope(bool(raw.get("ok")), raw.get("command", ""), raw.get("data") or {}, raw.get("error") or {})
+        envelope = Envelope(bool(raw.get("ok")), raw.get("command", ""), raw.get("data") or {},
+                            raw.get("error") or {})
+        data = envelope.data if isinstance(envelope.data, dict) else {}
+        snapshot_id = data.get("snapshot_id")
+        if isinstance(snapshot_id, str) and _SNAPSHOT_ID.match(snapshot_id):
+            self._snapshot_ids.add(snapshot_id)  # for end_session
+        return envelope
+
+    # ----- session hygiene -----------------------------------------------
+
+    def end_session(self) -> int:
+        """Seal the session and delete every refmap this instance created.
+
+        Returns how many directories were removed. Only paths that are
+        provably ours are touched: the ``xenon-*`` session dir and global
+        snapshot dirs whose ids came back in this instance's envelopes.
+        """
+        root = self._state_dir if self._state_dir is not None else state_root()
+        removed = 0
+        if self.session and self.exe:
+            try:
+                self.run("session", "end", self.session, timeout=10)
+            except Exception:
+                pass  # a bare --session has no manifest to seal; deletion still runs
+        if self.session and self.session.startswith(SESSION_PREFIX):
+            folder = root / "sessions" / self.session
+            if _inside(folder, root / "sessions"):
+                removed += _remove_tree(folder)
+        snapshots = root / "snapshots"
+        for snapshot_id in sorted(self._snapshot_ids):
+            folder = snapshots / snapshot_id
+            if _inside(folder, snapshots):
+                removed += _remove_tree(folder)
+        self._snapshot_ids.clear()
+        return removed
 
     # ----- observation ---------------------------------------------------
 

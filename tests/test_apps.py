@@ -59,6 +59,65 @@ class ResolveTests(unittest.TestCase):
         self.assertIsNone(catalog.resolve("quantum frobnicate"))
 
 
+class OriginTests(unittest.TestCase):
+    """Model and voice words may only name catalog entries (phase 0)."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.existing = str(Path(folder.name, "payload.exe"))
+        Path(self.existing).write_bytes(b"MZ")
+        self.catalog = catalog_with(
+            AppEntry(name="Spotify", app_id="SpotifyAB.SpotifyMusic!Spotify"),
+            AppEntry(name="Settings", app_id="windows.immersivecontrolpanel!microsoft.windows.immersivecontrolpanel"),
+            which=lambda name: r"C:\Users\x\Downloads\evil.exe",
+        )
+
+    def test_open_app_rejects_uri_unc_and_scheme_for_model_and_voice_origin(self) -> None:
+        hostile = (
+            "ms-settings:privacy-webcam", "search-ms:query=x", "https://evil.example",
+            "file:///C:/x.exe", r"\\attacker\share\run.exe", "//attacker/share",
+            self.existing, r"C:\Windows\System32\cmd.exe", "%COMSPEC%", "..\\payload",
+            "evil",  # not in the catalog; PATH lookup is off for these origins
+        )
+        for origin in ("model", "voice", "something-new"):
+            for query in hostile:
+                with self.subTest(origin=origin, query=query):
+                    self.assertIsNone(self.catalog.resolve(query, origin=origin))
+
+    def test_default_origin_is_the_strict_one(self) -> None:
+        self.assertIsNone(self.catalog.resolve("ms-settings:privacy"))
+        self.assertIsNone(self.catalog.resolve(self.existing))
+
+    def test_catalog_names_still_resolve_for_model_and_voice(self) -> None:
+        for origin in ("model", "voice"):
+            with self.subTest(origin=origin):
+                self.assertEqual(self.catalog.resolve("spotify", origin=origin).source,
+                                 "start-menu app id")
+                self.assertEqual(self.catalog.resolve("youtube", origin=origin).target,
+                                 "https://www.youtube.com")
+                # The code-owned alias resolves through the catalog, never as a URI.
+                resolved = self.catalog.resolve("ms-settings:", origin=origin)
+                self.assertEqual(resolved.name, "Settings")
+                self.assertFalse(resolved.target)
+        self.assertTrue(self.catalog.is_catalog_id("spotify"))
+        self.assertFalse(self.catalog.is_catalog_id("https://evil.example"))
+
+    def test_typed_and_cli_keep_web_urls_and_paths_but_no_other_schemes(self) -> None:
+        catalog = catalog_with()
+        for origin in ("typed", "cli"):
+            with self.subTest(origin=origin):
+                self.assertEqual(catalog.resolve("https://example.com/a", origin=origin).target,
+                                 "https://example.com/a")
+                self.assertEqual(catalog.resolve(self.existing, origin=origin).path, self.existing)
+                for query in ("ms-settings:privacy", "search-ms:query=x", "file:///C:/x.exe",
+                              "javascript:alert(1)", r"\\attacker\share\run.exe"):
+                    self.assertIsNone(catalog.resolve(query, origin=origin), query)
+
+
 class LaunchTests(unittest.TestCase):
     def test_app_id_launches_through_explorer(self) -> None:
         from xenon.apps import ResolvedApp

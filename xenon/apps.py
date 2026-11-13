@@ -138,6 +138,37 @@ class ResolvedApp:
     source: str = ""
 
 
+# Origins whose words come straight from Roshan's keyboard. Everything else
+# (voice, model, unknown) gets the catalog-only rules.
+TRUSTED_ORIGINS = frozenset({"typed", "cli"})
+
+# Names a strict origin may resolve through System32 without a catalog hit.
+_STRICT_SYSTEM_NAMES = frozenset({"notepad", "calc", "calculator", "mspaint", "paint", "explorer"})
+
+_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.I)
+_DRIVE = re.compile(r"^[a-z]:[\\/]", re.I)
+
+
+def _is_unc(query: str) -> bool:
+    text = query.strip()
+    return text.startswith(("\\\\", "//")) or text.lower().startswith(("file://", "\\??\\"))
+
+
+def _strict_query_ok(query: str) -> bool:
+    """Model/voice words must look like a name, not a path, URI or env var.
+
+    The one exception is an exact code-owned alias such as ``ms-settings:``,
+    which still resolves only through the catalog, never as a URI.
+    """
+    if query.strip().lower() in SEARCH_NAMES:
+        return True
+    if any(ch in query for ch in ":/\\%"):
+        return False
+    if query.startswith(".") or ".." in query or query.startswith("~"):
+        return False
+    return True
+
+
 def _normalize(value: str) -> str:
     value = value.strip().lower()
     value = re.sub(r"\.(exe|lnk|url)$", "", value)
@@ -150,6 +181,8 @@ def _candidate_names(query: str) -> list[str]:
     normalized = _normalize(query)
     names = [normalized]
     names.extend(SEARCH_NAMES.get(normalized, ()))
+    # Keys such as "ms-settings:" do not survive normalisation.
+    names.extend(SEARCH_NAMES.get(query.strip().lower(), ()))
     for name in tuple(names):
         if name.startswith("microsoft "):
             names.append(name[len("microsoft ") :])
@@ -267,9 +300,28 @@ class AppCatalog:
             # PowerShell must not stop the fallback launch path.
             pass
 
-    def resolve(self, query: str) -> ResolvedApp | None:
+    def is_catalog_id(self, name: str) -> bool:
+        """Would ``name`` resolve under the strict (model) rules?"""
+        return self.resolve(name, origin="model") is not None
+
+    def resolve(self, query: str, origin: str = "model") -> ResolvedApp | None:
+        """Best launch target for ``query``.
+
+        ``origin`` says who chose the words: ``typed`` (the orb's Ask pill),
+        ``cli``, ``voice`` or ``model``. Anything else is treated as
+        ``model``, the strictest. Model and voice words are untrusted (an
+        injected page or a misheard phrase), so they may only name catalog
+        entries: no URI schemes, UNC or raw paths, ``%VAR%`` expansions or
+        PATH lookups (which on Windows also search the current directory).
+        Typed and CLI input keeps paths and http(s) URLs, never other schemes.
+        """
         query = query.strip()
         if not query:
+            return None
+        strict = origin not in TRUSTED_ORIGINS
+        if _is_unc(query) or any(ch in query for ch in "\x00\r\n\t"):
+            return None  # an SMB lookup leaks credentials, whoever typed it
+        if strict and not _strict_query_ok(query):
             return None
 
         candidates = _candidate_names(query)
@@ -301,6 +353,17 @@ class AppCatalog:
                     best_entry.name, path=best_entry.path, source="app path"
                 )
 
+        if strict:
+            # Only code-owned names may reach System32 (notepad, calc, ...).
+            system = _system_exe(query) if _normalize(query) in _STRICT_SYSTEM_NAMES else ""
+            if system:
+                return ResolvedApp(Path(system).stem, path=system, source="System32")
+            lowered = _normalize(query)
+            url = WEB_APPS.get(lowered)
+            if url:
+                return ResolvedApp(lowered.title(), target=url, source="web")
+            return None
+
         executable = _which(query, self._which)
         if executable:
             return ResolvedApp(Path(executable).stem, path=executable, source="PATH")
@@ -314,9 +377,16 @@ class AppCatalog:
         if url:
             return ResolvedApp(lowered.title(), target=url, source="web")
 
-        if "://" in query or re.match(r"^[a-z][a-z0-9+.-]*:", query, re.I):
-            return ResolvedApp(query, target=query, source="shell")
+        if "://" in query or _SCHEME.match(query):
+            # Typed input keeps web addresses only: ms-settings:, search-ms:,
+            # file: and custom protocol handlers can all run code or leak.
+            if re.match(r"^https?://[^\s/\\]+", query, re.I):
+                return ResolvedApp(query, target=query, source="web")
+            if not _DRIVE.match(query):
+                return None
 
+        if "%" in query:
+            return None
         direct_path = Path(query).expanduser()
         if direct_path.exists():
             return ResolvedApp(direct_path.stem, path=str(direct_path), source="path")

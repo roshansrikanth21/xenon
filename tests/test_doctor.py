@@ -10,6 +10,10 @@ from xenon.doctor import (
     FAIL,
     PASS,
     WARN,
+    Check,
+    check_agent_desktop,
+    check_elevation,
+    check_kill_flags,
     check_memory,
     check_model,
     check_python,
@@ -184,6 +188,9 @@ class RunChecksTests(unittest.TestCase):
                 model=None,
                 db_path=str(Path(tmp) / "memory.db"),
                 skills_root=tmp,
+                agent_desktop=lambda: Check("agent-desktop", PASS, "fake"),
+                elevation=lambda: Check("elevation", PASS, "not elevated"),
+                network=lambda: Check("network", PASS, "fake"),
             )
 
         names = [check.name for check in checks]
@@ -193,7 +200,44 @@ class RunChecksTests(unittest.TestCase):
         self.assertIn("memory", names)
         self.assertIn("skills", names)
         self.assertIn("microphone", names)
+        self.assertIn("agent-desktop", names)
+        self.assertIn("elevation", names)
+        self.assertIn("kill flags", names)
         self.assertFalse(any(check.status == FAIL for check in checks))
+
+
+class SafetyCheckTests(unittest.TestCase):
+    def test_hash_mismatch_fails_and_the_binary_is_never_run(self) -> None:
+        ran = []
+        check = check_agent_desktop(
+            locate=lambda: ("C:/x/agent-desktop.exe", None, "sha256 mismatch for C:/x/agent-desktop.exe"),
+            version=lambda path: ran.append(path) or "1.2.0",
+            leftovers=lambda: 0,
+        )
+        self.assertEqual(check.status, FAIL)
+        self.assertIn("mismatch", check.detail)
+        self.assertEqual(ran, [])
+
+    def test_verified_binary_reports_version_hash_and_leftovers(self) -> None:
+        ok = check_agent_desktop(locate=lambda: ("a.exe", "a.exe", "sha256 ok"),
+                                 version=lambda path: "1.2.0", leftovers=lambda: 0)
+        self.assertEqual(ok.status, PASS)
+        self.assertIn("1.2.0", ok.detail)
+        self.assertIn("sha256 ok", ok.detail)
+        messy = check_agent_desktop(locate=lambda: ("a.exe", "a.exe", "sha256 ok"),
+                                    version=lambda path: "1.2.0", leftovers=lambda: 16)
+        self.assertEqual(messy.status, WARN)
+        self.assertIn("16 leftover", messy.detail)
+        missing = check_agent_desktop(locate=lambda: (None, None, "not installed"))
+        self.assertEqual(missing.status, WARN)
+
+    def test_elevation_and_kill_flags_are_reported(self) -> None:
+        self.assertEqual(check_elevation(lambda: True).status, WARN)
+        self.assertEqual(check_elevation(lambda: False).detail, "not elevated")
+        with mock.patch.dict("os.environ", {"XENON_AGENT": "off", "XENON_OUTWARD": "on"}):
+            detail = check_kill_flags().detail
+        self.assertIn("XENON_AGENT=off", detail)
+        self.assertIn("XENON_OUTWARD=on", detail)
 
 
 if __name__ == "__main__":

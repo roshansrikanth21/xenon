@@ -19,6 +19,7 @@ import json
 import math
 import os
 import queue
+import re
 import sys
 import zlib
 import threading
@@ -240,6 +241,9 @@ class OrbReply:
     text: str
     sources: list[str] = field(default_factory=list)
     note: str = ""
+    # Built from the screen, memory or a tainted task: the companion tablet
+    # shows "Private" instead of it.
+    private: bool = False
 
 
 @dataclass
@@ -260,9 +264,21 @@ class OrbBackend(Protocol):
 class VoiceHooks:
     state: Callable[[str, str], None]
     level: Callable[[float], None]
-    exchange: Callable[[str, str], None]
+    exchange: Callable[..., None]  # (you, answer[, private])
     # Set by the push-to-talk hotkey: listen now, without the wake word.
     listen_now: threading.Event | None = None
+    # Task hand-off: ``task(text, origin)`` returns what to say ("On it.",
+    # "Stopped.") or None to fall through to today's behaviour. The origin
+    # "voice-focus" marks a wake-less utterance, which may only answer a
+    # waiting task (or stop it), never start one or approve anything.
+    task: Callable[[str, str], str | None] | None = None
+    # True while a task waits for an answer (one wake-less listen allowed).
+    focus_listen: Callable[[], bool] | None = None
+    # ("say" | "ask", text) for the voice thread to speak: task results and
+    # a waiting task's question.
+    say: "queue.Queue[tuple[str, str]] | None" = None
+    # Voice approvals (spoken nonce) stay off in phase 1: always None.
+    confirm: Callable[[str, str], bool] | None = None
 
 
 # Builds a voice session on its own thread and runs until ``stop`` is set.
@@ -318,6 +334,531 @@ class Worker:
         self._thread.join(timeout=timeout)
 
 
+# ------------------------------------------------------------------ tasks --
+
+
+def _never(_text: str) -> bool:
+    return False
+
+
+@dataclass
+class TaskServices:
+    """What the orb needs from ``__main__`` to run "do <goal>" tasks.
+
+    ``make_task(goal, origin, tools)`` returns the task body, a callable
+    that takes a ``tasks.TaskContext`` and returns the result text.
+    ``is_t0(text)`` says whether an instant parser owns the text (volume,
+    timers), which escapes a waiting task's focus. ``clean`` drops the wake
+    word.
+    """
+
+    make_task: Callable[[str, str, "TaskTools"], Callable[[object], str]]
+    is_t0: Callable[[str], bool] = _never
+    clean: Callable[[str], str] = str.strip
+
+
+@dataclass
+class TaskTools:
+    """Handed to a task body: the one broker, the caps, and the undo strip."""
+
+    broker: object
+    caps: object
+    # undo(label, seconds, cancel) -> True to go ahead, False when undone.
+    undo: Callable[[str, float, threading.Event], bool]
+    task_id: str = ""
+
+
+@dataclass
+class ChoicePrompt:
+    prompt_id: str
+    title: str
+    labels: list[str]
+    on_pick: Callable[[str | None], None]
+
+
+# A spoken request that may not start a task: heard in always-listening
+# mode, or with the wake word somewhere other than the start.
+VOICE_AMBIENT = "voice-ambient"
+VOICE_TASK_REFUSAL = "Use push-to-talk, or start with my name, for tasks."
+BUSY_CHOICES = {"Queue it": "queue", "Replace the current task": "replace", "Cancel the new one": "cancel"}
+TERMINAL_TASK_STATES = frozenset({"done", "failed", "cancelled"})
+
+
+class OrbTasks:
+    """The orb's task layer, without Tk: routing, broker, TaskManager, IPC.
+
+    Everything that touches a window goes through ``ui`` (the OrbApp) via
+    ``post``, so this class is safe to call from the Tk thread, the voice
+    thread and the IPC thread, and the tests drive it with fakes.
+
+    Idle cost: the broker and the rate caps are plain objects; the audit
+    database opens on first write; the TaskManager thread starts on the
+    first task. Only the IPC thread exists from startup, asleep in
+    ConnectNamedPipe.
+    """
+
+    def __init__(
+        self,
+        services: TaskServices,
+        post: Callable[[Callable[[], None]], None],
+        ui,
+        broker=None,
+        audit=None,
+        manager_factory: Callable[..., object] | None = None,
+        ipc_factory: Callable[..., object] | None = None,
+        agent_check: Callable[[], tuple[bool, str]] | None = None,
+    ) -> None:
+        from xenon.approvals import ApprovalBroker, AuditLog, RateCaps, default_audit_path
+
+        self.services = services
+        self._post = post
+        self._ui = ui
+        self.audit = audit if audit is not None else AuditLog(default_audit_path())
+        self.caps = RateCaps()
+        self.broker = broker if broker is not None else ApprovalBroker(
+            presenter=self._present, caps=self.caps, audit=self.audit, on_settled=self._settled
+        )
+        self._manager_factory = manager_factory
+        self._ipc_factory = ipc_factory
+        self._agent_check = agent_check
+        self._manager = None
+        self._ipc = None
+        self._origins: dict[str, str] = {}
+        # Title of the task most recently queued or started: the busy card
+        # names it when the manager has queued it but not picked it up yet.
+        self._latest_title = ""
+        # Who is submitting right now, per thread: TaskManager.submit calls
+        # on_busy_choice synchronously, and the Tk, voice and IPC threads
+        # can all submit at once.
+        self._submitting = threading.local()
+        self._choices: list[ChoicePrompt] = []
+        self._lock = threading.Lock()
+        self._reconciled = False
+
+    # -- lazy parts --------------------------------------------------------
+
+    @property
+    def manager(self):
+        with self._lock:
+            if self._manager is None:
+                if self._manager_factory is not None:
+                    factory = self._manager_factory
+                else:
+                    from xenon.tasks import TaskManager as factory
+                self._manager = factory(on_update=self._update, on_busy_choice=self._busy_choice)
+                reconcile = not self._reconciled
+                self._reconciled = True
+            else:
+                reconcile = False
+        if reconcile:
+            try:
+                left = self.audit.reconcile_pending()
+                if left:
+                    print(f"audit: {len(left)} approval(s) left open by an earlier run were closed",
+                          file=sys.stderr, flush=True)
+            except Exception:
+                pass
+        return self._manager
+
+    def start_ipc(self) -> bool:
+        """Start the pipe so ``xenon do`` can hand outward goals to the orb."""
+        if self._ipc is not None:
+            return True
+        try:
+            if self._ipc_factory is not None:
+                server = self._ipc_factory(submit=self.submit_from_ipc)
+            else:
+                from xenon.ipc import IpcServer
+
+                server = IpcServer(submit=self.submit_from_ipc)
+            started = server.start()
+        except Exception as error:
+            print(f"task hand-off unavailable: {error}", file=sys.stderr, flush=True)
+            return False
+        self._ipc = server
+        return bool(started)
+
+    # -- state -------------------------------------------------------------
+
+    @property
+    def busy(self) -> bool:
+        manager = self._manager
+        return manager is not None and manager.busy
+
+    @property
+    def waiting_for_input(self) -> bool:
+        manager = self._manager
+        return manager is not None and manager.waiting_for_input
+
+    def has_task(self) -> bool:
+        return self.busy or bool(self.broker.pending()) or bool(self._choices)
+
+    def open_choices(self) -> list[ChoicePrompt]:
+        with self._lock:
+            return list(self._choices)
+
+    # -- the request path --------------------------------------------------
+
+    def route(self, text: str, origin: str = "typed") -> str | None:
+        """Steps 2-4 of the request path for typed and spoken text.
+
+        Returns what to tell Roshan, or None to fall through to today's
+        behaviour (instant parsers, router, Assistant.ask). A wake-less
+        utterance (origin "voice-focus") can only answer a waiting task or
+        stop one; it never starts a task and never falls through.
+        """
+        from xenon import intents
+
+        cleaned = self.services.clean(text or "").strip()
+        focus_only = origin == "voice-focus"
+        if not cleaned:
+            return "" if focus_only else None
+        intent = intents.parse(cleaned)
+        prompts = self.open_choices()
+        if prompts:
+            # A choice card holds the focus: "the second one", "queue",
+            # "none", or "cancel"/"never mind" (which drops just the new task).
+            from xenon.orb_cards import pick_choice
+            from xenon.tasks import match_choice
+
+            prompt = prompts[-1]
+            understood, label = pick_choice(cleaned, prompt.labels)
+            if not understood and intent is None:
+                label = match_choice(cleaned, prompt.labels)
+                understood = label is not None
+            if not understood and intent is not None and intent.kind == "cancel":
+                understood, label = True, None
+            if understood:
+                self._resolve_choice(prompt.prompt_id, label)
+                return "OK."
+        if intent is not None and intent.kind in {"stop", "cancel"} and self.has_task():
+            self.stop("stopped by you")
+            return "Stopped."
+        manager = self._manager
+        if (
+            manager is not None
+            and manager.waiting_for_input
+            and not intents.is_escape(cleaned)
+            and not self.services.is_t0(cleaned)
+        ):
+            if manager.offer_input(cleaned):
+                return "Got it."
+        if focus_only:
+            return ""  # never a new task, never the assistant
+        if intent is not None and intent.kind == "do" and origin == VOICE_AMBIENT:
+            # Always-listening mode, or the wake word was not at the start:
+            # this may be a video or someone else in the room.
+            return VOICE_TASK_REFUSAL
+        if intent is not None and intent.kind == "do":
+            check = self._agent_check
+            if check is None:
+                from xenon.killswitch import agent_allowed as check
+            allowed, why = check()
+            if not allowed:
+                return f"I can't do that: {why}."
+            was_busy = self.busy
+            self.submit(intent.goal, origin)
+            if was_busy:
+                # The queue / replace / cancel card asks what to do with it
+                # (and reads the question out for a spoken request).
+                return "" if origin == "voice" else "Still on another task: choose on the card."
+            return "On it."
+        return None
+
+    def submit(self, goal: str, origin: str = "typed") -> str:
+        services = self.services
+        broker, caps, undo = self.broker, self.caps, self._undo
+
+        def body(context) -> str:
+            task_id = getattr(context, "task_id", "")
+            # Recorded before the first progress update, so a voice task's
+            # questions and result are spoken however fast it runs.
+            self._origins[task_id] = origin
+            tools = TaskTools(broker, caps, undo, task_id)
+            return services.make_task(goal, origin, tools)(context)
+
+        # A second task while one runs raises the queue/replace/cancel card
+        # from inside manager.submit; it reads this to know who asked.
+        self._submitting.origin = origin
+        try:
+            return self.manager.submit(goal, body, source=origin)
+        finally:
+            self._submitting.origin = "typed"
+
+    def origin_of(self, task_id: str) -> str:
+        """Who asked for a running task: typed, voice or ipc."""
+        return self._origins.get(task_id, "typed")
+
+    def submit_from_ipc(self, goal: str, origin: str = "ipc") -> str:
+        # Whatever the caller claimed, a pipe request is "ipc": it can start
+        # a task (and so raise a card), never approve one.
+        return self.submit(goal, "ipc")
+
+    def stop(self, reason: str = "") -> bool:
+        """Cancel the task, deny its cards, drop choice prompts."""
+        manager = self._manager
+        stopped = bool(manager.cancel(None)) if manager is not None else False
+        pending = bool(self.broker.pending())
+        self.broker.deny_all(reason or "stopped")
+        with self._lock:
+            prompts, self._choices = self._choices, []
+        for prompt in prompts:
+            self._post(lambda p=prompt: self._ui.task_choice_closed(p.prompt_id))
+            try:
+                prompt.on_pick(None)
+            except Exception:
+                pass
+        self._post(self._ui.task_stopped)
+        return stopped or pending or bool(prompts)
+
+    def close(self) -> None:
+        self.stop("Xenon closed")
+        if self._manager is not None:
+            try:
+                self._manager.shutdown()
+            except Exception:
+                pass
+        if self._ipc is not None:
+            try:
+                self._ipc.stop()
+            except Exception:
+                pass
+
+    # -- callbacks from other threads --------------------------------------
+
+    def _present(self, pending) -> None:
+        """Broker presenter (task thread): show the card on the Tk thread."""
+        broker = self.broker
+
+        def decide(decision: str) -> None:
+            broker.resolve(pending.action_id, decision, via="click")
+
+        self._post(lambda: self._ui.task_card(pending, decide))
+
+    def _settled(self, action_id: str, outcome: str) -> None:
+        self._post(lambda: self._ui.task_card_closed(action_id))
+
+    def _update(self, update) -> None:
+        origin = self._origins.get(update.task_id, "typed")
+        if update.state in {"queued", "running"} and update.title:
+            self._latest_title = update.title
+        if update.state in TERMINAL_TASK_STATES:
+            self._origins.pop(update.task_id, None)
+        self._post(lambda: self._ui.task_update(update, origin))
+
+    def _busy_choice(self, title: str, decide: Callable[[str], None]) -> None:
+        import uuid
+
+        current = ""
+        manager = self._manager
+        if manager is not None:
+            current = manager.current_title
+        current = current or self._latest_title
+        prompt_id = uuid.uuid4().hex[:12]
+        origin = getattr(self._submitting, "origin", "typed")
+        with self._lock:
+            already_open = bool(self._choices)
+        if already_open:
+            # One queue/replace/cancel card at a time: further submits while
+            # it is up (a looping IPC caller) are cancelled, never stacked.
+            decide("cancel")
+            return
+
+        def on_pick(label: str | None) -> None:
+            decide(BUSY_CHOICES.get(label or "", "cancel"))
+
+        working_on = f"“{shorten(current, 40)}”" if current else "another task"
+        prompt = ChoicePrompt(
+            prompt_id,
+            f"Still working on {working_on}. Start “{shorten(title, 40)}”?",
+            list(BUSY_CHOICES),
+            on_pick,
+        )
+        with self._lock:
+            self._choices.append(prompt)
+        self._post(lambda: self._ui.task_choice(
+            prompt.prompt_id, prompt.title, prompt.labels,
+            lambda label: self._resolve_choice(prompt.prompt_id, label),
+            origin,
+        ))
+
+    def _resolve_choice(self, prompt_id: str, label: str | None) -> None:
+        with self._lock:
+            prompt = next((p for p in self._choices if p.prompt_id == prompt_id), None)
+            if prompt is None:
+                return  # already answered (click and voice raced)
+            self._choices.remove(prompt)
+        self._post(lambda: self._ui.task_choice_closed(prompt_id))
+        prompt.on_pick(label)
+
+    def _undo(self, label: str, seconds: float, cancel: threading.Event) -> bool:
+        """Task thread: show the undo strip and wait. True means go ahead."""
+        if cancel.is_set():
+            return False
+        if seconds <= 0:
+            return True
+        verdict: dict[str, bool] = {}
+        done = threading.Event()
+
+        def finish(go: bool) -> None:
+            verdict.setdefault("go", go)
+            done.set()
+
+        self._post(lambda: self._ui.task_undo(label, seconds, lambda: finish(False), lambda: finish(True)))
+        deadline = time.monotonic() + seconds + 3.0
+        while not done.wait(0.1):  # only during a commit, a few seconds
+            if cancel.is_set() or time.monotonic() > deadline:
+                finish(False)  # stopped, or the strip never answered: do not send
+        return verdict.get("go", False) and not cancel.is_set()
+
+
+# What the orb shows for a task update. Pure, so the tests need no Tk.
+
+TASK_ACCENTS = {"done": "#34d399", "failed": "#f87171", "cancelled": "#fbbf24", "waiting": "#fbbf24"}
+# States a task's progress may replace. Anything else (thinking about a
+# quick ask, listening, speaking) is left alone: quick asks keep working.
+TASK_OVERRIDABLE_STATES = frozenset({"idle", "standby", "working", "error"})
+# Cards opened while another is up sit side by side, never on top of its
+# buttons.
+CARD_STACK_PX = 410
+_RESULT_NOTE = re.compile(r"^(.*?)\s*\(([^()]*)\)\s*$", re.DOTALL)
+
+
+@dataclass
+class TaskDisplay:
+    notch: str                        # the notch progress line; "" clears it
+    state: str                        # "working", "rest", or "" (leave it)
+    title: str = ""                   # AnswerPanel header; "" means no panel
+    body: str = ""
+    note: str = ""
+    accent: str = "#c4b5fd"
+    speak: tuple[str, str] | None = None  # ("say" | "ask", text) for a voice task
+    history: bool = False             # add (title, body) to the chat history
+    placeholder: str = ""             # the Ask pill's hint while it waits
+
+
+def split_result(text: str) -> tuple[str, str]:
+    """"Done. (2 steps · 3.1s)" -> ("Done.", "2 steps · 3.1s")."""
+    match = _RESULT_NOTE.match((text or "").strip())
+    if not match:
+        return (text or "").strip(), ""
+    return match.group(1).strip(), match.group(2).strip()
+
+
+def task_display(update, origin: str = "typed") -> TaskDisplay:
+    """Map a ``tasks.TaskUpdate`` onto the notch, the panel and the voice.
+
+    Progress is never spoken; only a voice task's question and its final
+    result are. Results go to the AnswerPanel like any other answer.
+    """
+    from xenon.orb_model import format_task_progress, step_fraction
+
+    state = getattr(update, "state", "")
+    title = shorten(getattr(update, "title", "") or "task", 48)
+    text = (getattr(update, "text", "") or "").strip()
+    voice = origin == "voice"
+    if state == "queued":
+        return TaskDisplay(f"Queued · {title}", "working")
+    if state == "running":
+        if step_fraction(text) is not None:
+            line = text  # already "Step 2/5 · Type text": never "Step 2/5 · Step 2/5 · …"
+        else:
+            line = format_task_progress(text or title, getattr(update, "step", 0) or None,
+                                        getattr(update, "total", 0) or None)
+        return TaskDisplay(line, "working")
+    if state == "waiting":
+        question = text or "What should I do?"
+        how = "Answer with Ctrl+Alt+X" + (", or just say it." if voice else ".")
+        return TaskDisplay(
+            "Waiting for your answer", "working", "Xenon needs an answer", question, how,
+            TASK_ACCENTS["waiting"], ("ask", question) if voice else None, placeholder="your answer",
+        )
+    if state in ("done", "failed"):
+        body, note = split_result(text or ("Done." if state == "done" else "That didn't work."))
+        spoken = body if voice else ""
+        return TaskDisplay(
+            "", "rest", title if state == "done" else f"Didn't finish · {title}", body, note,
+            TASK_ACCENTS[state], ("say", spoken) if spoken else None, history=True,
+        )
+    if state == "cancelled":
+        if text in {"not started", "stopped before it started"}:
+            return TaskDisplay("", "rest")  # declined on the queue card; nothing ran
+        body, note = split_result(text or "Stopped.")
+        if body.lower() in {"stopped", "stopped by you"} or body.endswith("was stopped"):
+            body = "Stopped."
+        return TaskDisplay("", "rest", f"Stopped · {title}", body, note, TASK_ACCENTS["cancelled"],
+                           history=True)
+    return TaskDisplay("", "")
+
+
+def card_anchor(
+    orb: tuple[int, int, int],
+    scale: float,
+    notch: bool,
+    orb_area: tuple[int, int, int, int] | None,
+    target_area: tuple[int, int, int, int] | None,
+    index: int = 0,
+) -> tuple[int, int]:
+    """Top-centre point for a card: under the unfolded notch when the target
+    app shares the orb's monitor, else near the top of the target's monitor
+    (where he is looking). ``orb`` is (x, y, size) of the orb window; areas
+    are monitor work areas (left, top, right, bottom)."""
+    x, y, size = orb
+    same_monitor = target_area is None or target_area == orb_area
+    if notch and same_monitor:
+        point = (x + size // 2, y + size + int(4 * scale))
+    else:
+        area = target_area or orb_area
+        if area is None:
+            point = (x + size // 2, y + size)
+        else:
+            point = ((area[0] + area[2]) // 2, area[1] + int(56 * scale))
+    return point[0] + index * int(CARD_STACK_PX), point[1]
+
+
+def audit_lines(rows: list[dict], limit: int = 20) -> list[str]:
+    """The tray's "Recent actions": newest first, kinds, risks, results and
+    short digests. The audit log never holds bodies, and neither does this."""
+    lines = []
+    for row in list(rows)[-limit:][::-1]:
+        try:
+            stamp = time.strftime("%H:%M:%S", time.localtime(float(row.get("ts") or 0)))
+        except (TypeError, ValueError, OverflowError):
+            stamp = "--:--:--"
+        parts = [stamp, str(row.get("event") or "")]
+        for key in ("kind", "risk", "via", "result"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                parts.append(value)
+        digest = str(row.get("digest") or "").strip()
+        if digest:
+            parts.append(f"#{digest[:8]}")
+        lines.append("  ".join(parts))
+    return lines
+
+
+def _work_area_for(hwnd: int) -> tuple[int, int, int, int] | None:
+    """The work area of the monitor that holds ``hwnd`` (nearest one)."""
+    if not hwnd:
+        return None
+    try:
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = wintypes.HMONITOR
+        monitor = user32.MonitorFromWindow(wintypes.HWND(hwnd), 2)  # MONITOR_DEFAULTTONEAREST
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            work = info.rcWork
+            return work.left, work.top, work.right, work.bottom
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------- hotkeys --
 
 MOD_ALT = 0x0001
@@ -337,6 +878,9 @@ DEFAULT_HOTKEYS: dict[str, tuple[int, int]] = {
     "listen": (MOD_CONTROL | MOD_ALT, 0x20),
     "brighter": (MOD_CONTROL | MOD_ALT, VK_PRIOR),
     "darker": (MOD_CONTROL | MOD_ALT, VK_NEXT),
+    # Ctrl+Alt+Esc stops the running task and denies any open card. It does
+    # nothing when idle.
+    "stop": (MOD_CONTROL | MOD_ALT, 0x1B),
 }
 
 
@@ -476,9 +1020,16 @@ class Tray:
                  checked=lambda _i: not app.hidden),
             item("Start at sign-in", self._toggle_startup,
                  checked=lambda _i: self._startup.enabled()),
-            item(lambda _i: f"Companion screen: {app.companion_url or 'off'}",
+            item(lambda _i: f"Companion screen: {app.companion_url or 'off'}" + (
+                     f" ({app._companion.lan_note})" if app._companion is not None and app._companion.lan_note
+                     else ""),
                  lambda: app.companion_url and webbrowser.open(app.companion_url),
                  enabled=lambda _i: bool(app.companion_url)),
+            pystray.Menu.SEPARATOR,
+            item("Stop task   Ctrl+Alt+Esc", lambda: app.post(app.stop_task),
+                 enabled=lambda _i: app.tasks is not None and app.tasks.has_task()),
+            item("Recent actions", lambda: app.post(app.show_recent_actions),
+                 enabled=lambda _i: app.tasks is not None),
             pystray.Menu.SEPARATOR,
             item("Quit Xenon", lambda: app.post(app.quit)),
         )
@@ -776,6 +1327,7 @@ class OrbApp:
         backend_factory: Callable[[], OrbBackend],
         voice_runner: VoiceRunner | None = None,
         tray: bool = True,
+        task_services: TaskServices | None = None,
     ) -> None:
         if sys.platform != "win32":
             raise RuntimeError("the orb needs Windows (layered windows)")
@@ -834,6 +1386,21 @@ class OrbApp:
         self._own_hwnds = {
             self.window.hwnd, _toplevel_hwnd(self.pill.top), _toplevel_hwnd(self.panel.top)
         }
+        # Tasks ("do <goal>"): one broker for the whole process, cards on
+        # this thread, the TaskManager thread made on the first task. Only
+        # the IPC thread starts now (asleep in ConnectNamedPipe), so `xenon
+        # do` can hand an outward goal to the orb.
+        self.tasks: OrbTasks | None = None
+        self._task_text = ""
+        self._cards: dict[str, object] = {}
+        self._choice_cards: dict[str, object] = {}
+        self._undo_strips: list = []
+        self._history_private = False
+        self._voice_say: "queue.Queue[tuple[str, str]] | None" = None
+        self._answer_placeholder = ""  # "your answer" while a task waits
+        if task_services is not None:
+            self.tasks = OrbTasks(task_services, self.post, self)
+            self.tasks.start_ipc()
 
         self._last_external = 0
         self._frame = 0
@@ -981,6 +1548,8 @@ class OrbApp:
         info: dict = {"clock": time.strftime("%I:%M").lstrip("0"), "voice": self.model.voice_on}
         if self._notch_flash and self._notch_flash[1] > time.monotonic():
             info["flash"] = self._notch_flash[0]
+        if self._task_text:
+            info["task"] = self._task_text  # "Step 2/5 · Type text"
         active = self._timers.active()
         if active:
             nearest = active[0]
@@ -1020,13 +1589,23 @@ class OrbApp:
             for t in self._timers.active()
         ]
         last = self._history[-1][1] if self._history else ""
+        detail = self.model.detail
+        # Answers built from the screen or memory, and anything a task is
+        # doing, never reach the LAN page.
+        if self._history_private and last:
+            last = "Private"
+        if self._task_text or self.model.state in {"working", "confirm"} or (
+            self._history_private and self.model.state not in {"idle", "standby"}
+        ):
+            detail = "Private task"
         return {
             "state": self.model.state,
             "label": STATE_LABELS.get(self.model.state, self.model.state),
-            "detail": self.model.detail,
+            "detail": detail,
             "voice": self.model.voice_on,
             "timers": timers,
             "last": last[:400],
+            "private": bool(self._history_private),
         }
 
     def _sync_dimmer(self) -> None:
@@ -1078,6 +1657,8 @@ class OrbApp:
             self._action("voice")
         elif key == "listen":
             self._push_to_talk()
+        elif key == "stop":
+            self.stop_task()
         elif key in {"dim", "brighter", "darker"}:
             self._brightness({"dim": "toggle", "brighter": "up", "darker": "down"}[key])
 
@@ -1305,7 +1886,9 @@ class OrbApp:
         if self.hidden and key in {"ask", "search", "panel"}:
             self.toggle_hidden()
         if key == "ask":
-            self._prompt("ask", "ask or command", self._run_ask)
+            waiting = self.tasks is not None and self.tasks.waiting_for_input
+            hint = (self._answer_placeholder or "your answer") if waiting else "ask or command"
+            self._prompt("ask", hint, self._run_ask)
         elif key == "search":
             self._prompt("search", "search the web", self._run_search)
         elif key == "screen":
@@ -1336,10 +1919,16 @@ class OrbApp:
         self._return_focus()
         return True
 
+    def _rest_state(self) -> str:
+        """Where the orb settles: still 'working' while a task runs."""
+        if self.tasks is not None and self.tasks.busy:
+            return "working"
+        return "standby" if self.model.voice_on else "idle"
+
     def _finish(self) -> None:
         self._busy = False
         if self.model.state in {"thinking", "searching"}:
-            self.model.set_state("standby" if self.model.voice_on else "idle")
+            self.model.set_state(self._rest_state())
 
     def _show_error(self, message: str) -> None:
         self._busy = False
@@ -1360,6 +1949,7 @@ class OrbApp:
 
     def _show_reply(self, title: str, question: str, reply: OrbReply, started: float) -> None:
         self._history.append((question, reply.text))
+        self._history_private = bool(getattr(reply, "private", False))
         if self.panel.chat_mode and self.panel.visible:
             self._render_chat()
             self._place_panel()
@@ -1377,6 +1967,17 @@ class OrbApp:
         self._finish()
 
     def _run_ask(self, text: str) -> None:
+        # Request path: a waiting task's focus, stop/cancel, "do <goal>"
+        # first; everything else is answered exactly as before.
+        if self.tasks is not None:
+            try:
+                routed = self.tasks.route(text, "typed")
+            except Exception as error:
+                self._show_error(f"task: {error}")
+                return
+            if routed is not None:
+                self._task_ack(routed, text)
+                return
         if not self._start(text):
             return
         started = time.perf_counter()
@@ -1454,6 +2055,215 @@ class OrbApp:
             self.panel.append(answer)
         self.panel.fit()
 
+    # ----- tasks --------------------------------------------------------
+    # Called on the Tk thread (OrbTasks posts them). Cards never take focus;
+    # the panel hands focus back to his window after showing a result.
+
+    def _task_ack(self, text: str, question: str = "", typed: bool = True) -> None:
+        """The task layer took a request ("On it.", "Got it.", "Stopped.")."""
+        if typed:
+            self._return_focus()  # the pill just closed: his window gets the keys back
+        if not text:
+            return
+        if typed and question and self.panel.chat_mode and self.panel.visible:
+            self._history.append((question, text))
+            self._history_private = False
+            self._render_chat()
+            self._place_panel()
+        self._notch_flash = (text, time.monotonic() + 1.5)
+        if self.notch:
+            self.model.notch_info = self._notch_info()
+        elif self.model.state in TASK_OVERRIDABLE_STATES:
+            self.model.set_state(self.model.state, text)
+
+    def _task_anchor(self) -> tuple[int, int]:
+        """Where the next card goes: by the notch, on the target app's monitor."""
+        target = self._last_external
+        try:
+            foreground = ctypes.windll.user32.GetForegroundWindow()
+            if foreground and foreground not in self._own_hwnds_safe():
+                target = foreground
+        except Exception:
+            pass
+        return card_anchor(
+            (self.x, self.y, self.size),
+            self.scale,
+            self.notch,
+            _work_area_for(self.window.hwnd),
+            _work_area_for(target) if target else None,
+            index=len(self._cards) + len(self._choice_cards),
+        )
+
+    def _settle_after_card(self) -> None:
+        if self._cards or self._choice_cards:
+            return
+        if self.model.state == "confirm":
+            self.model.set_state(self._rest_state(), self._task_text)
+
+    def task_card(self, pending, decide: Callable[[str], None]) -> None:
+        """Broker presenter: one ConfirmCard per pending action."""
+        if pending.action_id in self._cards:
+            return
+        try:
+            from xenon.orb_cards import ConfirmCard
+
+            card = ConfirmCard(self.root, pending, decide, self._task_anchor())
+        except Exception as error:
+            print(f"confirm card failed: {error!r}", file=sys.stderr, flush=True)
+            decide("deny")  # a card that cannot be shown is a no
+            return
+        self._cards[pending.action_id] = card
+        self.model.card_opened()  # unfold, and never fold while it is up
+        self.model.set_state("confirm", shorten(pending.title, 60))
+        if self.tasks is not None and self.tasks.origin_of(pending.task_id) == "voice":
+            self._voice_announce("say", "Please confirm on screen.")
+
+    def task_card_closed(self, action_id: str) -> None:
+        card = self._cards.pop(action_id, None)
+        if card is None:
+            return
+        try:
+            card.close()
+        except Exception:
+            pass
+        self.model.card_closed()  # the 3 s fold restarts from now
+        self._settle_after_card()
+
+    def task_choice(self, prompt_id: str, title: str, labels: list[str],
+                    on_pick: Callable[[str | None], None], origin: str = "typed") -> None:
+        """Queue / replace / cancel for a second task (or any code-built pick)."""
+        if prompt_id in self._choice_cards:
+            return
+        try:
+            from xenon.orb_cards import ChoiceCard
+
+            card = ChoiceCard(self.root, title, labels, on_pick, self._task_anchor())
+        except Exception as error:
+            print(f"choice card failed: {error!r}", file=sys.stderr, flush=True)
+            on_pick(None)
+            return
+        self._choice_cards[prompt_id] = card
+        self.model.card_opened()
+        if origin == "voice":
+            self._voice_announce("ask", f"{title} Say {', '.join(labels[:-1])} or {labels[-1]}.")
+
+    def task_choice_closed(self, prompt_id: str) -> None:
+        card = self._choice_cards.pop(prompt_id, None)
+        if card is None:
+            return
+        try:
+            card.close()
+        except Exception:
+            pass
+        self.model.card_closed()
+        self._settle_after_card()
+
+    def task_undo(self, label: str, seconds: float, on_undo: Callable[[], None],
+                  on_elapse: Callable[[], None]) -> None:
+        """The few seconds to take an approved send back."""
+        self._undo_strips = [strip for strip in self._undo_strips if not strip.closed]
+        try:
+            from xenon.orb_cards import UndoStrip
+
+            strip = UndoStrip(self.root, seconds, on_undo, on_elapse, self._task_anchor(), label=label)
+        except Exception as error:
+            print(f"undo strip failed: {error!r}", file=sys.stderr, flush=True)
+            on_undo()  # no grace period shown means no send
+            return
+        self._undo_strips.append(strip)
+
+    def task_stopped(self) -> None:
+        """After Stop: undo any countdown and say so in the notch."""
+        strips, self._undo_strips = self._undo_strips, []
+        for strip in strips:
+            try:
+                strip.undo()
+            except Exception:
+                pass
+        self._notch_flash = ("Stopped", time.monotonic() + 1.5)
+        if self.notch:
+            self.model.notch_info = self._notch_info()
+
+    def stop_task(self) -> None:
+        """Ctrl+Alt+Esc and the tray's Stop task. Does nothing when idle."""
+        if self.tasks is None or not self.tasks.has_task():
+            return
+        self.tasks.stop("stopped by you")
+
+    def task_update(self, update, origin: str = "typed") -> None:
+        view = task_display(update, origin)
+        self._task_text = view.notch
+        self._answer_placeholder = view.placeholder
+        if self.notch:
+            self.model.notch_info = self._notch_info()
+        if view.state == "working":
+            if not self._busy and not self._cards and self.model.state in TASK_OVERRIDABLE_STATES:
+                self.model.set_state("working", view.notch)
+        elif view.state == "rest":
+            if not self._cards and self.model.state in {"working", "confirm"}:
+                self.model.set_state(self._rest_state())
+        if view.title:
+            self._show_task_panel(view)
+        if view.speak:
+            self._voice_announce(*view.speak)
+
+    def _show_task_panel(self, view: TaskDisplay) -> None:
+        if view.history:
+            self._history.append((view.title, view.body))
+            # Tasks read the screen to plan: the tablet shows "Private".
+            self._history_private = True
+        if self.panel.chat_mode and self.panel.visible:
+            self._render_chat()
+            self._place_panel()
+            return
+        previous = 0
+        try:
+            previous = ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            pass
+        self.panel.set_chat(False)
+        self.panel.clear()
+        self.panel.set_header(view.title, view.note, view.accent)
+        self.panel.append(view.body)
+        self._place_panel()
+        self._keep_focus(previous)
+
+    def _keep_focus(self, previous: int) -> None:
+        """Tk's show call can activate the panel; a result that arrives while
+        he types elsewhere must not take his keystrokes."""
+        try:
+            user32 = ctypes.windll.user32
+            if (previous and previous not in self._own_hwnds_safe()
+                    and user32.GetForegroundWindow() != previous and user32.IsWindow(previous)):
+                user32.SetForegroundWindow(previous)
+        except Exception:
+            pass
+
+    def show_recent_actions(self) -> None:
+        """Tray "Recent actions": the last 20 audit rows (no bodies, ever)."""
+        rows: list[dict] = []
+        error = ""
+        if self.tasks is not None:
+            try:
+                rows = self.tasks.audit.recent(20)
+            except Exception as failure:
+                error = f"could not read the audit log: {failure}"
+        self.panel.set_chat(False)
+        self.panel.clear()
+        self.panel.set_header("Recent actions", f"{len(rows)} entries", self._accent())
+        lines = audit_lines(rows)
+        if error or not lines:
+            self.panel.append(error or "No approvals or commits yet.", "dim")
+        else:
+            self.panel.append("\n".join(lines), "dim")
+        self._place_panel()
+
+    def _voice_announce(self, kind: str, text: str) -> None:
+        """Queue words for the voice thread (results and questions only)."""
+        say = self._voice_say
+        if say is not None and self.model.voice_on and (text or "").strip():
+            say.put((kind, text))
+
     # ----- voice --------------------------------------------------------
 
     def _toggle_voice(self) -> None:
@@ -1463,8 +2273,9 @@ class OrbApp:
         if self._voice_stop is not None:
             self._voice_stop.set()
             self._voice_stop = None
+            self._voice_say = None
             self.model.voice_on = False
-            self.model.set_state("idle")
+            self.model.set_state(self._rest_state())
             return
         stop = threading.Event()
         self._voice_stop = stop
@@ -1482,6 +2293,12 @@ class OrbApp:
             if self.model.state == "heard" and state != "heard" and hold > 0:
                 self.root.after(int(hold * 1000) + 1, lambda: apply(state, detail))
                 return
+            if state == "standby" and (self._cards or (self.tasks is not None and self.tasks.busy)):
+                # Back to waiting for the name, but a task is still running
+                # (or a card is up): keep showing that instead.
+                state, detail = ("confirm" if self._cards else "working"), self._task_text
+                if state == self.model.state:
+                    return
             self.model.set_state(state, detail)
 
         def on_state(state: str, detail: str) -> None:
@@ -1490,21 +2307,49 @@ class OrbApp:
         def on_level(level: float) -> None:
             self.model.set_level(level)  # a float write; safe without the queue
 
-        def on_exchange(you: str, answer: str) -> None:
+        def on_exchange(you: str, answer: str, private: bool = False) -> None:
             def show() -> None:
                 self._history.append((you, answer))
+                # Built from the screen or memory: the tablet shows "Private".
+                self._history_private = bool(private)
                 if self.panel.chat_mode and self.panel.visible:
                     self._render_chat()
             self.post(show)
 
+        # Task hand-off for the voice thread. "do ..." starts a task (Xenon
+        # says "On it."), "stop" stops it, and a waiting task's answer goes
+        # to it. A wake-less "voice-focus" utterance can only answer a
+        # waiting task; nothing spoken can approve a card (voice approvals
+        # stay off: VoiceHooks.confirm is None).
+        tasks = self.tasks
+        say_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        self._voice_say = say_queue
+
+        def on_task(text: str, origin: str) -> str | None:
+            routed = tasks.route(text, origin)
+            if routed:
+                self.post(lambda: self._task_ack(routed, text, typed=False))
+            return routed
+
+        def focus_listen() -> bool:
+            return tasks.waiting_for_input or bool(tasks.open_choices())
+
+        hooks = VoiceHooks(
+            on_state, on_level, on_exchange, listen_event,
+            task=on_task if tasks is not None else None,
+            focus_listen=focus_listen if tasks is not None else None,
+            say=say_queue,
+        )
+
         def run() -> None:
             try:
-                self._voice_runner(VoiceHooks(on_state, on_level, on_exchange, listen_event), stop)
+                self._voice_runner(hooks, stop)
             except Exception as error:
                 message = str(error)
 
                 def fail() -> None:
                     self._voice_stop = None
+                    self._voice_say = None
                     self.model.voice_on = False
                     self._show_error(f"voice stopped: {message}")
                 self.post(fail)
@@ -1519,6 +2364,18 @@ class OrbApp:
         self._closing = True
         if self._voice_stop is not None:
             self._voice_stop.set()
+        if self.tasks is not None:
+            # Stop the task, deny its cards (nothing approves on the way
+            # out), close the pipe and remove its key file.
+            try:
+                self.tasks.close()
+            except Exception:
+                pass
+        for card in [*self._cards.values(), *self._choice_cards.values(), *self._undo_strips]:
+            try:
+                card.close()
+            except Exception:
+                pass
         if self._hotkeys is not None:
             self._hotkeys.stop()
         self._timers.unlisten(self._on_timer_thread)

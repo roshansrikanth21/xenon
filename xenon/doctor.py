@@ -192,16 +192,103 @@ def check_skills(root: str | Path) -> Check:
     return _check("skills", PASS, f"{len(skills)} skills in {root}")
 
 
+def check_agent_desktop(
+    locate: Callable[[], tuple[str | None, str | None, str]] | None = None,
+    version: Callable[[str], str] | None = None,
+    leftovers: Callable[[], int] | None = None,
+) -> Check:
+    """agent-desktop: installed, the pinned build, its version, leftover refmaps.
+
+    An unverified binary is never run, not even for ``version``: running it
+    is exactly what the pin exists to prevent.
+    """
+    from xenon import desktop
+
+    found, verified, detail = (locate or desktop.locate_exe)()
+    if found is None:
+        return _check("agent-desktop", WARN, "not installed (npm install -g agent-desktop); "
+                      "desktop control falls back to in-house UI Automation")
+    if verified is None:
+        return _check("agent-desktop", FAIL, f"{detail}; agent-desktop is disabled until the "
+                      "binary matches the pinned 1.2.0 build")
+    try:
+        reported = (version or (lambda path: desktop.AgentDesktop(exe=path).version()))(verified)
+    except Exception as error:
+        reported = ""
+        detail += f"; version check failed: {type(error).__name__}"
+    try:
+        count = (leftovers or desktop.leftover_snapshots)()
+    except Exception:
+        count = -1
+    status = PASS
+    parts = [f"agent-desktop {reported or '?'}", detail]
+    if reported and not reported.startswith(desktop.SUPPORTED_MAJOR_MINOR):
+        status = WARN
+        parts.append("unsupported version (want 1.2.x)")
+    if count > 0:
+        status = WARN if status == PASS else status
+        parts.append(f"{count} leftover snapshot dirs (swept at startup when older than an hour)")
+    return _check("agent-desktop", status, ", ".join(parts))
+
+
+def check_elevation(is_elevated: Callable[[], bool] | None = None) -> Check:
+    from xenon import killswitch
+
+    elevated = (is_elevated or killswitch.is_elevated)()
+    if elevated:
+        return _check("elevation", WARN, "running as administrator: agent features are refused; "
+                      "start Xenon from a normal (non-admin) prompt")
+    return _check("elevation", PASS, "not elevated")
+
+
+def check_kill_flags() -> Check:
+    from xenon import killswitch
+
+    agent = killswitch.feature_enabled("AGENT")
+    outward = killswitch.feature_enabled("OUTWARD")
+    detail = f"XENON_AGENT={'on' if agent else 'off'}, XENON_OUTWARD={'on' if outward else 'off'}"
+    return _check("kill flags", PASS, detail)
+
+
+def check_network(public: Callable[[], bool | None] | None = None) -> Check:
+    if public is None:
+        from xenon.companion import network_is_public as public
+    try:
+        value = public()
+    except Exception:
+        value = None
+    import os
+
+    lan = os.environ.get("XENON_COMPANION_LAN", "").strip().lower()
+    if lan in {"0", "off", "false", "no"}:
+        return _check("network", PASS, "tablet page on this PC only (XENON_COMPANION_LAN=0)")
+    if lan in {"1", "on", "true", "yes", "force"}:
+        return _check("network", WARN, "tablet page open to the whole LAN (XENON_COMPANION_LAN=1)")
+    if value is True:
+        return _check("network", WARN, "Public profile: the tablet page answers only this Wi-Fi's own "
+                      "subnet, read-only (XENON_COMPANION_LAN=1 opens it, =0 keeps it on this PC)")
+    if value is False:
+        return _check("network", PASS, "Private/Domain profile: the tablet page is on the LAN, read-only")
+    return _check("network", WARN, "profile unknown: the tablet page answers only this Wi-Fi's own subnet")
+
+
 def run_checks(
     observe: Callable[[], object] | None,
     model: ChatConfig | None,
     db_path: str | Path,
     skills_root: str | Path,
+    agent_desktop: Callable[[], Check] | None = None,
+    elevation: Callable[[], Check] | None = None,
+    network: Callable[[], Check] | None = None,
 ) -> list[Check]:
     checks = [check_python(), check_screen(observe), check_model(model)]
     checks.append(check_memory(db_path))
     checks.extend(check_voice())
     checks.append(check_skills(skills_root))
+    checks.append((agent_desktop or check_agent_desktop)())
+    checks.append((elevation or check_elevation)())
+    checks.append(check_kill_flags())
+    checks.append((network or check_network)())
     return checks
 
 

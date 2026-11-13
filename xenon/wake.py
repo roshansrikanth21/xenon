@@ -15,6 +15,15 @@ DEFAULT_TTL_S = 8.0
 # A bare wake word this soon after an ignored sentence claims that sentence.
 DEFAULT_LOOKBACK_S = 2.5
 
+# How a command got through the gate (``WakeGate.last_source``). Only the
+# first two may start a task: the design accepts spoken tasks from
+# push-to-talk, or when the wake word starts the utterance.
+SOURCE_PUSH_TO_TALK = "push-to-talk"
+SOURCE_WAKE_START = "wake-start"
+SOURCE_WAKE_LATE = "wake-late"      # wake word later in the sentence, or the look-back
+SOURCE_ALWAYS = "always"            # always-listening mode: anything said in the room
+TASK_SOURCES = frozenset({SOURCE_PUSH_TO_TALK, SOURCE_WAKE_START})
+
 
 _EDGE = " \t\r\n,.;:!?-\"'"
 # Greetings that only lead into the wake word ("hey xenon, ...").
@@ -98,6 +107,9 @@ class WakeGate:
         self._always = always
         self._lookback_s = lookback_s
         self._last_ignored: tuple[str, float] | None = None
+        self._armed_by = ""
+        # How the last returned command got through (SOURCE_* above).
+        self.last_source = ""
 
     @property
     def always(self) -> bool:
@@ -114,7 +126,23 @@ class WakeGate:
     def arm(self) -> None:
         """Take the next utterance as a command (push-to-talk)."""
         self._armed_at = self._clock()
+        self._armed_by = SOURCE_PUSH_TO_TALK
         self._last_ignored = None
+
+    @property
+    def may_start_task(self) -> bool:
+        """May the last command start a task ("do ...")?"""
+        return self.last_source in TASK_SOURCES
+
+    def _wake_starts(self, text: str) -> bool:
+        """The wake word is within the utterance's first two tokens."""
+        for pattern in self._patterns:
+            match = pattern.search(text)
+            if match is None:
+                continue
+            before = text[: match.start()].strip(_EDGE)
+            return len(before.split()) <= 1
+        return False
 
     def set_speaking(self, speaking: bool) -> None:
         """Mute detection while the assistant's own audio is playing."""
@@ -138,6 +166,8 @@ class WakeGate:
         if self._always:
             # Hands-free mode: any complete sentence is the command. A spoken
             # wake word is still accepted and stripped, so both habits work.
+            # Either way it may be the room talking, so it never starts a task.
+            self.last_source = SOURCE_ALWAYS
             if command is None:
                 return text
             return command or None
@@ -152,12 +182,16 @@ class WakeGate:
                 self._last_ignored = None
                 if previous is not None and now - previous[1] <= self._lookback_s:
                     self._armed_at = None
+                    # A sentence heard before the name: could be anyone.
+                    self.last_source = SOURCE_WAKE_LATE
                     return previous[0]
                 # Otherwise the name on its own arms the next utterance.
                 self._armed_at = now
+                self._armed_by = SOURCE_WAKE_START
                 return None
             self._armed_at = None
             self._last_ignored = None
+            self.last_source = SOURCE_WAKE_START if self._wake_starts(text) else SOURCE_WAKE_LATE
             return command
 
         if self._armed_at is None:
@@ -167,4 +201,5 @@ class WakeGate:
             self._armed_at = None
             return None
         self._armed_at = None
+        self.last_source = self._armed_by or SOURCE_WAKE_START
         return text

@@ -106,7 +106,7 @@ class RemoteScreenTests(unittest.TestCase):
 
     def post(self, path, payload):
         request = urllib.request.Request(self.base + path, data=json.dumps(payload).encode(),
-                                         headers={"Content-Type": "application/json"}, method="POST")
+                                         headers=self.companion.push_headers(), method="POST")
         return json.load(urllib.request.urlopen(request, timeout=5))
 
     def test_screens_report_their_size_and_smoothness(self) -> None:
@@ -136,17 +136,193 @@ class RemoteScreenTests(unittest.TestCase):
             self.skipTest("no LAN address on this machine")
         # Reaching the server through the LAN address makes this machine look
         # like any other device on the network.
-        lan = Companion(lambda: {}, port=0, host=address)
+        lan = Companion(lambda: {}, port=0, host=address, network_public=lambda: False)
         lan.start()
         self.addCleanup(lan.stop)
         url = f"http://{address}:{lan._server.server_address[1]}/show"
+        # Even with the right secret, a LAN client may not push.
         request = urllib.request.Request(url, data=b'{"kind": "text", "content": "x"}', method="POST",
-                                         headers={"Content-Type": "application/json"})
+                                         headers=lan.push_headers())
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(request, timeout=5)
         self.assertEqual(caught.exception.code, 403)
         with self.assertRaises(urllib.error.HTTPError):
             urllib.request.urlopen(f"http://{address}:{lan._server.server_address[1]}/screens", timeout=5)
+
+
+class HardeningTests(unittest.TestCase):
+    """Phase 0: Host allowlist, POST secret, private redaction, Public profile."""
+
+    def start(self, state=None, **kwargs):
+        kwargs.setdefault("network_public", lambda: False)
+        companion = Companion(lambda: state or {"state": "idle", "last": "hi"},
+                              port=0, host="127.0.0.1", **kwargs)
+        companion.start()
+        self.addCleanup(companion.stop)
+        return companion, companion._server.server_address[1]
+
+    def raw(self, port, method, path, host, headers=None, body=None):
+        import http.client
+
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        self.addCleanup(connection.close)
+        connection.putrequest(method, path, skip_host=True)
+        if host is not None:
+            connection.putheader("Host", host)
+        for key, value in (headers or {}).items():
+            connection.putheader(key, value)
+        data = json.dumps(body).encode() if body is not None else b""
+        connection.putheader("Content-Length", str(len(data)))
+        connection.endheaders(data)
+        response = connection.getresponse()
+        response.read()
+        return response.status
+
+    def test_companion_rejects_foreign_host_header(self) -> None:
+        _companion, port = self.start()
+        for host in ("evil.example", f"evil.example:{port}", "127.0.0.1.nip.io",
+                     "localhost.evil.example", None, ""):
+            with self.subTest(host=host):
+                self.assertEqual(self.raw(port, "GET", "/state", host), 403)
+                self.assertEqual(self.raw(port, "GET", "/", host), 403)
+        for host in (f"localhost:{port}", f"127.0.0.1:{port}", "LOCALHOST", "[::1]:8765"):
+            with self.subTest(host=host):
+                self.assertEqual(self.raw(port, "GET", "/state", host), 200)
+
+    def test_host_allowlist_knows_this_pc(self) -> None:
+        import socket
+
+        companion = Companion(lambda: {}, port=0, local_ips=lambda: {"192.168.1.20"})
+        self.assertTrue(companion.host_allowed("192.168.1.20:8765"))
+        self.assertTrue(companion.host_allowed(socket.gethostname()))
+        self.assertFalse(companion.host_allowed("192.168.1.99"))
+        self.assertFalse(companion.host_allowed("attacker.example"))
+        extra = Companion(lambda: {}, port=0, allowed_hosts=["tablet-pc.home"])
+        self.assertTrue(extra.host_allowed("tablet-pc.home:8765"))
+
+    def test_companion_post_requires_boot_secret(self) -> None:
+        companion, port = self.start()
+        host = f"127.0.0.1:{port}"
+        payload = {"kind": "text", "content": "x"}
+        self.assertTrue(companion.post_secret)
+        self.assertEqual(self.raw(port, "POST", "/show", host, body=payload), 403)
+        self.assertEqual(self.raw(port, "POST", "/show", host, {"X-Xenon-Secret": "guess"}, payload), 403)
+        self.assertEqual(self.raw(port, "POST", "/clear", host, body={}), 403)
+        self.assertEqual(self.raw(port, "POST", "/show", host, companion.push_headers(), payload), 200)
+        other, _ = self.start()
+        self.assertNotEqual(other.post_secret, companion.post_secret)  # per boot, per server
+
+    def test_secret_is_published_for_the_cli_and_removed_on_stop(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from xenon.companion import read_post_secret
+
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder, "companion.key")
+            companion = Companion(lambda: {}, port=0, host="127.0.0.1", network_public=lambda: False,
+                                  secret_path=key, publish_secret=True)
+            companion.start()
+            self.assertEqual(read_post_secret(key), companion.post_secret)
+            companion.stop()
+            self.assertFalse(key.exists())
+        # Port 0 (tests) never publishes to the real location.
+        self.assertFalse(Companion(lambda: {}, port=0)._publish_secret)
+
+    def test_state_redacts_private_reply(self) -> None:
+        private = {"state": "speaking", "detail": "reading your screen", "last": "Your bank balance is 42",
+                   "private": True}
+        snap = Companion(lambda: private, port=0).snapshot()
+        self.assertEqual(snap["xenon"]["last"], "Private")
+        self.assertEqual(snap["xenon"]["detail"], "Private task")
+        self.assertNotIn("balance", json.dumps(snap["xenon"]))
+        tainted = Companion(lambda: {"state": "idle", "last": "page text", "tainted": True}, port=0).snapshot()
+        self.assertEqual(tainted["xenon"]["last"], "Private")
+        public = Companion(lambda: {"state": "idle", "last": "It is 5 pm", "detail": ""}, port=0).snapshot()
+        self.assertEqual(public["xenon"]["last"], "It is 5 pm")
+
+    def test_public_profile_serves_only_this_subnet(self) -> None:
+        """His home Wi-Fi is profiled Public and the tablet (192.168.1.11)
+        must keep working: the page listens on the LAN but a Public or
+        unknown profile only answers this PC's own private /24."""
+        import os
+        from unittest import mock
+
+        from xenon.companion import LAN_OFF, LAN_OPEN, LAN_SUBNET
+
+        own = lambda: {"127.0.0.1", "192.168.1.20"}
+        with mock.patch.dict(os.environ, {"XENON_COMPANION_LAN": ""}):
+            public = Companion(lambda: {}, port=0, host="0.0.0.0", network_public=lambda: True,
+                               local_ips=own)
+            self.assertEqual(public._choose_bind_host(), "0.0.0.0")
+            self.assertEqual(public.resolve_profile(), LAN_SUBNET)
+            self.assertIn("Public", public.lan_note)
+            self.assertTrue(public.client_allowed("192.168.1.11"))   # the tablet
+            self.assertTrue(public.client_allowed("127.0.0.1"))
+            self.assertFalse(public.client_allowed("192.168.2.11"))  # another subnet
+            self.assertFalse(public.client_allowed("10.20.30.40"))
+            self.assertFalse(public.client_allowed("8.8.8.8"))
+
+            unknown = Companion(lambda: {}, port=0, host="0.0.0.0", network_public=lambda: None,
+                                local_ips=own)
+            unknown._choose_bind_host()
+            self.assertEqual(unknown.resolve_profile(), LAN_SUBNET)  # unknown resolves stricter
+            self.assertFalse(unknown.client_allowed("172.16.5.5"))
+
+            private = Companion(lambda: {}, port=0, host="0.0.0.0", network_public=lambda: False,
+                                local_ips=own)
+            private._choose_bind_host()
+            self.assertEqual(private.resolve_profile(), LAN_OPEN)
+            self.assertTrue(private.client_allowed("10.20.30.40"))
+
+            # Before the profile is read (it is read off the Tk thread) the
+            # stricter rule applies.
+            fresh = Companion(lambda: {}, port=0, host="0.0.0.0", network_public=lambda: False,
+                              local_ips=own)
+            fresh._choose_bind_host()
+            self.assertEqual(fresh.lan_mode, LAN_SUBNET)
+            self.assertFalse(fresh.client_allowed("10.20.30.40"))
+
+        with mock.patch.dict(os.environ, {"XENON_COMPANION_LAN": "1"}):
+            forced = Companion(lambda: {}, port=0, host="0.0.0.0", network_public=lambda: True,
+                               local_ips=own)
+            self.assertEqual(forced._choose_bind_host(), "0.0.0.0")
+            self.assertEqual(forced.resolve_profile(), LAN_OPEN)
+            self.assertTrue(forced.client_allowed("10.20.30.40"))
+
+        with mock.patch.dict(os.environ, {"XENON_COMPANION_LAN": "0"}):
+            off = Companion(lambda: {}, port=0, host="0.0.0.0", network_public=lambda: False,
+                            local_ips=own)
+            self.assertEqual(off._choose_bind_host(), "127.0.0.1")
+            self.assertEqual(off.lan_mode, LAN_OFF)
+            self.assertFalse(off.client_allowed("192.168.1.11"))
+
+    def test_lan_clients_never_see_questions_or_transcripts(self) -> None:
+        heard = {"state": "heard", "label": "Heard", "detail": "do tell mom on whatsapp the pin is 4417",
+                 "last": "It is 5 pm", "private": False, "timers": []}
+        thinking = {"state": "thinking", "label": "Thinking",
+                    "detail": "tell me if the mole on my back looks like melanoma", "last": "", "private": False}
+        for state in (heard, thinking):
+            with self.subTest(state=state["state"]):
+                lan = Companion(lambda s=state: s, port=0).snapshot(lan=True)["xenon"]
+                self.assertNotIn(state["detail"], json.dumps(lan))
+                self.assertEqual(lan["detail"], state["label"])
+                local = Companion(lambda s=state: s, port=0).snapshot()["xenon"]
+                self.assertEqual(local["detail"], state["detail"])  # this PC still sees it
+        lan = Companion(lambda: heard, port=0).snapshot(lan=True)["xenon"]
+        self.assertEqual(lan["last"], "It is 5 pm")  # a non-private answer still shows
+
+    def test_state_over_the_network_is_redacted_and_foreign_subnets_refused(self) -> None:
+        companion = Companion(
+            lambda: {"state": "heard", "label": "Heard", "detail": "secret question"},
+            port=0, host="127.0.0.1", network_public=lambda: True,
+        )
+        # A request whose source is not this PC: drive the handler's view.
+        companion.lan_mode = "subnet"
+        companion._local_ips = lambda: {"192.168.1.20"}
+        self.assertFalse(companion.client_allowed("192.168.7.9"))
+        snap = companion.snapshot(lan=True)
+        self.assertNotIn("secret question", json.dumps(snap))
 
 
 if __name__ == "__main__":

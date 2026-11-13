@@ -3,6 +3,14 @@
 Every one of these calls changes the desktop, so they only run after the
 approval runner allows them. Shell and destructive kinds are rejected by the
 policy before they reach this module.
+
+The approval a plan got is not trusted blindly at execution time: the
+foreground can change between planning and acting, and the legacy kinds
+(type_text, press_keys, click_control) land wherever focus is. So before
+each of those the backend re-reads the LIVE foreground (process image,
+title, focused element, browser URL), classifies the action against it,
+and refuses DENIED surfaces outright and OUTWARD/DESTRUCTIVE results unless
+this instance was built by the gate for an approved commit.
 """
 from __future__ import annotations
 
@@ -14,9 +22,34 @@ import sys
 import time
 from ctypes import wintypes
 from pathlib import Path
+from typing import Callable
 
-from xenon.actions import Action, ActionResult, Verification
+from xenon.actions import (
+    Action,
+    ActionContext,
+    ActionResult,
+    Risk,
+    Verification,
+    classify,
+)
 from xenon.windows import Win32Backend
+
+# Legacy kinds that act on whatever has focus, so they are classified
+# against the live foreground before they run.
+GUARDED_KINDS = frozenset({"type_text", "press_keys", "click_control"})
+# Kinds whose risk does not depend on the foreground but can still name a
+# denied target: a URI handler or UNC path (open_app launches "://" targets
+# through os.startfile), a console window, a .ps1 or a Startup-folder file.
+# They are classified against the task facts alone, so a caller that skipped
+# ApprovalPolicy still cannot reach those targets through this backend.
+STATIC_GUARDED_KINDS = frozenset({"open_app", "focus_window", "write_file"})
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+LANG_ENGLISH = 0x09
+
+
+class TargetRefused(RuntimeError):
+    """The live target may never be acted on (for example Xenon itself)."""
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
@@ -212,11 +245,177 @@ def find_window_title(needle: str, title_scanner=None) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Live foreground facts for the classifier
+# ---------------------------------------------------------------------------
+# Each reader is a plain function so tests (and non-Windows CI) can replace
+# it; none of them runs at import time.
+
+
+def window_process_id(hwnd: int) -> int:
+    """PID owning ``hwnd`` via GetWindowThreadProcessId, or 0."""
+    if sys.platform != "win32" or not hwnd:
+        return 0
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+    except Exception:
+        return 0
+
+
+def process_image_path(pid: int) -> str:
+    """Full image path of ``pid`` via QueryFullProcessImageNameW, or ""."""
+    if sys.platform != "win32" or pid <= 0:
+        return ""
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ""
+        try:
+            size = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                return ""
+            return buffer.value
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return ""
+
+
+def frame_host_child_pid(hwnd: int, host_pid: int) -> int:
+    """PID of the app inside an ApplicationFrameHost window, or 0.
+
+    UWP/WinUI apps (Calculator, Settings, some Store apps) put their content
+    in a child window owned by the real process; the top-level frame belongs
+    to ApplicationFrameHost.exe and says nothing about the app.
+    """
+    if sys.platform != "win32" or not hwnd:
+        return 0
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumChildWindows.argtypes = [wintypes.HWND, callback_type, wintypes.LPARAM]
+        found: list[int] = []
+
+        def visit(child, _lparam) -> bool:
+            pid = window_process_id(child)
+            if pid and pid != host_pid:
+                found.append(pid)
+                return False
+            return True
+
+        user32.EnumChildWindows(hwnd, callback_type(visit), 0)
+        return found[0] if found else 0
+    except Exception:
+        return 0
+
+
+def read_focused_element() -> tuple[str, str]:
+    """``(control_type, name)`` of the UIA focused element, or ``("", "")``.
+
+    pywinauto is imported here, not at module load, so idle Xenon pays
+    nothing for UI Automation.
+    """
+    try:
+        from pywinauto.uia_defines import IUIA
+
+        uia = IUIA()
+        element = uia.iuia.GetFocusedElement()
+        role = uia.known_control_type_ids.get(element.CurrentControlType, "")
+        return str(role or ""), str(element.CurrentName or "")
+    except Exception:
+        return "", ""
+
+
+def read_focused_value() -> str | None:
+    """Text of the UIA focused control (Value, then Text pattern), or ``None``.
+
+    This is what Enter or a Send button would send from a composer, so it
+    is read back for the card and the digest. ``None`` means "could not
+    read", which callers treat as "refuse", never as "empty".
+    """
+    try:
+        from pywinauto.controls.uiawrapper import UIAWrapper
+        from pywinauto.uia_defines import IUIA
+        from pywinauto.uia_element_info import UIAElementInfo
+
+        element = IUIA().iuia.GetFocusedElement()
+        wrapper = UIAWrapper(UIAElementInfo(element))
+    except Exception:
+        return None
+    try:
+        value = wrapper.iface_value.CurrentValue
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
+    try:
+        return str(wrapper.iface_text.DocumentRange.GetText(-1) or "")
+    except Exception:
+        return None
+
+
+def ui_language_is_english() -> bool:
+    """True when the Windows UI language is English. Unknown counts as not."""
+    if sys.platform != "win32":
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32")
+        lang = int(kernel32.GetUserDefaultUILanguage())
+        return (lang & 0x3FF) == LANG_ENGLISH
+    except Exception:
+        return False
+
+
 class WindowsActionBackend:
-    """Executes approved actions with Win32 and UI Automation."""
+    """Executes approved actions with Win32 and UI Automation.
+
+    ``allow_outward`` / ``allow_destructive`` default to False: an ordinary
+    instance refuses any guarded action that classifies OUTWARD or
+    DESTRUCTIVE against the live foreground, whatever approval the plan got
+    upstream. Only gate.py builds an instance with them set, after consuming
+    an approval token. DENIED surfaces are refused by every instance, and
+    open_app / focus_window / write_file targets that classify DENIED (URI
+    handlers, UNC paths, consoles, script files) are refused without a
+    foreground read.
+
+    ``context_reader(action) -> ActionContext`` replaces the live foreground
+    read (tests, or a caller that already resolved the target).
+    ``task_context`` carries the task-level facts the foreground cannot know:
+    taint, Roshan's words, the app allowlist and the request origin.
+    """
 
     def __init__(
-        self, backend=None, desktop_factory=None, catalog=None, title_scanner=None
+        self,
+        backend=None,
+        desktop_factory=None,
+        catalog=None,
+        title_scanner=None,
+        allow_outward: bool = False,
+        allow_destructive: bool = False,
+        context_reader: Callable[[Action], ActionContext] | None = None,
+        task_context: ActionContext | None = None,
+        focus_reader: Callable[[], tuple[str, str]] | None = None,
+        url_reader: Callable[[int], str | None] | None = None,
+        context_check: Callable[[ActionContext], str | None] | None = None,
+        value_reader: Callable[[], str | None] | None = None,
+        settings_reader: Callable[[int], str | None] | None = None,
     ) -> None:
         self._backend = backend if backend is not None else Win32Backend()
         self._desktop_factory = (
@@ -226,6 +425,212 @@ class WindowsActionBackend:
         self._title_scanner = title_scanner
         self._focused_title: str | None = None
         self._user32 = None
+        self._allow_outward = bool(allow_outward)
+        self._allow_destructive = bool(allow_destructive)
+        self._context_reader = context_reader
+        self._task_context = task_context if task_context is not None else ActionContext()
+        self._focus_reader = focus_reader if focus_reader is not None else read_focused_element
+        self._url_reader = url_reader
+        self._value_reader = value_reader if value_reader is not None else read_focused_value
+        self._settings_reader = settings_reader
+        self._ui_english: bool | None = None
+        # The gate passes a check that compares the live target with what
+        # the card showed (the approved digest); ``expect_context`` sets a
+        # one-shot one for a single carded LOCAL step.
+        self._context_check = context_check
+        self._next_check: Callable[[ActionContext], str | None] | None = None
+        # The foreground window a guarded action was classified against;
+        # input is only sent while that window is still in front.
+        self._last_handle: int | None = None
+        self._pinned_handle: int | None = None
+
+    # -- live classification -------------------------------------------------
+
+    def _foreground_pid(self, handle: int) -> int:
+        reader = getattr(self._backend, "process_id", None)
+        if callable(reader):
+            try:
+                return int(reader(handle))
+            except Exception:
+                return 0
+        return window_process_id(handle)
+
+    def _image_for(self, pid: int) -> str:
+        if pid <= 0:
+            return ""
+        reader = getattr(self._backend, "process_name", None)
+        if callable(reader):
+            try:
+                return str(reader(pid) or "")
+            except Exception:
+                return ""
+        return process_image_path(pid)
+
+    def _read_url(self, handle: int) -> str:
+        try:
+            if self._url_reader is not None:
+                return self._url_reader(handle) or ""
+            from xenon.surfaces import read_browser_url
+
+            return read_browser_url(handle) or ""
+        except Exception:
+            return ""  # unreadable URL: the classifier treats it as comms
+
+    def live_context(self, action: Action) -> ActionContext:
+        """Describe where ``action`` would land right now.
+
+        Raises ``TargetRefused`` when the foreground is Xenon's own process.
+        Usable as ``TaskRunner(context_provider=backend.live_context)``.
+        """
+        from xenon import surfaces
+
+        handle = self._backend.foreground_handle()
+        self._last_handle = handle
+        title = self._backend.title(handle)
+        pid = self._foreground_pid(handle)
+        if pid and pid == os.getpid():
+            raise TargetRefused("Xenon never targets its own windows")
+        image = self._image_for(pid)
+        if surfaces.norm_image(image) == "applicationframehost.exe":
+            child = frame_host_child_pid(handle, pid)
+            if child and child != os.getpid():
+                image = self._image_for(child) or image
+        if surfaces.norm_image(image) in {surfaces.norm_image(i) for i in surfaces.SETTINGS_IMAGES}:
+            # Every Settings page is titled "Settings": name the page, or
+            # mark it unknown (which the surface rules deny).
+            title = surfaces.settings_title(title, self._read_settings_page(handle))
+        role, name = ("", "")
+        try:
+            role, name = self._focus_reader()
+        except Exception:
+            role, name = ("", "")
+        url = self._read_url(handle) if surfaces.is_browser_image(image) else ""
+        if self._ui_english is None:
+            self._ui_english = ui_language_is_english()
+        kind = action.kind.strip().lower()
+        if kind == "click_control":
+            element_name, element_role = action.target, action.value
+        else:
+            element_name, element_role = name, role
+        task = self._task_context
+        return ActionContext(
+            process_image=image,
+            window_title=title,
+            focused_role=role,
+            element_name=element_name,
+            element_role=element_role,
+            url=url,
+            ui_language_english=self._ui_english,
+            tainted=task.tainted,
+            user_words=task.user_words,
+            allowlist=task.allowlist,
+            origin=task.origin,
+        )
+
+    def _read_settings_page(self, handle: int) -> str | None:
+        try:
+            if self._settings_reader is not None:
+                return self._settings_reader(handle)
+            from xenon.surfaces import read_settings_page
+
+            return read_settings_page(handle)
+        except Exception:
+            return None
+
+    def composer_readback(self, action: Action | None = None) -> dict:
+        """What Enter or a Send click would commit from the focused control.
+
+        ``{"chat": <focused control's name>, "role": ..., "text": <its text>}``.
+        In WhatsApp the composer is named "Type a message to <chat>", so the
+        name says who it goes to. ``text`` is ``None`` when it could not be
+        read; the caller refuses then, because unknown is not "empty".
+        """
+        try:
+            role, name = self._focus_reader()
+        except Exception:
+            role, name = "", ""
+        try:
+            text = self._value_reader()
+        except Exception:
+            text = None
+        return {"chat": str(name or ""), "role": str(role or ""), "text": text}
+
+    def expect_context(self, check: Callable[[ActionContext], str | None] | None) -> None:
+        """A one-shot check for the next guarded action: ``check(live_ctx)``
+        returns a refusal reason when the target is no longer the one a card
+        showed, so a step approved for Notepad never types into Chrome."""
+        self._next_check = check
+
+    def _guard(self, action: Action) -> ActionResult | None:
+        """Refuse a guarded action the live classification does not allow."""
+        check = self._next_check or self._context_check
+        self._next_check = None
+        self._last_handle = None
+        try:
+            if self._context_reader is not None:
+                ctx = self._context_reader(action)
+            else:
+                ctx = self.live_context(action)
+        except TargetRefused as refusal:
+            return ActionResult(False, f"refused: {refusal}")
+        except Exception as error:
+            return ActionResult(
+                False,
+                f"refused: could not read the target window ({type(error).__name__}); nothing was sent",
+            )
+        if ctx is None or not (ctx.process_image or "").strip():
+            return ActionResult(
+                False, "refused: could not identify the foreground app; nothing was sent"
+            )
+        if check is not None:
+            try:
+                changed = check(ctx)
+            except Exception as error:
+                changed = f"could not compare the target ({type(error).__name__})"
+            if changed:
+                return ActionResult(False, f"refused: {changed}; nothing was sent")
+        refused = self._refusal_for(action, ctx)
+        if refused is None:
+            # Input goes only to the window this was classified against.
+            self._pinned_handle = self._last_handle
+        return refused
+
+    def _require_pinned_foreground(self) -> ActionResult | None:
+        """Refuse when the foreground changed since the live classification."""
+        pinned = self._pinned_handle
+        if pinned is None:
+            return None
+        try:
+            current = self._backend.foreground_handle()
+        except Exception as error:
+            return ActionResult(False, f"could not read the foreground window: {error}")
+        if current != pinned:
+            return ActionResult(False, "the foreground window changed after the check; nothing was sent")
+        return None
+
+    def _static_guard(self, action: Action) -> ActionResult | None:
+        """Refuse open/focus/write targets that are denied whatever has focus.
+
+        No foreground read: these kinds land on a named app or path, so the
+        task facts (origin, taint, allowlist, his words) are all it needs.
+        """
+        return self._refusal_for(action, self._task_context)
+
+    def _refusal_for(self, action: Action, ctx: ActionContext) -> ActionResult | None:
+        risk, reason = classify(action, ctx)
+        if risk is Risk.DENIED:
+            return ActionResult(False, f"refused: {reason}")
+        if risk is Risk.OUTWARD and not self._allow_outward:
+            return ActionResult(
+                False,
+                f"refused: this would send or commit ({reason}); it needs a confirm card on the orb",
+            )
+        if risk is Risk.DESTRUCTIVE and not self._allow_destructive:
+            return ActionResult(
+                False,
+                f"refused: this looks destructive ({reason}); it needs a confirm card on the orb",
+            )
+        return None
 
     def _app_catalog(self):
         if self._catalog is None:
@@ -258,10 +663,18 @@ class WindowsActionBackend:
         return self._user32
 
     def execute(self, action: Action) -> ActionResult:
-        handler = getattr(self, f"_do_{action.kind.strip().lower()}", None)
+        kind = action.kind.strip().lower()
+        handler = getattr(self, f"_do_{kind}", None)
         if handler is None:
             return ActionResult(False, f"unsupported action: {action.kind}")
         try:
+            refused = None
+            if kind in GUARDED_KINDS:
+                refused = self._guard(action)
+            elif kind in STATIC_GUARDED_KINDS:
+                refused = self._static_guard(action)
+            if refused is not None:
+                return refused
             return handler(action)
         except Exception as error:
             return ActionResult(False, f"{type(error).__name__}: {error}")
@@ -286,8 +699,16 @@ class WindowsActionBackend:
 
         # Prefer the app catalog: most modern apps are Start-menu entries with
         # an app id, so os.startfile("chrome") cannot find them even though
-        # they are installed.
-        resolved = self._app_catalog().resolve(target)
+        # they are installed. The task's origin picks the resolve rules: model,
+        # voice and IPC words may only name catalog apps.
+        from xenon.apps import TRUSTED_ORIGINS
+
+        origin = (self._task_context.origin or "model").strip().lower()
+        catalog = self._app_catalog()
+        try:
+            resolved = catalog.resolve(target, origin=origin)
+        except TypeError:  # a catalog without origin rules: trusted words only
+            resolved = catalog.resolve(target) if origin in TRUSTED_ORIGINS else None
         launch_detail = ""
         if resolved is not None:
             try:
@@ -296,6 +717,13 @@ class WindowsActionBackend:
                 launch_detail = launch(resolved)
             except OSError as error:
                 return ActionResult(False, f"could not launch {target!r}: {error}")
+        elif origin not in TRUSTED_ORIGINS:
+            # ShellExecute on an arbitrary name searches PATH and the current
+            # directory and runs URI handlers: never for untrusted words.
+            return ActionResult(
+                False, f"refused: {target!r} is not an app Xenon knows (model and voice requests "
+                "may only open catalog apps)"
+            )
         else:
             path = Path(target).expanduser()
             try:
@@ -384,11 +812,41 @@ class WindowsActionBackend:
             return ActionResult(
                 False, f"focus landed on {title!r}, which is not {target!r}"
             )
+        refused = self._require_expected_app(action)
+        if refused is not None:
+            return refused
 
         self._focused_title = title
         return ActionResult(True, f"focused {title}")
 
+    def _require_expected_app(self, action: Action) -> ActionResult | None:
+        """A title match is not enough: "Notepad" must land on notepad.exe,
+        not on a Discord channel named "#notepad". When the target names a
+        known app, the foreground image must be one that app runs as."""
+        from xenon.surfaces import expected_images, norm_image
+
+        expected = expected_images(action.target)
+        if not expected:
+            return None
+        try:
+            if self._context_reader is not None:
+                ctx = self._context_reader(action)
+            else:
+                ctx = self.live_context(action)
+            image = norm_image(getattr(ctx, "process_image", "") or "")
+        except Exception:
+            image = ""
+        if image in expected:
+            return None
+        shown = image or "an app that could not be identified"
+        return ActionResult(
+            False, f"focus landed on {shown}, which is not {action.target!r}; nothing else was done"
+        )
+
     def _do_click_control(self, action: Action) -> ActionResult:
+        refused = self._require_pinned_foreground()
+        if refused is not None:
+            return refused
         handle = self._backend.foreground_handle()
         window = self._desktop_factory().window(handle=handle)
         kwargs = {"title": action.target}
@@ -417,16 +875,23 @@ class WindowsActionBackend:
         return self._backend.title(self._backend.foreground_handle())
 
     def _do_type_text(self, action: Action) -> ActionResult:
+        from xenon.untrusted import strip_invisible
+
         if not action.value:
             return ActionResult(False, "type_text needs a value")
-        refused = self._require_the_focused_window()
+        refused = self._require_the_focused_window() or self._require_pinned_foreground()
         if refused is not None:
             return refused
-        self._send_unicode(action.value)
-        return ActionResult(True, f"typed {len(action.value)} characters")
+        # Exactly the text a card shows (cards render through
+        # strip_invisible), never hidden characters on top of it.
+        text = strip_invisible(action.value)
+        if not text:
+            return ActionResult(False, "type_text has nothing visible to type")
+        self._send_unicode(text)
+        return ActionResult(True, f"typed {len(text)} characters")
 
     def _do_press_keys(self, action: Action) -> ActionResult:
-        refused = self._require_the_focused_window()
+        refused = self._require_the_focused_window() or self._require_pinned_foreground()
         if refused is not None:
             return refused
         modifiers, key = parse_keys(action.value)

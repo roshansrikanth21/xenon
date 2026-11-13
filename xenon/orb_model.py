@@ -10,6 +10,7 @@ shell multiplies by the DPI scale when it draws.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 
 # Window and orb geometry (logical px). The window is larger than the orb so
@@ -33,6 +34,10 @@ IDLE_AFTER_S = 120.0
 IDLE_SCALE = 0.55
 IDLE_FADE = 0.72
 QUIET_STATES = frozenset({"idle", "standby"})
+# A task running in notch mode is quiet too: the orb stays folded for the
+# whole task and the notch shows "Step 2/5 · ..." instead of unfolding.
+# 'confirm' is the opposite: it unfolds and stays open while a card is up.
+NOTCH_QUIET_STATES = QUIET_STATES | frozenset({"working"})
 # Notch mode: the orb lives at the top centre of the monitor. Idle, it folds
 # into a slim pill flush with the screen's top edge; hover it and it drops
 # down into the full circle with the options fanning downward.
@@ -87,6 +92,8 @@ PALETTE: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "searching": ((34, 211, 238), (59, 130, 246)),
     "speaking": ((192, 132, 252), (244, 114, 182)),
     "error": ((239, 68, 68), (249, 115, 22)),
+    "working": ((96, 165, 250), (52, 211, 153)),
+    "confirm": ((251, 191, 36), (245, 158, 11)),
 }
 STATE_LABELS = {
     "idle": "XENON",
@@ -97,7 +104,36 @@ STATE_LABELS = {
     "searching": "searching",
     "speaking": "speaking",
     "error": "error",
+    "working": "working",
+    "confirm": "confirm",
 }
+
+
+_STEP_RE = re.compile(r"\bstep\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+
+
+def format_task_progress(text: str, step: int | None = None, total: int | None = None) -> str:
+    """The notch's progress line: "Step 1/2 · Opening Notepad"."""
+    text = " ".join(str(text or "").split())
+    if step and total and total > 0:
+        prefix = f"Step {min(step, total)}/{total}"
+        return f"{prefix} · {text}" if text else prefix
+    return text
+
+
+def step_fraction(text: str) -> float | None:
+    """0..1 read from "Step 2/5 ...", or None when the line has no step count.
+
+    Parsed from the text (rather than passed alongside it) so the shell only
+    has to hand the notch one string, the way it already does.
+    """
+    match = _STEP_RE.search(text or "")
+    if not match:
+        return None
+    step, total = int(match.group(1)), int(match.group(2))
+    if total <= 0:
+        return None
+    return min(max(step / total, 0.0), 1.0)
 
 
 def ease_out_back(t: float) -> float:
@@ -190,6 +226,11 @@ class OrbModel:
     notch_target_width: float = NOTCH_WIDTH
     _notch_enter: float | None = None
     last_active: float = 0.0
+    # Confirm/choice cards on screen. While any is open the orb never folds.
+    cards_open: int = 0
+    # The running task's progress line ("Step 1/2 · Opening Notepad"). The
+    # shell may also pass it as notch_info["task"]; that copy wins.
+    task_text: str = ""
 
     def __post_init__(self) -> None:
         if not self.satellites:
@@ -216,8 +257,47 @@ class OrbModel:
             self.color_mix = 0.0
             self.state = state
             self.state_since = self.time
-            self.mark_active()
+            if state not in self.quiet_states:
+                # A task starting (or a step finishing) must not unfold a
+                # folded notch; every other change is activity.
+                self.mark_active()
         self.detail = detail
+
+    def set_task_progress(self, text: str, step: int | None = None, total: int | None = None) -> None:
+        """Progress for a task in the 'working' state. Not activity: the
+        notch stays folded while the line under it changes."""
+        self.task_text = format_task_progress(text, step, total)
+
+    def clear_task(self) -> None:
+        self.task_text = ""
+
+    def card_opened(self) -> None:
+        """A confirm or choice card is up: unfold and stay unfolded."""
+        self.cards_open += 1
+        self.mark_active()
+
+    def card_closed(self) -> None:
+        """A card went away. The normal idle fold restarts from now, so the
+        notch folds NOTCH_IDLE_S later once the task is done too."""
+        self.cards_open = max(0, self.cards_open - 1)
+        self.mark_active()
+
+    @property
+    def progress_text(self) -> str:
+        """What the folded notch says while a task runs ("" when none)."""
+        info = self.notch_info or {}
+        text = info.get("task") or self.task_text
+        if not text and self.state == "working":
+            text = self.detail
+        return str(text or "")
+
+    @property
+    def progress_fraction(self) -> float | None:
+        return step_fraction(self.progress_text)
+
+    @property
+    def quiet_states(self) -> frozenset:
+        return NOTCH_QUIET_STATES if self.notch else QUIET_STATES
 
     @property
     def state_age(self) -> float:
@@ -302,7 +382,8 @@ class OrbModel:
     def is_idle(self) -> bool:
         return (
             self.idle_after > 0
-            and self.state in QUIET_STATES
+            and self.state in self.quiet_states
+            and self.cards_open <= 0
             and self.progress <= 0.01
             and self.time - self.last_active >= self.idle_after
         )
@@ -329,7 +410,7 @@ class OrbModel:
             self.progress = max(target, self.progress - speed * dt)
         self.color_mix = min(1.0, self.color_mix + dt * 3.0)
         # Shrink slowly when idle, grow back quickly when needed.
-        if self.state not in QUIET_STATES:
+        if self.state not in self.quiet_states or self.cards_open > 0:
             self.mark_active()
         if self.notch:
             # The notch widens or narrows smoothly to fit what it shows.
