@@ -23,7 +23,7 @@ _LABELS = {
     "rays": "Rays", "dots": "Dots", "wave": "Wave", "blocks": "Blocks", "none": "None",
     "glow": "Glowing disc", "vinyl": "Vinyl record", "square": "Album cover",
     "right": "Orb right, lyrics left", "left": "Orb left, lyrics right",
-    "reveal": "Reveal (word by word)", "karaoke": "Karaoke (fill colour)",
+    "poster": "Poster (big + small words)", "reveal": "Reveal (word by word)", "karaoke": "Karaoke (fill colour)",
     "stack": "Stack (previous line above)", "fade": "Fade (whole line)",
     "upper": "UPPERCASE", "original": "As written", "center": "Centred",
     "album": "From album art", "white": "White", "ice": "Ice", "aurora": "Aurora",
@@ -126,6 +126,7 @@ class SettingsWindow:
                   style="Muted.TLabel", justify="left").pack(anchor="w", pady=(10, 0))
 
         self._check(system, "start_with_orb", "Start with the orb")
+        self._check(system, "show_dock", "Corner dock (controls + recent songs)")
         self._slider(system, "fps", "Frame rate", 10, 60, integer=True)
         self._check(system, "pause_when_covered", "Pause when windows cover the desktop")
         ttk.Label(system, text=f"Settings file:\n{ms.settings_path()}", style="Muted.TLabel",

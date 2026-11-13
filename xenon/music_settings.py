@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, fields, replace
 VISUALIZERS = ("rays", "dots", "wave", "blocks", "none")
 DISCS = ("glow", "vinyl", "square", "none")
 SIDES = ("right", "left")
-LYRIC_STYLES = ("reveal", "karaoke", "stack", "fade")
+LYRIC_STYLES = ("poster", "reveal", "karaoke", "stack", "fade")
 LYRIC_CASES = ("upper", "original")
 LYRIC_ALIGNS = ("left", "center")
 # Theme presets: name -> glow colour. "album" follows the cover art,
@@ -63,6 +63,7 @@ class MusicSettings:
     # startup / behaviour
     start_with_orb: bool = True
     pause_when_covered: bool = True
+    show_dock: bool = True           # corner disc with controls and recent songs
     # layout
     side: str = "right"              # where the orb sits; lyrics take the other side
     orb_size: float = 1.0
@@ -75,12 +76,12 @@ class MusicSettings:
     sensitivity: float = 1.0
     smoothing: float = 0.5           # 0 = twitchy, 0.95 = very slow fall
     spin_speed: float = 9.0          # degrees per second
-    fps: int = 20
+    fps: int = 30
     halo: bool = True                # album-art glow behind the disc
     backdrop: float = 0.0            # dark pool of shade behind the orb
     # lyrics
     show_lyrics: bool = True
-    lyric_style: str = "reveal"      # reveal | karaoke | stack | fade
+    lyric_style: str = "poster"      # poster | reveal | karaoke | stack | fade
     show_upcoming: bool = True
     lyric_size: float = 1.0
     lyric_case: str = "upper"
@@ -95,7 +96,7 @@ class MusicSettings:
 
     def layout_key(self) -> tuple:
         """Fields that move or resize the windows; a change rebuilds them."""
-        return (self.side, round(self.orb_size, 3))
+        return (self.side, round(self.orb_size, 3), self.show_dock)
 
     def accent_rgb(self, palette_accent: tuple[int, int, int]) -> tuple[int, int, int]:
         if self.accent == "custom":
@@ -113,6 +114,22 @@ def parse_color(text: str) -> tuple[int, int, int] | None:
         return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
     except ValueError:
         return None
+
+
+SETTINGS_VERSION = 2
+
+
+def _migrate(data: dict) -> dict:
+    """Old files stored every field, so a changed default never reached
+    them. Version 2 moved to the poster lyrics and 30 fps: carry those over
+    unless the user had picked something other than the old default."""
+    if not isinstance(data.get("version"), int) or data["version"] < 2:
+        data = dict(data)
+        if data.get("lyric_style") == "reveal":
+            data.pop("lyric_style")
+        if data.get("fps") == 20:
+            data.pop("fps")
+    return data
 
 
 def coerce(data: dict) -> MusicSettings:
@@ -158,7 +175,7 @@ def load(path: str | None = None) -> MusicSettings:
             data = json.load(handle)
     except (OSError, ValueError):
         return MusicSettings()
-    return coerce(data) if isinstance(data, dict) else MusicSettings()
+    return coerce(_migrate(data)) if isinstance(data, dict) else MusicSettings()
 
 
 def save(settings: MusicSettings, path: str | None = None) -> None:
@@ -166,7 +183,7 @@ def save(settings: MusicSettings, path: str | None = None) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(asdict(settings), handle, indent=2)
+        json.dump({"version": SETTINGS_VERSION, **asdict(settings)}, handle, indent=2)
     os.replace(tmp, path)
 
 

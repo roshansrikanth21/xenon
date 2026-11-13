@@ -213,6 +213,40 @@ def _blur_quarter(mask: Image.Image, radius: float, gain: float) -> Image.Image:
     return small.resize(mask.size, Image.BILINEAR).point(lambda v: min(255, int(v * gain)))
 
 
+# Short function words a poster sets small ("I want THE world IN MY hands").
+_SMALL_WORDS = frozenset("i a an the is in my of to on at it am and or so be by as for me we".split())
+
+
+def _small_word(word: str) -> bool:
+    return word.strip(".,!?;:'\"()").lower() in _SMALL_WORDS
+
+
+def _row_width(words, fonts, row, draw) -> float:
+    if not row:
+        return 0.0
+    width = sum(draw.textlength(words[i], font=fonts[i]) for i in row)
+    width += sum(draw.textlength(" ", font=fonts[i]) for i in row[:-1])
+    return width
+
+
+def _wrap_sized(words: list[str], fonts: list, max_width: int, draw) -> list[list[int]]:
+    """Greedy wrap where every word may have its own font."""
+    lines: list[list[int]] = []
+    current: list[int] = []
+    width = 0.0
+    for i, word in enumerate(words):
+        w = draw.textlength(word, font=fonts[i])
+        gap = draw.textlength(" ", font=fonts[current[-1]]) if current else 0.0
+        if current and width + gap + w > max_width:
+            lines.append(current)
+            current, width, gap = [], 0.0, 0.0
+        width += gap + w
+        current.append(i)
+    if current:
+        lines.append(current)
+    return lines
+
+
 def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), screen_height: int = 1440,
                   settings=None) -> Image.Image:
     """The lyric layer: heavy words, sung ones bright with a glow, unsung
@@ -229,13 +263,25 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
     style = st.lyric_style
 
     size = int(screen_height / 8.5 * st.lyric_size)
-    fnt = font(text, size)
     max_w = int(box.w * 0.96)
-    rows = _wrap(words, fnt, max_w, draw) if words else []
+    poster = style == "poster"
+
+    def fonts_at(size_):
+        big = font(text, size_)
+        small = font(text, max(14, int(size_ * 0.46))) if poster else big
+        return big, small, [small if poster and _small_word(w) else big for w in words]
+
+    fnt, small_fnt, word_fonts = fonts_at(size)
+    rows = _wrap_sized(words, word_fonts, max_w, draw) if words else []
     while len(rows) > 3 and size > 40:
         size = int(size * 0.86)
-        fnt = font(text, size)
-        rows = _wrap(words, fnt, max_w, draw)
+        fnt, small_fnt, word_fonts = fonts_at(size)
+        rows = _wrap_sized(words, word_fonts, max_w, draw)
+    # Small words sit at the cap line of the big ones, like a poster.
+    try:
+        small_dy = fnt.getbbox("H")[1] - small_fnt.getbbox("H")[1]
+    except Exception:
+        small_dy = 0
 
     line_h = int(size * 1.02)
     block_h = line_h * len(rows)
@@ -259,11 +305,13 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
         gdraw.text((px, py), prev, font=pf, fill=(255, 255, 255, int(110 * entry_alpha + 40)))
 
     for r, row in enumerate(rows):
-        row_w = sum(draw.textlength(words[i], font=fnt) for i in row) + space * (len(row) - 1)
+        row_w = _row_width(words, word_fonts, row, draw)
         x = (box.w - row_w) / 2 if centered else 0.0
         y = top + r * line_h
         for i in row:
             word = words[i]
+            wf = word_fonts[i]
+            wy = y + (small_dy if wf is not fnt else 0)
             level = frame.reveal[i] / REVEAL_STEPS if i < len(frame.reveal) else 0.0
             if style == "fade":
                 level = 1.0
@@ -272,13 +320,13 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
                 # line itself is always fully there.
                 alpha = int(unsung + (255 - unsung) * level) if level else max(unsung, 120)
                 colour = tuple(int(255 + (c - 255) * level) for c in accent) if level else (255, 255, 255)
-                gdraw.text((x, y), word, font=fnt, fill=colour + (alpha,))
+                gdraw.text((x, wy), word, font=wf, fill=colour + (alpha,))
             else:
                 alpha = int((unsung + (255 - unsung) * level) * entry_alpha)
-                gdraw.text((x, y), word, font=fnt, fill=(255, 255, 255, alpha))
+                gdraw.text((x, wy), word, font=wf, fill=(255, 255, 255, alpha))
             if level > 0:
-                ldraw.text((x, y), word, font=fnt, fill=int(255 * level * (1 if style == "karaoke" else entry_alpha)))
-            x += draw.textlength(word, font=fnt) + space
+                ldraw.text((x, wy), word, font=wf, fill=int(255 * level * (1 if style == "karaoke" else entry_alpha)))
+            x += draw.textlength(word, font=wf) + draw.textlength(" ", font=wf)
 
     # A soft dark shadow under every word keeps white text readable on a
     # bright wallpaper; then the glow from the sung words, then the words.
@@ -551,3 +599,66 @@ def accent_from_palette(palette: list[tuple[int, int, int]]) -> tuple[int, int, 
         return (255, 255, 255)
     r, g, b = palette[0]
     return (int(r * 0.35 + 255 * 0.65), int(g * 0.35 + 255 * 0.65), int(b * 0.35 + 255 * 0.65))
+
+
+# ------------------------------------------------------------------ split orb
+# The live widget draws the orb as three windows so each frame only redraws
+# what moves: the halo (static per track), the ring (every frame, built
+# straight into premultiplied BGRA bytes, no full-size composite), and the
+# disc (a small window that only rotates).
+
+
+def disc_box(layout: SceneLayout, art: OrbArt) -> Box:
+    d = art.diameter
+    return Box(int(layout.orb_cx - d / 2), int(layout.orb_cy - d / 2), d, d)
+
+
+def render_halo(box: Box, layout: SceneLayout, art: OrbArt) -> Image.Image:
+    image = Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0))
+    if art.halo is not None:
+        cx, cy = layout.orb_cx - box.x, layout.orb_cy - box.y
+        image.alpha_composite(art.halo, (int(cx - art.halo.width / 2), int(cy - art.halo.height / 2)))
+    return image
+
+
+def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: bool, energy: float,
+                     accent=(255, 255, 255), screen_height: int = 1440, settings=None,
+                     intro: float = 1.0, diameter: int | None = None) -> bytes:
+    """The visualizer ring as premultiplied BGRA bytes for ``box``."""
+    st = _settings(settings)
+    d = diameter or layout.orb_diameter
+    cx, cy = layout.orb_cx - box.x, layout.orb_cy - box.y
+    shapes = Image.new("L", (box.w, box.h), 0)
+    if st.visualizer != "none":
+        values = ring_values(bars, st.bar_count)
+        inner = d / 2 + d * 0.05
+        reach = (screen_height * 0.15 * st.ray_length * (1.0 if playing else 0.35)
+                 * (1.0 + 0.15 * min(1.0, energy)) * max(0.0, intro))
+        _draw_visualizer(ImageDraw.Draw(shapes), st.visualizer, values, cx, cy, inner, reach, d)
+    bleed = _blur_quarter(shapes, d / 90, 1.6 * max(0.2, st.glow))
+    alpha = ImageChops.lighter(bleed, shapes)
+    if intro < 0.999:
+        k = max(0.0, min(1.0, intro))
+        alpha = alpha.point(lambda v: int(v * k))
+    r, g, b = accent
+    bands = [alpha.point(lambda v, c=c: v * c // 255) for c in (b, g, r)]
+    return Image.merge("RGBA", (*bands, alpha)).tobytes()
+
+
+def render_disc(art: OrbArt, spin_deg: float, playing: bool) -> Image.Image | None:
+    if art.art is None:
+        return None
+    if art.disc == "vinyl":
+        image = art.art.copy()
+        if art.label is not None:
+            label = art.label.rotate(spin_deg, resample=Image.BILINEAR) if spin_deg else art.label
+            off = (image.width - label.width) // 2
+            image.alpha_composite(label, (off, off))
+        return image
+    disc = art.dim if (not playing and art.dim is not None) else art.art
+    if art.spins and spin_deg:
+        disc = disc.rotate(spin_deg, resample=Image.BILINEAR)
+    if art.rim is not None:
+        disc = disc.copy()
+        disc.alpha_composite(art.rim)
+    return disc

@@ -478,9 +478,17 @@ class _LayeredSurface:
 
     # -- frame push ---------------------------------------------------------
     def push(self, image: Image.Image) -> bool:
-        """UpdateLayeredWindow one RGBA frame. The memory DC and DIB are
-        cached per surface — recreating them every frame showed up as real
-        CPU in the profile."""
+        """UpdateLayeredWindow one RGBA frame. PIL's raw "BGRa" packer
+        premultiplies and swaps channels in one pass (half the time of the
+        convert/split/merge route)."""
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
+        return self.push_raw(image.tobytes("raw", "BGRa"), image.width, image.height)
+
+    def push_raw(self, data: bytes, width: int, height: int) -> bool:
+        """UpdateLayeredWindow one premultiplied-BGRA frame. The memory DC
+        and DIB are cached per surface — recreating them every frame showed
+        up as real CPU in the profile."""
         user = ctypes.windll.user32
         gdi = ctypes.windll.gdi32
 
@@ -507,9 +515,8 @@ class _LayeredSurface:
                 ("biClrImportant", wintypes.DWORD),
             ]
 
-        from .orb_render import premultiplied_bgra
-
-        width, height = image.size
+        if len(data) < width * height * 4:
+            return False
         if self._push_size != (width, height):
             self._release_push_gdi()
             screen_dc = user.GetDC(None)
@@ -539,7 +546,7 @@ class _LayeredSurface:
         ok = False
         if self._bits and self._gdi_dc:
             previous = gdi.SelectObject(self._gdi_dc, self._bitmap)
-            ctypes.memmove(self._bits, premultiplied_bgra(image), width * height * 4)
+            ctypes.memmove(self._bits, data, width * height * 4)
 
             screen_dc = user.GetDC(None)
             # pptDst = NULL keeps the window where it is; passing a position
@@ -555,6 +562,24 @@ class _LayeredSurface:
             user.ReleaseDC(None, screen_dc)
             gdi.SelectObject(self._gdi_dc, previous)
         return ok
+
+    def set_opacity(self, value: int) -> None:
+        """Change the whole window's alpha. Once a frame is on screen this
+        updates only the blend (no new pixels), so fades cost nothing."""
+        value = max(0, min(255, int(value)))
+        if value == self.opacity:
+            return
+        self.opacity = value
+        if not self.hwnd or self._push_size is None:
+            return
+
+        class BLENDFUNCTION(ctypes.Structure):
+            _fields_ = [("BlendOp", wintypes.BYTE), ("BlendFlags", wintypes.BYTE),
+                        ("SourceConstantAlpha", wintypes.BYTE), ("AlphaFormat", wintypes.BYTE)]
+
+        blend = BLENDFUNCTION(AC_SRC_OVER, 0, value, AC_SRC_ALPHA)
+        ctypes.windll.user32.UpdateLayeredWindow(
+            self.hwnd, None, None, None, None, None, 0, ctypes.byref(blend), ULW_ALPHA)
 
     def _release_push_gdi(self) -> None:
         gdi = ctypes.windll.gdi32
@@ -580,6 +605,113 @@ class _LayeredSurface:
             ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
             ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
         return hits
+
+
+# ------------------------------------------------------------ pointer
+
+def _work_area_bottom(height: int) -> int:
+    """Top of the taskbar on the primary monitor (the work area's bottom)."""
+    rect = wintypes.RECT()
+    try:
+        user = ctypes.windll.user32
+        user.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+        if user.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+            return rect.bottom
+    except Exception:
+        pass
+    return height
+
+
+class _Pointer:
+    """Where the mouse is, whether the left button is down, and whether the
+    desktop itself is under it.
+
+    The widget's windows stay click-through (the shell's icon view owns the
+    wallpaper's input), so instead of receiving clicks the widget watches the
+    pointer: a press and release over one of its controls, with the desktop
+    — not some app window — under the pointer, counts as a click."""
+
+    DESKTOP = frozenset({"SysListView32", "SHELLDLL_DefView", "WorkerW", "Progman"})
+
+    def __init__(self) -> None:
+        user = ctypes.windll.user32
+        user.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        user.WindowFromPoint.argtypes = [wintypes.POINT]
+        user.WindowFromPoint.restype = wintypes.HWND
+        user.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        user.GetAsyncKeyState.restype = ctypes.c_short
+        user.GetSystemMetrics.argtypes = [ctypes.c_int]
+        self._user = user
+        self._buf = ctypes.create_unicode_buffer(64)
+        self._last_hwnd = None
+        self._last_desktop = False
+        # Swapped mouse buttons: the "primary" button is VK_RBUTTON.
+        self._button = 0x02 if user.GetSystemMetrics(23) else 0x01
+
+    # -- click poller ---------------------------------------------------------
+    # The render loop runs every 16-50 ms, too slow to see a quick tap; a tiny
+    # thread samples the button at ~250 Hz and queues whole clicks. The low
+    # bit of GetAsyncKeyState ("pressed since the last call") catches even a
+    # click shorter than one sample.
+
+    def start(self) -> None:
+        import collections
+
+        self._clicks = collections.deque(maxlen=16)
+        self._halt = threading.Event()
+        self._thread = threading.Thread(target=self._poll, name="xenon-music-pointer", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        halt = getattr(self, "_halt", None)
+        if halt is not None:
+            halt.set()
+
+    def clicks(self) -> list:
+        out = []
+        queue = getattr(self, "_clicks", None)
+        while queue:
+            out.append(queue.popleft())
+        return out
+
+    def _sample(self):
+        point = wintypes.POINT()
+        self._user.GetCursorPos(ctypes.byref(point))
+        state = self._user.GetAsyncKeyState(self._button)
+        return point.x, point.y, bool(state & 0x8000), bool(state & 1)
+
+    def _desktop_at(self, x: int, y: int) -> bool:
+        hwnd = self._user.WindowFromPoint(wintypes.POINT(x, y))
+        buf = ctypes.create_unicode_buffer(64)
+        self._user.GetClassNameW(hwnd, buf, 64)
+        return buf.value in self.DESKTOP
+
+    def _poll(self) -> None:
+        down_at = None
+        self._sample()   # clear a stale "pressed since" bit
+        while not self._halt.wait(0.004):
+            x, y, down, tapped = self._sample()
+            if down and down_at is None:
+                down_at = (x, y, self._desktop_at(x, y))
+            elif not down and down_at is not None:
+                self._clicks.append((*down_at, x, y, self._desktop_at(x, y)))
+                down_at = None
+            elif not down and tapped:
+                desk = self._desktop_at(x, y)
+                self._clicks.append((x, y, desk, x, y, desk))
+
+    def read(self) -> tuple[int, int, bool, bool]:
+        point = wintypes.POINT()
+        if not self._user.GetCursorPos(ctypes.byref(point)):
+            return -1, -1, False, False
+        hwnd = self._user.WindowFromPoint(point)
+        if hwnd != self._last_hwnd:
+            self._last_hwnd = hwnd
+            self._user.GetClassNameW(hwnd, self._buf, 64)
+            self._last_desktop = self._buf.value in self.DESKTOP
+        down = bool(self._user.GetAsyncKeyState(self._button) & 0x8000)
+        return point.x, point.y, self._last_desktop, down
 
 
 # ------------------------------------------------------------ the widget
@@ -630,6 +762,15 @@ class MusicWidget:
 
         self._settings = SettingsWatcher()
         self._surfaces: dict = {}
+        self._art_key = -1
+        from .music_history import MusicHistory
+
+        self._history = MusicHistory()
+        self._dock_rows: list = []
+        self._controller = None
+        self._settings_proc = None
+        self.on_open_settings = None   # set by the orb to open its own window
+        self._track_changed_at = 0.0
         self._ready = threading.Event()
         self._mutex = None
 
@@ -737,14 +878,35 @@ class MusicWidget:
 
     def _scene(self, width: int, height: int, audio_ok: bool) -> str:
         """Build the layers for the current layout and drive them until the
-        widget stops ("stop") or the layout changes ("rebuild")."""
+        widget stops ("stop") or the layout changes ("rebuild").
+
+        Layers, bottom to top: halo (static per track), ring (the visualizer,
+        every frame), disc (album art, turns slowly), lyrics, card, dock."""
+        from dataclasses import replace as _replace
+
+        from . import music_dock as dock
         from . import music_scene as scene
 
         settings = self._settings.current
         layout = scene.scene_layout(width, height, settings.side, settings.orb_size)
-        boxes = {"lyrics": layout.lyric_box, "card": layout.card_box, "orb": layout.orb_box}
+        art_d = layout.orb_diameter
+        disc_box = scene.Box(int(layout.orb_cx - art_d / 2), int(layout.orb_cy - art_d / 2), art_d, art_d)
+        floor = _work_area_bottom(height)
+        dock_full = dock.dock_geometry(width, height, dock.MAX_ROWS, floor)
+        if settings.show_dock and settings.side != "left":
+            # Keep the card clear of the dock's disc in the corner.
+            clear = dock_full.panel.x
+            card = layout.card_box
+            if card.x < clear:
+                layout = _replace(layout, card_box=scene.Box(clear, card.y, card.w, card.h))
+        order = ["halo", "ring", "disc", "lyrics", "card"] + (["dock"] if settings.show_dock else [])
+        boxes = {
+            "halo": layout.orb_box, "ring": layout.orb_box, "disc": disc_box,
+            "lyrics": layout.lyric_box, "card": layout.card_box, "dock": dock_full.box,
+        }
         surfaces: dict[str, _LayeredSurface] = {}
-        for name, box in boxes.items():
+        for name in order:
+            box = boxes[name]
             surface = _LayeredSurface(box.w, box.h, x=box.x, y=box.y)
             if not surface.create():
                 for made in surfaces.values():
@@ -754,35 +916,47 @@ class MusicWidget:
             surfaces[name] = surface
         self._surfaces = surfaces
         self._surface = surfaces["lyrics"]
-        self._player_surface = surfaces["orb"]
+        self._player_surface = surfaces["ring"]
         self._player_rect = (layout.orb_box.x, layout.orb_box.y, layout.orb_box.w, layout.orb_box.h)
-        for surface in surfaces.values():
-            if self.overlay:
-                self._float(surface)
-            else:
-                attach_behind_icons(surface.hwnd)
+        self._place_all(surfaces, order)
         self._ready.set()
 
-        user = ctypes.windll.user32
-        blank = {name: Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0)) for name, box in boxes.items()}
+        blank = {name: Image.new("RGBA", (boxes[name].w, boxes[name].h), (0, 0, 0, 0)) for name in order}
+        pointer = _Pointer()
+        pointer.start()
+        dock_renderer = dock.DockRenderer()
+        dock_geom = dock_full
+        dock_content = dock.DockContent()
+        dock_key = None
+        dock_open = False
+        openness = 0.0
+        hover_since = None
+        last_inside = 0.0
+        hover = None
+        press_glow = 0.0
+        dock_drawn = None
+
         last_attach = time.monotonic()
         last_coverage = 0.0
         covered = False
-        next_orb = next_lyric = next_card = 0.0
+        next_ring = next_lyric = next_card = 0.0
         lyric_key = card_key = object()
         orb_art = None
         orb_art_key = None
+        halo_key = None
+        disc_frame = 0
         last_tick = time.monotonic()
         orb_idle_done = False
+        recorded = None
         result = "stop"
 
         try:
             while not self._stop.is_set():
                 now = time.monotonic()
                 if surfaces["lyrics"].pump() % 2:
-                    self._toggle_overlay(*surfaces.values())
+                    self._toggle_overlay(*[surfaces[n] for n in order])
                     covered = False
-                    lyric_key = card_key = object()
+                    lyric_key = card_key = dock_drawn = object()
                     orb_idle_done = False
 
                 if self._settings.poll(now):
@@ -792,9 +966,9 @@ class MusicWidget:
                         break
                     settings = fresh
                     for surface in surfaces.values():
-                        surface.opacity = int(255 * settings.opacity)
-                    lyric_key = card_key = object()
-                    orb_art_key = None
+                        surface.set_opacity(255 * settings.opacity)
+                    lyric_key = card_key = dock_drawn = object()
+                    orb_art_key = halo_key = None
                     orb_idle_done = False
                     if not settings.pause_when_covered:
                         covered = False
@@ -802,29 +976,95 @@ class MusicWidget:
                 if not self.overlay and now - last_attach >= _REATTACH_SECONDS:
                     last_attach = now
                     from .wallpaper import get_parent
-                    for surface in surfaces.values():
-                        if not get_parent(surface.hwnd):
-                            attach_behind_icons(surface.hwnd)
+                    if any(not get_parent(s.hwnd) for s in surfaces.values()):
+                        self._place_all(surfaces, order)
 
                 if (settings.pause_when_covered and not self.overlay
                         and now - last_coverage >= _COVERAGE_CHECK_SECONDS):
                     last_coverage = now
-                    covered = is_covered(surfaces["orb"].hwnd, (0, 0, width, height))
+                    covered = is_covered(surfaces["ring"].hwnd, (0, 0, width, height))
 
                 track, timeline = self._now_playing.state()
                 self._refresh_assets(track, timeline)
                 playing = bool(timeline and timeline.playing)
+                if track and (recorded != (self._track_key, self._art_key)):
+                    recorded = (self._track_key, self._art_key)
+                    try:
+                        self._history.record(track.title, track.artist, track.app, self._cover)
+                    except Exception:
+                        pass
+                    dock_key = None
                 if covered:
                     time.sleep(0.25)
                     continue
                 if self._needs_frame:
                     self._needs_frame = False
-                    lyric_key = card_key = object()
+                    lyric_key = card_key = dock_drawn = object()
                     orb_idle_done = False
 
                 accent = settings.accent_rgb(scene.accent_from_palette(self._palette))
                 position = timeline.position_now() if timeline else 0
                 duration = timeline.duration_ms if timeline else 0
+                since_change = now - self._track_changed_at
+                intro = dock.ease_out_back(since_change / 0.7) if self._track_changed_at else 1.0
+                fade_in = dock.ease_out_cubic(since_change / 0.45) if self._track_changed_at else 1.0
+
+                # -- dock: hover opens it, clicks act -------------------------
+                if "dock" in surfaces:
+                    if dock_key is None:
+                        rows = []
+                        exclude = (track.title.strip().lower(), track.artist.strip().lower()) if track else None
+                        for entry in self._history.recent(exclude, dock.MAX_ROWS):
+                            rows.append((entry.title, entry.artist, self._history.thumbnail(entry)))
+                        self._dock_rows = self._history.recent(exclude, dock.MAX_ROWS)
+                        dock_geom = _replace(dock.dock_geometry(width, height, len(rows), floor), box=dock_full.box)
+                        dock_content = dock.DockContent(
+                            track.title if track else "", track.artist if track else "",
+                            playing, self._cover, rows)
+                        dock_key = (self._track_key, self._art_key)
+                    if dock_content.playing != playing or dock_content.cover is not self._cover:
+                        dock_content = dock.DockContent(dock_content.title, dock_content.artist, playing,
+                                                        self._cover, dock_content.rows)
+                    x, y, on_desktop, _down = pointer.read()
+                    inside = on_desktop and dock.in_dock(dock_geom, x, y, dock_open)
+                    if inside:
+                        last_inside = now
+                        hover_since = hover_since or now
+                        if not dock_open and now - hover_since > 0.12:
+                            dock_open = True
+                    else:
+                        hover_since = None
+                        if dock_open and now - last_inside > 0.5:
+                            dock_open = False
+                    hover = dock.hit(dock_geom, x, y, openness > 0.85) if inside else None
+                    for (px, py, desk_down, ux, uy, desk_up) in pointer.clicks():
+                        # A click counts when it pressed and released on the
+                        # same control, with the desktop under the pointer.
+                        def target_at(cx_, cy_, desk_):
+                            if not desk_:
+                                return None
+                            if dock.in_dock(dock_geom, cx_, cy_, dock_open):
+                                return dock.hit(dock_geom, cx_, cy_, dock_open)
+                            return "orb" if self._on_orb(layout, cx_, cy_) else None
+                        target = target_at(px, py, desk_down)
+                        if target and target == target_at(ux, uy, desk_up):
+                            press_glow = 1.0
+                            if target == "disc":
+                                dock_open = not dock_open
+                                last_inside = now
+                            elif self._dock_action(target):
+                                dock_open = False
+                    step = (now - getattr(self, "_dock_tick", now)) / 0.32
+                    self._dock_tick = now
+                    openness = min(1.0, openness + step) if dock_open else max(0.0, openness - step * 1.3)
+                    press_glow = max(0.0, press_glow - step * 2)
+                    # The open panel shows what the card shows: hand over.
+                    surfaces["card"].set_opacity(255 * settings.opacity * (1.0 - dock.ease_out_cubic(openness)))
+                    drawn = (round(openness, 3), hover, id(dock_content), round(press_glow, 2), accent)
+                    if drawn != dock_drawn:
+                        dock_drawn = drawn
+                        surfaces["dock"].push(dock_renderer.render(
+                            dock_geom, dock_content, dock.ease_out_cubic(openness), hover, accent, press_glow))
 
                 # -- lyrics: only when what is lit actually changes ------------
                 if now >= next_lyric:
@@ -846,7 +1086,7 @@ class MusicWidget:
                 if now >= next_card:
                     next_card = now + 1.0
                     progress = (position / duration) if duration else 0.0
-                    key = (self._track_key, playing, int(progress * 300), settings.show_card)
+                    key = (self._track_key, playing, int(progress * 300), settings.show_card, id(self._cover))
                     if key != card_key:
                         card_key = key
                         if track and settings.show_card:
@@ -856,20 +1096,27 @@ class MusicWidget:
                             image = blank["card"]
                         surfaces["card"].push(image)
 
-                # -- orb: every frame while playing, settle when paused --------
-                art_key = (id(self._cover), layout.orb_diameter, accent, settings.disc,
-                           settings.halo, settings.backdrop)
+                # -- orb: halo once per look, ring every frame, disc half rate --
+                art_key = (id(self._cover), art_d, accent, settings.disc, settings.halo, settings.backdrop)
                 if orb_art_key != art_key:
-                    orb_art = scene.OrbArt(layout.orb_diameter, self._cover, accent,
-                                           settings.disc, settings.halo, settings.backdrop)
+                    orb_art = scene.OrbArt(art_d, self._cover, accent, settings.disc, settings.halo, settings.backdrop)
                     orb_art_key = art_key
+                    halo_key = None
                     orb_idle_done = False
-                active = playing or max(map(abs, self._bars), default=0.0) >= 0.004
+                fading = fade_in < 0.999 or intro < 0.999
+                for name in ("halo", "ring", "disc"):
+                    surfaces[name].set_opacity(255 * settings.opacity * (fade_in if track else 0.0))
+                if halo_key != (art_key, bool(track)):
+                    halo_key = (art_key, bool(track))
+                    surfaces["halo"].push(scene.render_halo(layout.orb_box, layout, orb_art) if track
+                                          else blank["halo"])
+                    disc_frame = 0
+                active = playing or fading or max(map(abs, self._bars), default=0.0) >= 0.004
                 if track and (active or not orb_idle_done):
-                    if now < next_orb:
-                        time.sleep(min(0.02, max(0.003, next_orb - now)))
+                    if now < next_ring:
+                        time.sleep(min(0.008, max(0.002, next_ring - now)))
                         continue
-                    next_orb = now + 1.0 / settings.fps
+                    next_ring = now + 1.0 / settings.fps
                     if audio_ok and playing:
                         samples = self._audio.read_latest(2048)
                         rate = self._audio.format.sample_rate if self._audio.format else 48000
@@ -887,19 +1134,29 @@ class MusicWidget:
                     if playing:
                         self._spin = (self._spin - dt * settings.spin_speed) % 360.0
                     energy = sum(self._bars[:12]) / 12 if self._bars else 0.0
-                    surfaces["orb"].push(scene.render_orb(
-                        layout.orb_box, layout, orb_art, self._bars, self._spin, playing, energy,
-                        accent, height, settings,
-                    ))
+                    box = layout.orb_box
+                    surfaces["ring"].push_raw(scene.render_ring_bgra(
+                        box, layout, self._bars, playing, energy, accent, height, settings,
+                        intro=intro if track else 0.0, diameter=art_d,
+                    ), box.w, box.h)
+                    # The disc turns a fraction of a degree per frame: half
+                    # rate is indistinguishable and saves a third of the work.
+                    if disc_frame % 2 == 0 or fading or not playing:
+                        disc = scene.render_disc(orb_art, self._spin, playing)
+                        surfaces["disc"].push(disc if disc is not None else blank["disc"])
+                    disc_frame += 1
                     if not active:
                         orb_idle_done = True
                 elif not track and not orb_idle_done:
-                    surfaces["orb"].push(blank["orb"])
+                    for name in ("ring", "disc"):
+                        surfaces[name].push(blank[name])
                     orb_idle_done = True
                 else:
                     last_tick = now
-                    time.sleep(0.03)
+                    # Keep polling the pointer briskly near the dock.
+                    time.sleep(0.016 if (dock_open or openness > 0) else 0.03)
         finally:
+            pointer.stop()
             from .wallpaper import detach_from_desktop
             for surface in surfaces.values():
                 try:
@@ -908,8 +1165,82 @@ class MusicWidget:
                 except Exception:
                     pass
             self._surfaces = {}
-        del user
         return result
+
+    def _place_all(self, surfaces: dict, order: list[str]) -> None:
+        """Stack the layers in ``order`` (bottom first) on the wallpaper or,
+        in overlay mode, above every window."""
+        if self.overlay:
+            for name in order:
+                self._float(surfaces[name])
+        else:
+            # Each attach sends its window to the bottom, so go top-down.
+            for name in reversed(order):
+                attach_behind_icons(surfaces[name].hwnd)
+
+    @staticmethod
+    def _on_orb(layout, x: int, y: int) -> bool:
+        r = layout.orb_diameter / 2
+        return (x - layout.orb_cx) ** 2 + (y - layout.orb_cy) ** 2 <= r * r
+
+    def _dock_action(self, target: str) -> bool:
+        """Run a dock click off the render thread. Returns True when the dock
+        should fold away afterwards (a song was picked)."""
+        if target == "disc":
+            return False
+        if target == "now":
+            return False
+        if target == "settings":
+            self.open_settings()
+            return True
+        if target in ("playpause", "orb"):
+            action = self._now_playing.play_pause
+        elif target == "next":
+            action = self._now_playing.next_track
+        elif target == "previous":
+            action = self._now_playing.previous_track
+        elif target.startswith("row"):
+            rows = getattr(self, "_dock_rows", [])
+            index = int(target[3:])
+            if index >= len(rows):
+                return False
+            entry = rows[index]
+
+            def action(entry=entry):
+                from .music import MusicCommand, MusicController
+
+                if self._controller is None:
+                    self._controller = MusicController.from_env()
+                reply = self._controller.run(MusicCommand("play", f"{entry.title} {entry.artist}".strip()))
+                print(f"music widget: {reply}", flush=True)
+        else:
+            return False
+
+        def run():
+            try:
+                action()
+            except Exception as error:
+                print(f"music widget: {target} failed: {error}", flush=True)
+
+        threading.Thread(target=run, daemon=True, name="xenon-music-action").start()
+        return target.startswith("row")
+
+    def open_settings(self) -> None:
+        """The settings window: the orb's own when the widget runs inside the
+        orb (``on_open_settings``), otherwise a small separate process."""
+        if self.on_open_settings is not None:
+            self.on_open_settings()
+            return
+        proc = self._settings_proc
+        if proc is not None and proc.poll() is None:
+            return
+        import subprocess
+        import sys
+
+        self._settings_proc = subprocess.Popen(
+            [sys.executable, "-m", "xenon", "music-widget", "--settings"],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
 
     def _float(self, surface: "_LayeredSurface") -> None:
         from .wallpaper import WS_EX_TRANSPARENT, detach_from_desktop, send_to_top_most, show
@@ -941,9 +1272,22 @@ class MusicWidget:
                 self._lyrics.request(None)
             return
         key = (track.title, track.artist, track.album)
+        art_key = len(track.art or b"")
         if key == self._track_key:
+            if art_key == self._art_key:
+                return
+            # The art often lands a poll or two after the title: take it then.
+            self._art_key = art_key
+            self._needs_frame = True
+            try:
+                self._cover = Image.open(io.BytesIO(track.art)).convert("RGB") if track.art else None
+            except Exception:
+                self._cover = None
+            self._palette = palette_from_image(self._cover) if self._cover else [(120, 130, 160)]
             return
         self._track_key = key
+        self._art_key = art_key
+        self._track_changed_at = time.monotonic()
         self._needs_frame = True
 
         cover = None

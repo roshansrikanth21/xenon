@@ -1010,6 +1010,8 @@ def start_music_widget_async(app: "OrbApp") -> None:
             return
         try:
             widget = MusicWidget()
+            # The dock's gear button opens the orb's own settings window.
+            widget.on_open_settings = lambda: app.post(app.open_music_settings)
             if widget.start():
                 app.music_widget = widget
                 print("music widget running (tray > Music widget settings…)", flush=True)
