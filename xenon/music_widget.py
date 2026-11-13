@@ -48,7 +48,7 @@ _REATTACH_SECONDS = 4.0
 _COVERAGE_CHECK_SECONDS = 0.7
 # Playing-state animation target. The player region is small, so 24 fps reads
 # as smooth for a 33 rpm disc and leaves the rest of the core to the music.
-_PLAYING_FPS = 24.0
+_PLAYING_FPS = 20.0
 # Nothing moves while playback is paused, so the idle loop renders rarely.
 _IDLE_FRAME_SECONDS = 0.5
 # The stage only changes on track/lyric events; this caps how often it
@@ -653,6 +653,12 @@ class MusicWidget:
 
     # -- worker -------------------------------------------------------------
     def _run(self) -> None:
+        """Three transparent layers over the wallpaper (see ``music_scene``):
+        the orb (cover disc + spectrum rays, the only thing animating every
+        frame), the lyrics (redrawn when a word lights up or a line enters),
+        and the now-playing card (redrawn about once a second)."""
+        from . import music_scene as scene
+
         user = ctypes.windll.user32
         width = user.GetSystemMetrics(0)
         height = user.GetSystemMetrics(1)
@@ -662,133 +668,144 @@ class MusicWidget:
         self._now_playing.start()
         audio_ok, _ = self._audio.start()
 
-        # Two layered windows: the stage (backdrop, titles, lyrics — full
-        # screen, changes rarely) and the player (vinyl + spectrum — a small
-        # region, the only thing that animates). Re-rendering and re-pushing
-        # the whole screen every frame measured ~4x a core on this ultrawide;
-        # this split is what makes the playing state affordable.
-        stage = _LayeredSurface(width, height)
-        px, py, pw, ph = player_region(width, height)
-        player = _LayeredSurface(pw, ph, x=px, y=py)
-        if not stage.create():
-            player.close()
-            return
-        if not player.create():
-            stage.close()
-            return
-        self._surface = stage
-        self._player_surface = player
-        self._player_rect = (px, py, pw, ph)
-
-        # Into the wallpaper layer. If the shell refuses (Explorer mid-
-        # restart), the re-attach timer below keeps retrying.
-        attach_behind_icons(stage.hwnd)
-        attach_behind_icons(player.hwnd)
-        # Z order: the window passed as the insert-after target stays in
-        # front, so putting the stage after the player keeps the vinyl,
-        # bars and tonearm visible over the backdrop.
-        user.SetWindowPos(
-            stage.hwnd, player.hwnd, 0, 0, 0, 0,
-            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
-        )
+        layout = scene.scene_layout(width, height)
+        boxes = {"lyrics": layout.lyric_box, "card": layout.card_box, "orb": layout.orb_box}
+        surfaces = {}
+        for name, box in boxes.items():
+            surface = _LayeredSurface(box.w, box.h, x=box.x, y=box.y)
+            if not surface.create():
+                for made in surfaces.values():
+                    made.close()
+                return
+            surfaces[name] = surface
+        self._surfaces = surfaces
+        self._surface = surfaces["lyrics"]
+        self._player_surface = surfaces["orb"]
+        self._player_rect = (layout.orb_box.x, layout.orb_box.y, layout.orb_box.w, layout.orb_box.h)
+        for surface in surfaces.values():
+            attach_behind_icons(surface.hwnd)
 
         user.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
         user.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
         hotkey_ok = bool(user.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_M))
         if not hotkey_ok:
             print("music widget: Ctrl+Alt+Shift+M is taken by another app", flush=True)
+
         last_attach = time.monotonic()
         last_coverage = 0.0
         covered = False
-        next_stage = 0.0
-        next_player = 0.0
-        stage_dirty = True
-        player_dirty = True
+        next_orb = 0.0
+        next_lyric = 0.0
+        next_card = 0.0
+        lyric_key = object()
+        card_key = object()
+        orb_art = None
+        orb_art_key = None
+        spin = 0.0
+        last_tick = time.monotonic()
+        orb_idle_done = False
 
         try:
             while not self._stop.is_set():
                 now = time.monotonic()
-
-                # Explorer restarts and wallpaper changes destroy WorkerW.
-                # One pump drains the thread queue for both windows.
-                if stage.pump() % 2:
-                    self._toggle_overlay(stage, player)
+                if surfaces["lyrics"].pump() % 2:
+                    self._toggle_overlay(*surfaces.values())
                     covered = False
+                    lyric_key = card_key = object()
+                    orb_idle_done = False
 
                 if not self.overlay and now - last_attach >= _REATTACH_SECONDS:
                     last_attach = now
                     from .wallpaper import get_parent
-                    if not get_parent(stage.hwnd):
-                        attach_behind_icons(stage.hwnd)
-                    if not get_parent(player.hwnd):
-                        attach_behind_icons(player.hwnd)
+                    for surface in surfaces.values():
+                        if not get_parent(surface.hwnd):
+                            attach_behind_icons(surface.hwnd)
 
                 if not self.overlay and now - last_coverage >= _COVERAGE_CHECK_SECONDS:
                     last_coverage = now
-                    covered = is_covered(stage.hwnd, (0, 0, width, height)) and is_covered(
-                        player.hwnd, (px, py, px + pw, py + ph)
-                    )
+                    covered = is_covered(surfaces["orb"].hwnd, (0, 0, width, height))
 
                 track, timeline = self._now_playing.state()
                 self._refresh_assets(track, timeline)
-
                 playing = bool(timeline and timeline.playing)
                 if covered:
                     time.sleep(0.25)
                     continue
-
-                # A track change (or its art) re-opens both taps.
                 if self._needs_frame:
                     self._needs_frame = False
-                    stage_dirty = True
-                    player_dirty = True
+                    lyric_key = card_key = object()
+                    orb_idle_done = False
 
-                # The stage also changes when playback flips, or the current
-                # lyric line / ghost fade step moves.
-                stage_key = (
-                    self._track_key, playing, self.overlay,
-                    self._stage_text_key(track, timeline),
-                )
-                if stage_key != self._stage_key:
-                    self._stage_key = stage_key
-                    stage_dirty = True
+                accent = scene.accent_from_palette(self._palette)
+                position = timeline.position_now() if timeline else 0
+                duration = timeline.duration_ms if timeline else 0
 
-                if stage_dirty and now >= next_stage:
-                    stage.push(self._render_stage(width, height, track, timeline, playing))
-                    stage_dirty = False
-                    self._has_frame = True
-                    next_stage = now + _STAGE_FRAME_SECONDS
+                # -- lyrics: only when what is lit actually changes ------------
+                if now >= next_lyric:
+                    lines = (self._lyrics.result() or {}).get("lines") or [] if track else []
+                    frame = scene.lyric_frame(lines, position, duration) if (track and lines) else None
+                    if frame != lyric_key:
+                        lyric_key = frame
+                        surfaces["lyrics"].push(scene.render_lyrics(layout.lyric_box, frame, accent, height))
+                        self._has_frame = True
+                        next_lyric = now + 1.0 / 30
+                    else:
+                        next_lyric = now + 0.02
 
-                if playing:
-                    if now < next_player:
-                        time.sleep(min(0.05, max(0.004, next_player - now)))
+                # -- card: title, art, progress --------------------------------
+                if now >= next_card:
+                    next_card = now + 1.0
+                    progress = (position / duration) if duration else 0.0
+                    key = (self._track_key, playing, int(progress * 300))
+                    if key != card_key:
+                        card_key = key
+                        if track:
+                            image = scene.render_card(layout.card_box, track.title, track.artist,
+                                                      self._cover, progress, playing, accent)
+                        else:
+                            image = Image.new("RGBA", (layout.card_box.w, layout.card_box.h), (0, 0, 0, 0))
+                        surfaces["card"].push(image)
+
+                # -- orb: every frame while playing, settle when paused --------
+                art_key = (id(self._cover), layout.orb_diameter, accent)
+                if orb_art_key != art_key:
+                    orb_art = scene.OrbArt(layout.orb_diameter, self._cover, accent)
+                    orb_art_key = art_key
+                    orb_idle_done = False
+                active = playing or max(map(abs, self._bars), default=0.0) >= 0.004
+                if track and (active or not orb_idle_done):
+                    if now < next_orb:
+                        time.sleep(min(0.02, max(0.003, next_orb - now)))
                         continue
-                    next_player = now + 1.0 / _PLAYING_FPS
-                    player.push(self._render_player(
-                        pw, ph, px, py, width, height,
-                        track, timeline, playing, audio_ok,
+                    next_orb = now + 1.0 / _PLAYING_FPS
+                    if audio_ok and playing:
+                        samples = self._audio.read_latest(2048)
+                        rate = self._audio.format.sample_rate if self._audio.format else 48000
+                        target = spectrum_bars(samples, rate, 64)
+                    else:
+                        target = [0.0] * 64
+                    self._bars = smooth_bars(self._bars, target, attack=0.55, decay=0.14 if playing else 0.35)
+                    dt = min(now - last_tick, 0.25)
+                    last_tick = now
+                    if playing:
+                        spin = (spin - dt * 9.0) % 360.0
+                    energy = sum(self._bars[:12]) / 12 if self._bars else 0.0
+                    surfaces["orb"].push(scene.render_orb(
+                        layout.orb_box, layout, orb_art, self._bars, spin, playing, energy, accent, height,
                     ))
-                    player_dirty = False
-                elif player_dirty or max(map(abs, self._bars), default=0.0) >= 0.004:
-                    # Let the bars decay to silence at the idle cadence, then
-                    # stop touching the player window until something changes.
-                    if now < next_player:
-                        time.sleep(min(0.05, max(0.004, next_player - now)))
-                        continue
-                    next_player = now + _IDLE_FRAME_SECONDS
-                    player.push(self._render_player(
-                        pw, ph, px, py, width, height,
-                        track, timeline, playing, audio_ok,
-                    ))
-                    if max(map(abs, self._bars), default=0.0) < 0.004:
-                        player_dirty = False
+                    if not active:
+                        orb_idle_done = True
+                elif not track and not orb_idle_done:
+                    surfaces["orb"].push(Image.new("RGBA", (layout.orb_box.w, layout.orb_box.h), (0, 0, 0, 0)))
+                    orb_idle_done = True
                 else:
-                    time.sleep(0.05)
+                    last_tick = now
+                    time.sleep(0.03)
         finally:
             if hotkey_ok:
                 user.UnregisterHotKey(None, HOTKEY_ID)
             from .wallpaper import detach_from_desktop
-            for surface in (player, stage):
+            for surface in surfaces.values():
                 try:
                     detach_from_desktop(surface.hwnd)
                     surface.close()
@@ -800,8 +817,8 @@ class MusicWidget:
             self._audio.stop()
             self._now_playing.stop()
 
-    def _toggle_overlay(self, stage, player) -> None:
-        """Wallpaper <-> floating overlay for both surfaces. The overlay is
+    def _toggle_overlay(self, *surfaces) -> None:
+        """Wallpaper <-> floating overlay for every layer. The overlay is
         click-through and never takes focus, so it can stay up while you work."""
         from .wallpaper import (
             WS_EX_TRANSPARENT,
@@ -813,22 +830,16 @@ class MusicWidget:
         user = ctypes.windll.user32
         self.overlay = not self.overlay
         self._needs_frame = True
-        for surface in (stage, player):
-            style = user.GetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE)
+        for surface in surfaces:
             if self.overlay:
                 detach_from_desktop(surface.hwnd)
+                style = user.GetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE)
                 user.SetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT)
                 send_to_top_most(surface.hwnd)
                 show(surface.hwnd)
             else:
-                user.SetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE, style & ~WS_EX_TRANSPARENT)
                 clear_top_most(surface.hwnd)
                 attach_behind_icons(surface.hwnd)
-        # Keep the player above the stage in both arrangements.
-        user.SetWindowPos(
-            stage.hwnd, player.hwnd, 0, 0, 0, 0,
-            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
-        )
 
     # -- assets -------------------------------------------------------------
     def _refresh_assets(self, track, timeline) -> None:
