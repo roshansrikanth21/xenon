@@ -77,6 +77,11 @@ class WebPlayer:
         for window in browsers:
             if self.address(window).startswith("https://open.spotify.com"):
                 return window
+        # A window on another virtual desktop shows UIA nothing (no address),
+        # but Spotify titles its tab "Song • Artist" while it plays.
+        for window in browsers:
+            if " • " in (window.window_text() or ""):
+                return window
         return None
 
     def _candidate_windows(self):
@@ -270,6 +275,9 @@ class WebPlayer:
         window = self.window() or self._select_spotify_tab()
         if window is None:
             return False
+        window = self._bring_here(window)
+        if window is None:
+            return False
         edit = None
         try:
             for candidate in window.descendants(control_type="Edit"):
@@ -278,20 +286,51 @@ class WebPlayer:
                     edit = candidate
                     break
         except Exception:
-            return False
-        if edit is None:
-            return False
+            edit = None
         try:
             from pywinauto.keyboard import send_keys
 
             window.set_focus()
-            edit.set_focus()
-            edit.iface_value.SetValue(url)
+            if edit is not None:
+                edit.set_focus()
+                edit.iface_value.SetValue(url)
+            else:
+                # No accessible address bar: the browser shortcut does it,
+                # but only if that window really has the keyboard now.
+                handle = self._handle(window)
+                import ctypes
+
+                if not handle or ctypes.windll.user32.GetForegroundWindow() != handle:
+                    return False
+                send_keys("^l")
+                self._sleep(0.15)
+                send_keys("".join("{%s}" % c if c in "+^%~(){}[]" else c for c in url), pause=0)
             send_keys("{ENTER}")
         except Exception:
             return False
         self._sleep(0.8)
+        self.forget()
         return True
+
+    @staticmethod
+    def _handle(window) -> int:
+        try:
+            return int(window.handle)
+        except Exception:
+            return 0
+
+    def _bring_here(self, window):
+        """None for a window on another virtual desktop: Windows cloaks it,
+        UI Automation sees nothing inside, and switching desktops for a
+        song was tried and is unreliable (Windows may refuse the switch,
+        and Opera exposes no page to press Play on even after it)."""
+        handle = self._handle(window)
+        if handle:
+            from .desktop_jump import is_cloaked
+
+            if is_cloaked(handle):
+                return None
+        return window
 
     def _select_spotify_tab(self):
         """Find a background Spotify tab in any browser window and select it.

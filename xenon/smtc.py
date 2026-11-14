@@ -214,22 +214,27 @@ class NowPlaying:
         # Several apps register sessions (WhatsApp does, for its own window).
         # Prefer one that is playing a real track (it has an artist), then
         # the current one if it plays, then anything playing, then current.
-        playing, music = None, None
+        playing, music, paused_music = None, None, None
         for session in manager.get_sessions():
             if not _has_media(session):
                 continue
-            if session.get_playback_info().playback_status.name != "PLAYING":
-                continue
-            playing = playing or session
+            is_playing = session.get_playback_info().playback_status.name == "PLAYING"
+            if is_playing:
+                playing = playing or session
             if music is None:
                 try:
                     props = await session.try_get_media_properties_async()
                     if props.artist:
-                        music = session
+                        if is_playing:
+                            music = session
+                        elif paused_music is None:
+                            paused_music = session
                 except Exception:
                     pass
         if music is not None:
             return music
+        if playing is None and paused_music is not None:
+            return paused_music      # a paused song beats an app's own window
         if current is not None and _has_media(current):
             if current.get_playback_info().playback_status.name == "PLAYING" or playing is None:
                 return current
@@ -257,11 +262,26 @@ class NowPlaying:
             album=props.album_title or "",
             app=app,
         )
+        # Browsers only report the position on play/pause/seek; it is as of
+        # ``last_updated_time``, not now. Date the reading back to then so
+        # position_now() keeps counting instead of sticking.
+        age_s = 0.0
+        try:
+            import datetime
+
+            updated = timeline_props.last_updated_time
+            if updated is not None and updated.year > 2000:
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=datetime.timezone.utc)
+                age_s = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds()
+                age_s = max(0.0, min(age_s, 24 * 3600))
+        except Exception:
+            age_s = 0.0
         timeline = Timeline(
             position_ms=position_ms,
             duration_ms=duration_ms,
             playing=playing,
-            updated_monotonic=time.monotonic(),
+            updated_monotonic=time.monotonic() - (age_s if playing else 0.0),
         )
         return track, timeline, props
 
