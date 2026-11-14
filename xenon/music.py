@@ -451,6 +451,8 @@ class MusicController:
 
     def run(self, command: MusicCommand) -> str:
         if self._client is None:
+            if "\x1f" in command.query:
+                command = MusicCommand(command.kind, " ".join(command.query.split("\x1f")).strip(), "")
             return self._without_api(command)
         try:
             return self._with_api(command)
@@ -581,6 +583,10 @@ class MusicController:
         client = self._client
         assert client is not None
         query, hint = command.query, command.hint
+        if hint == "track" and "\x1f" in query:
+            # From the dock: "title\x1fartist" -> Spotify's field search.
+            title, artist = query.split("\x1f", 1)
+            query = f'track:"{title.strip()}" artist:"{artist.strip()}"' if artist.strip() else title.strip()
         if hint in {"playlist", ""}:
             # Your own playlists beat public ones with the same name.
             best = max(
@@ -591,7 +597,8 @@ class MusicController:
             if best and _similar(best.get("name", ""), query) >= (0.6 if hint else 0.85):
                 self._play({"context_uri": best["uri"]})
                 return f"Playing your {best['name']} playlist."
-        kinds = {"playlist": "playlist", "album": "album", "artist": "artist"}.get(hint, "track,artist")
+        kinds = {"playlist": "playlist", "album": "album", "artist": "artist",
+                 "track": "track"}.get(hint, "track,artist")
         found = client.search(query, kinds, limit=5)
         if hint == "playlist":
             items = [p for p in found.get("playlists", {}).get("items", []) if p]
@@ -607,7 +614,7 @@ class MusicController:
             artists = found.get("artists", {}).get("items", [])
             tracks = found.get("tracks", {}).get("items", [])
             # "play drake" means the artist; "play hotline bling" the song.
-            if artists and (hint == "artist" or _similar(artists[0]["name"], query) >= 0.85):
+            if artists and hint != "track" and (hint == "artist" or _similar(artists[0]["name"], query) >= 0.85):
                 self._play({"context_uri": artists[0]["uri"]})
                 return f"Playing {artists[0]['name']}."
             if tracks:

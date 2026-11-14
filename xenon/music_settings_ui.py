@@ -109,7 +109,8 @@ class SettingsWindow:
         self._slider(viz, "bar_count", "Density", 36, 200, integer=True)
         self._slider(viz, "ray_length", "Reach", 0.3, 2.0)
         self._slider(viz, "glow", "Glow", 0.0, 2.0)
-        self._slider(viz, "spin_speed", "Spin speed (deg/s)", 0.0, 60.0)
+        self._slider(viz, "bounce", "Beat bounce", 0.0, 2.0)
+        self._slider(viz, "spin_speed", "Spin speed (deg/s, 0 = still)", 0.0, 60.0)
 
         self._check(lyr, "show_lyrics", "Show synced lyrics")
         self._choice(lyr, "lyric_style", "Style", ms.LYRIC_STYLES)

@@ -623,6 +623,20 @@ def _work_area_bottom(height: int) -> int:
     return height
 
 
+def _bounced(disc, scale: float, size: int):
+    """The disc scaled by ``scale`` and centred on a ``size`` canvas."""
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = max(2, int(disc.width * scale))
+    if d != disc.width:
+        disc = disc.resize((d, d), Image.BILINEAR)
+    off = (size - d) // 2
+    if off < 0:
+        disc = disc.crop((-off, -off, -off + size, -off + size))
+        off = 0
+    canvas.alpha_composite(disc, (off, off))
+    return canvas
+
+
 class _KeepFocus:
     """Playing a song may have to bring the browser forward (to load the
     Spotify tab). Afterwards put it back: minimised again if it was, else
@@ -817,7 +831,10 @@ class MusicWidget:
 
         self._history = MusicHistory()
         from .music_suggest import Suggester
+        from .music_cover import CoverFinder
         self._suggester = Suggester()
+        self._covers = CoverFinder()
+        self._hires_key = None
         self._suggest_for = None
         self._dock_rows: list = []
         self._controller = None
@@ -943,7 +960,9 @@ class MusicWidget:
         settings = self._settings.current
         layout = scene.scene_layout(width, height, settings.side, settings.orb_size)
         art_d = layout.orb_diameter
-        disc_box = scene.Box(int(layout.orb_cx - art_d / 2), int(layout.orb_cy - art_d / 2), art_d, art_d)
+        # Room round the disc for its beat bounce (it scales up to ~8%).
+        disc_w = int(art_d * 1.1) | 1
+        disc_box = scene.Box(int(layout.orb_cx - disc_w / 2), int(layout.orb_cy - disc_w / 2), disc_w, disc_w)
         floor = _work_area_bottom(height)
         dock_full = dock.dock_geometry(width, height, dock.MAX_ROWS, floor)
         if settings.show_dock and settings.side != "left":
@@ -1041,9 +1060,9 @@ class MusicWidget:
                 self._refresh_assets(track, timeline)
                 playing = bool(timeline and timeline.playing)
                 # Record once the art has settled (players publish it late).
-                if (track and recorded != (self._track_key, self._art_key)
+                if (track and recorded != (self._track_key, id(self._cover))
                         and now - self._track_changed_at > 2.5):
-                    recorded = (self._track_key, self._art_key)
+                    recorded = (self._track_key, id(self._cover))
                     try:
                         self._history.record(track.title, track.artist, track.app, self._cover)
                     except Exception:
@@ -1129,11 +1148,18 @@ class MusicWidget:
                     press_glow = max(0.0, press_glow - step * 2)
                     # The open panel shows what the card shows: hand over.
                     surfaces["card"].set_opacity(255 * settings.opacity * (1.0 - dock.ease_out_cubic(openness)))
-                    drawn = (round(openness, 3), hover, id(dock_content), round(press_glow, 2), accent)
+                    # The corner record turns while music plays (about
+                    # 15 rpm, redrawn ~20 times a second).
+                    if playing:
+                        self._dock_spin = (getattr(self, "_dock_spin", 0.0) + step * 0.32 * 90.0) % 360.0
+                    spin = getattr(self, "_dock_spin", 0.0)
+                    drawn = (round(openness, 3), hover, id(dock_content), round(press_glow, 2), accent,
+                             int(spin / 4.5))
                     if drawn != dock_drawn:
                         dock_drawn = drawn
                         surfaces["dock"].push(dock_renderer.render(
-                            dock_geom, dock_content, dock.ease_out_cubic(openness), hover, accent, press_glow))
+                            dock_geom, dock_content, dock.ease_out_cubic(openness), hover, accent, press_glow,
+                            spin))
 
                 # -- lyrics: only when what is lit actually changes ------------
                 if now >= next_lyric:
@@ -1203,16 +1229,25 @@ class MusicWidget:
                     if playing:
                         self._spin = (self._spin - dt * settings.spin_speed) % 360.0
                     energy = sum(self._bars[:12]) / 12 if self._bars else 0.0
+                    # Beat bounce: a kick is bass well above its recent
+                    # average; the pulse jumps on it and eases back down.
+                    bass = sum(self._bars[:6]) / 6 if self._bars else 0.0
+                    self._bass_avg = 0.92 * getattr(self, "_bass_avg", bass) + 0.08 * bass
+                    kick = max(0.0, bass - self._bass_avg * 1.15) * 4.0 if playing else 0.0
+                    self._pulse = max(min(1.0, kick), getattr(self, "_pulse", 0.0) * (0.82 ** (dt * 30)))
+                    scale = 1.0 + 0.07 * settings.bounce * self._pulse
                     box = layout.orb_box
                     surfaces["ring"].push_raw(scene.render_ring_bgra(
                         box, layout, self._bars, playing, energy, accent, height, settings,
-                        intro=intro if track else 0.0, diameter=art_d,
+                        intro=intro if track else 0.0, diameter=int(art_d * scale),
                     ), box.w, box.h)
-                    # The disc turns a fraction of a degree per frame: half
-                    # rate is indistinguishable and saves a third of the work.
-                    if disc_frame % 2 == 0 or fading or not playing:
+                    bounce_key = round(scale, 3)
+                    if (bounce_key != getattr(self, "_disc_drawn", None) or fading or not playing
+                            or (settings.spin_speed and disc_frame % 2 == 0)):
+                        self._disc_drawn = bounce_key
                         disc = scene.render_disc(orb_art, self._spin, playing)
-                        surfaces["disc"].push(disc if disc is not None else blank["disc"])
+                        surfaces["disc"].push(_bounced(disc, scale, disc_box.w) if disc is not None
+                                              else blank["disc"])
                     disc_frame += 1
                     if not active:
                         orb_idle_done = True
@@ -1278,10 +1313,12 @@ class MusicWidget:
             def action(entry=entry):
                 from .music import MusicCommand, MusicController
 
-                if self._controller is None:
-                    self._controller = MusicController.from_env()
+                # Fresh each time, so a `xenon spotify login` done while the
+                # widget runs is picked up.
+                self._controller = MusicController.from_env()
                 with _KeepFocus():
-                    reply = self._controller.run(MusicCommand("play", f"{entry.title} {entry.artist}".strip()))
+                    reply = self._controller.run(
+                        MusicCommand("play", f"{entry.title}\x1f{entry.artist}", "track"))
                 print(f"music widget: {reply}", flush=True)
         else:
             return False
@@ -1344,6 +1381,19 @@ class MusicWidget:
         key = (track.title, track.artist, track.album)
         art_key = len(track.art or b"")
         if key == self._track_key:
+            if self._hires_key != key:
+                hires = self._covers.take(track.title, track.artist)
+                if hires is not None:
+                    # The full-size cover arrived: it beats the thumbnail.
+                    self._hires_key = key
+                    self._cover = hires
+                    self._palette = palette_from_image(hires)
+                    self._art_key = art_key
+                    self._needs_frame = True
+                    return
+            elif art_key != self._art_key:
+                self._art_key = art_key
+                return
             if art_key == self._art_key:
                 return
             # The art often lands a poll or two after the title: take it then.
@@ -1370,6 +1420,9 @@ class MusicWidget:
         self._palette = (
             palette_from_image(cover) if cover else [(120, 130, 160)]
         )
+        self._hires_key = None
+        if cover is None or min(cover.size) < 400:
+            self._covers.request(track.title, track.artist)
         self._lyrics.request(
             {"title": track.title, "artist": track.artist, "album": track.album, "app": track.app},
             timeline.duration_ms if timeline else 0,

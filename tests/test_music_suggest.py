@@ -82,3 +82,88 @@ class DockSuggestedRowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverFinderTests(unittest.TestCase):
+    def test_itunes_match_upscales_url_and_checks_host(self):
+        from xenon.music_cover import CoverFinder
+
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            if url.startswith("https://itunes.apple.com/search"):
+                return json.dumps({"results": [
+                    {"trackName": "Other", "artistName": "Nobody", "artworkUrl100": "https://x.mzstatic.com/a/100x100bb.jpg"},
+                    {"trackName": "A Little Death", "artistName": "The Neighbourhood",
+                     "artworkUrl100": "https://is1-ssl.mzstatic.com/a/100x100bb.jpg"},
+                ]}).encode()
+            if url == "https://is1-ssl.mzstatic.com/a/1000x1000bb.jpg":
+                buf = io.BytesIO()
+                Image.new("RGB", (1000, 1000), "red").save(buf, "PNG")
+                return buf.getvalue()
+            raise AssertionError(url)
+
+        f = CoverFinder(fetch=fetch, spotify_now=lambda: None)
+        image = f.find("A Little Death (Remastered)", "The Neighbourhood")
+        self.assertEqual(image.size, (640, 640))
+
+    def test_no_match_and_foreign_host_give_none(self):
+        from xenon.music_cover import CoverFinder
+
+        f = CoverFinder(fetch=lambda url: json.dumps({"results": [
+            {"trackName": "Boot Camp", "artistName": "TJR", "artworkUrl100": "https://evil.example/100x100bb.jpg"}]}).encode(),
+            spotify_now=lambda: None)
+        self.assertIsNone(f.find("Boot Camp", "TJR"))           # host not allowed
+        self.assertIsNone(f.find("Something else", "Nobody"))   # no match
+
+    def test_spotify_item_preferred_when_it_matches(self):
+        from xenon.music_cover import CoverFinder
+
+        now = {"item": {"name": "Sweater Weather", "artists": [{"name": "The Neighbourhood"}],
+                        "album": {"images": [{"url": "https://i.scdn.co/image/big", "width": 640},
+                                             {"url": "https://i.scdn.co/image/small", "width": 64}]}}}
+        seen = []
+
+        def fetch(url):
+            seen.append(url)
+            buf = io.BytesIO()
+            Image.new("RGB", (640, 640), "blue").save(buf, "PNG")
+            return buf.getvalue()
+
+        f = CoverFinder(fetch=fetch, spotify_now=lambda: now)
+        self.assertEqual(f.find("Sweater Weather", "The Neighbourhood").size, (640, 640))
+        self.assertEqual(seen, ["https://i.scdn.co/image/big"])
+
+
+class VinylDockAndBounceTests(unittest.TestCase):
+    def test_spinning_record_renders_and_moves(self):
+        geom = dock.dock_geometry(1920, 1080, 0)
+        content = dock.DockContent("t", "a", True, Image.new("RGB", (64, 64), "red"), [])
+        r = dock.DockRenderer()
+        a = r.render(geom, content, 0.0, None, spin=0.0)
+        b = r.render(geom, content, 0.0, None, spin=45.0)
+        self.assertNotEqual(a.tobytes(), b.tobytes())
+
+    def test_bounced_keeps_canvas_size(self):
+        import sys
+        if sys.platform != "win32":
+            self.skipTest("Windows only module")
+        from xenon.music_widget import _bounced
+
+        disc = Image.new("RGBA", (100, 100), (255, 0, 0, 255))
+        for s in (1.0, 1.07, 1.3):
+            self.assertEqual(_bounced(disc, s, 111).size, (111, 111))
+
+    def test_v4_migration_stops_the_old_spin(self):
+        import os
+        import tempfile
+        from xenon import music_settings as ms
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.json")
+            with open(path, "w") as f:
+                json.dump({"version": 3, "spin_speed": 9.0}, f)
+            self.assertEqual(ms.load(path).spin_speed, 0.0)
+            ms.save(ms.coerce({"spin_speed": 9.0}), path)
+            self.assertEqual(ms.load(path).spin_speed, 9.0)

@@ -233,8 +233,10 @@ class NowPlaying:
                     pass
         if music is not None:
             return music
-        if playing is None and paused_music is not None:
-            return paused_music      # a paused song beats an app's own window
+        if paused_music is not None:
+            # A paused song beats an app's own window, even one that claims
+            # to be "playing" (WhatsApp registers its window as media).
+            return paused_music
         if current is not None and _has_media(current):
             if current.get_playback_info().playback_status.name == "PLAYING" or playing is None:
                 return current

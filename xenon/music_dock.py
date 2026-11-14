@@ -113,6 +113,48 @@ def ease_out_back(t: float, s: float = 1.4) -> float:
 # ------------------------------------------------------------------ drawing
 
 
+def _vinyl_parts(d: int, cover: Image.Image | None) -> tuple[Image.Image, Image.Image | None]:
+    """The corner disc as a record: a static base (soft shadow + grooves)
+    and the cover label that spins on it."""
+    from .music_widget import build_vinyl
+
+    size = int(d * 1.5)
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    c = size / 2
+    shadow = Image.new("L", (size, size), 0)
+    oy = d * 0.04
+    ImageDraw.Draw(shadow).ellipse((c - d * 0.5, c - d * 0.5 + oy, c + d * 0.5, c + d * 0.5 + oy), fill=160)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(d / 14))
+    dark = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    dark.putalpha(shadow)
+    out.alpha_composite(dark)
+    record, label = build_vinyl(d, cover)
+    out.alpha_composite(record, (int(c - d / 2), int(c - d / 2)))
+    # a faint diagonal sheen across the grooves sells the vinyl
+    sheen = Image.new("L", (d, d), 0)
+    sd = ImageDraw.Draw(sheen)
+    sd.pieslice((0, 0, d - 1, d - 1), 200, 250, fill=26)
+    sd.pieslice((0, 0, d - 1, d - 1), 20, 70, fill=18)
+    sheen = sheen.filter(ImageFilter.GaussianBlur(d / 30))
+    mask = Image.new("L", (d, d), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, d - 1, d - 1), fill=255)
+    from PIL import ImageChops
+
+    sheen = ImageChops.multiply(sheen, mask)
+    light = Image.new("RGBA", (d, d), (255, 255, 255, 0))
+    light.putalpha(sheen)
+    out.alpha_composite(light, (int(c - d / 2), int(c - d / 2)))
+    if label is None:
+        # no cover: a plain dark label so it still reads as a record
+        lsize = int(d * 0.4)
+        label = Image.new("RGBA", (lsize, lsize), (0, 0, 0, 0))
+        ImageDraw.Draw(label).ellipse((0, 0, lsize - 1, lsize - 1), fill=(48, 50, 60, 255))
+    hole = max(3, d // 40)
+    ImageDraw.Draw(label).ellipse((label.width / 2 - hole, label.height / 2 - hole,
+                                   label.width / 2 + hole, label.height / 2 + hole), fill=(8, 8, 10, 255))
+    return out, label
+
+
 def _disc_image(d: int, cover: Image.Image | None, accent) -> Image.Image:
     size = int(d * 1.5)
     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -275,12 +317,16 @@ class DockRenderer:
         self._parts_key = None
         self._parts: list[tuple[Image.Image, tuple[int, int], int]] = []
 
-    def _disc_for(self, geom: DockGeometry, cover, accent) -> Image.Image:
-        key = (id(cover), geom.disc, tuple(accent))
+    def _disc_for(self, geom: DockGeometry, cover, accent, spin: float = 0.0) -> Image.Image:
+        key = (id(cover), geom.disc)
         if key != self._disc_key:
-            self._disc = _disc_image(geom.disc, cover, accent)
+            self._disc, self._label = _vinyl_parts(geom.disc, cover)
             self._disc_key = key
-        return self._disc
+        label = self._label.rotate(-spin, resample=Image.BICUBIC) if spin else self._label
+        disc = self._disc.copy()
+        off = ((disc.width - label.width) // 2, (disc.height - label.height) // 2)
+        disc.alpha_composite(label, off)
+        return disc
 
     def _panel_parts(self, geom: DockGeometry, content: DockContent, hover: str | None, accent):
         """Panel pieces in dock-local coordinates, each with a stagger index."""
@@ -350,7 +396,8 @@ class DockRenderer:
         return parts
 
     def render(self, geom: DockGeometry, content: DockContent, openness: float,
-               hover: str | None, accent=(255, 255, 255), press: float = 0.0) -> Image.Image:
+               hover: str | None, accent=(255, 255, 255), press: float = 0.0,
+               spin: float = 0.0) -> Image.Image:
         """``openness`` 0..1 drives the fan-out: each piece slides out from
         the disc and fades in, a few milliseconds after the one before."""
         out = Image.new("RGBA", (geom.box.w, geom.box.h), (0, 0, 0, 0))
@@ -369,7 +416,7 @@ class DockRenderer:
                     piece.putalpha(img.getchannel("A").point(lambda v, a=alpha: int(v * a)))
                 _paste(out, piece, x + dx, y + dy)
 
-        disc = self._disc_for(geom, content.cover, accent)
+        disc = self._disc_for(geom, content.cover, accent, spin)
         scale = 1.0 + 0.06 * openness - 0.05 * press
         if abs(scale - 1.0) > 0.004:
             size = max(2, int(disc.width * scale))

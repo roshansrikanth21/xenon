@@ -38,6 +38,7 @@ _RANGES = {
     "unsung_opacity": (0.0, 1.0),
     "glow": (0.0, 2.0),
     "spin_speed": (0.0, 60.0),
+    "bounce": (0.0, 2.0),
     "sensitivity": (0.3, 3.0),
     "fps": (10, 60),
     "bar_count": (36, 200),
@@ -75,7 +76,8 @@ class MusicSettings:
     ray_length: float = 1.0
     sensitivity: float = 1.0
     smoothing: float = 0.5           # 0 = twitchy, 0.95 = very slow fall
-    spin_speed: float = 9.0          # degrees per second
+    spin_speed: float = 0.0          # degrees per second (0: the disc stays still)
+    bounce: float = 1.0              # how hard the disc pulses on the beat
     fps: int = 30
     halo: bool = False               # soft light behind the disc (off: looked cheap)
     backdrop: float = 0.0            # dark pool of shade behind the orb
@@ -117,7 +119,7 @@ def parse_color(text: str) -> tuple[int, int, int] | None:
         return None
 
 
-SETTINGS_VERSION = 3
+SETTINGS_VERSION = 4
 
 # The look from the reference clip: a big lit album globe, a dense ring of
 # long white rays, no halo, poster lyrics. Applied over the current settings
@@ -125,7 +127,7 @@ SETTINGS_VERSION = 3
 VIDEO_LOOK = {
     "disc": "glow", "visualizer": "rays", "bar_count": 120, "ray_length": 1.0,
     "orb_size": 1.0, "opacity": 1.0, "accent": "white", "halo": False,
-    "backdrop": 0.0, "glow": 0.6, "fps": 30, "spin_speed": 9.0,
+    "backdrop": 0.0, "glow": 0.6, "fps": 30, "spin_speed": 0.0, "bounce": 1.0,
     "sensitivity": 1.0, "smoothing": 0.5,
     "show_lyrics": True, "lyric_style": "poster", "lyric_case": "upper",
     "lyric_align": "left", "lyric_size": 1.0, "show_upcoming": True,
@@ -151,6 +153,10 @@ def _migrate(data: dict) -> dict:
                 data.pop("fps")
         if data.get("halo") is True:
             data.pop("halo")
+    if version < 4:
+        data = dict(data)
+        if data.get("spin_speed") == 9.0:     # v4: the disc stays still and bounces
+            data.pop("spin_speed")
     return data
 
 
