@@ -487,6 +487,18 @@ class LyricAnimator:
     def frame(self, lines, position_ms: int, duration_ms: int, box: Box, accent=(255, 255, 255),
               screen_height: int = 1440, settings=None):
         """(key, image): ``key`` changes only when the picture would."""
+        key, img, at = self.frame_region(lines, position_ms, duration_ms, box, accent, screen_height, settings)
+        if img is None:
+            return key, None
+        out = Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0))
+        out.paste(img, at)
+        return key, out
+
+    def frame_region(self, lines, position_ms: int, duration_ms: int, box: Box, accent=(255, 255, 255),
+                     screen_height: int = 1440, settings=None):
+        """(key, image, (x, y)): just the part of the layer that holds
+        anything, and where it goes. Everything else is transparent; the
+        widget writes only this block, never a full-size frame."""
         st = _settings(settings)
         accent = tuple(accent)
         motion = getattr(st, "lyric_motion", "wipe")
@@ -498,12 +510,10 @@ class LyricAnimator:
         index = line_at(lines, position_ms)
         if index < 0:
             if not (lines and lines[0][0] - position_ms < 2500):
-                return None, None
+                return None, None, (0, 0)
             key = ("pre", lines[0][1].strip(), box, accent, screen_height, st)
             parts = self._get(("", lines[0][1].strip(), "", box, accent, screen_height, st))
-            out = Image.new("RGBA", parts["full"], (0, 0, 0, 0))
-            out.paste(parts["empty"], parts["origin"])
-            return key, out
+            return key, parts["empty"], parts["origin"]
 
         start, text, upcoming, previous = self._line(lines, index)
         end = lines[index + 1][0] if index + 1 < len(lines) else (duration_ms or start + 5000)
@@ -527,16 +537,41 @@ class LyricAnimator:
         if line_motion != "cut" and index > 0 and since < LINE_EXIT_MS:
             exit_t = round(max(0.0, since / LINE_EXIT_MS) * self.STEPS) / self.STEPS
         key = (index, text, q, entry, exit_t, motion, line_motion, round(lift_k, 2)) + static
+        # Something is mid-animation (a word sweeping, a line coming or going).
+        self.active = entry < 1.0 or exit_t < 1.0 or any(0.0 < v < 1.0 for v in q)
 
         size = parts["size"]
-        line = parts["empty"].copy()
         lift_px = size * 0.06 * lift_k
-        for (faint, lit, x, y), v in zip(parts["sprites"], q):
-            img, k = self._word(faint, lit, v, motion, size)
-            _paste_clipped(line, img, x, int(round(y - lift_px * k)))
+        # The line with every settled word in place (sung ones lit and
+        # lifted, unsung faint) is cached; a frame only adds the word(s)
+        # still sweeping. Compositing every word each frame was most of
+        # the cost.
+        states = tuple(2 if v >= 1.0 else (0 if v <= 0.0 else 1) for v in q)
+        bkey = (id(parts), states, round(lift_px, 1))
+        settled = self._settled.get(bkey) if hasattr(self, "_settled") else None
+        if settled is None:
+            settled = parts["empty"].copy()
+            for (faint, lit, x, y), state in zip(parts["sprites"], states):
+                if state == 0:
+                    _paste_clipped(settled, faint, x, y)
+                elif state == 2:
+                    _paste_clipped(settled, lit, x, int(round(y - lift_px)))
+            self._settled = {bkey: settled}
+        if 1 in states:
+            line = settled.copy()
+            for (faint, lit, x, y), v, state in zip(parts["sprites"], q, states):
+                if state == 1:
+                    img, k = self._word(faint, lit, v, motion, size)
+                    _paste_clipped(line, img, x, int(round(y - lift_px * k)))
+        else:
+            line = settled
 
-        out = Image.new("RGBA", parts["full"], (0, 0, 0, 0))
-        under = False
+        bx, by = parts["origin"]
+        if entry < 1.0:
+            e = _ease_out(entry)
+            rise = int((1 - e) * size * 0.55) if line_motion == "slide" else 0
+            line, by = _scale_alpha(line, e), by + rise
+        old_img = None
         if exit_t < 1.0:
             ps, pt, pu, pp = self._line(lines, index - 1)
             if pt:
@@ -544,21 +579,17 @@ class LyricAnimator:
                 t = _ease_out(exit_t)
                 drift = int(t * old["size"] * 1.1) if line_motion == "slide" else 0
                 ox, oy = old["origin"]
-                _paste_clipped(out, _scale_alpha(old["words_lit"], (1.0 - t) ** 2.5), ox, oy - drift)
-                under = True
-        bx, by = parts["origin"]
-        if entry < 1.0:
-            e = _ease_out(entry)
-            rise = int((1 - e) * size * 0.55) if line_motion == "slide" else 0
-            line, by = _scale_alpha(line, e), by + rise
-        if under:
-            _paste_clipped(out, line, bx, by)
-        else:
-            # Nothing underneath: a plain paste (no blend, no temporary copies).
-            if by + line.height > out.height:
-                line = line.crop((0, 0, line.width, max(1, out.height - by)))
-            out.paste(line, (bx, by))
-        return key, out
+                old_img, old_at = _scale_alpha(old["words_lit"], (1.0 - t) ** 2.5), (ox, oy - drift)
+        if old_img is None:
+            return key, line, (bx, by)
+        # Old line drifting away under the new one: one canvas over both.
+        x0, y0 = min(bx, old_at[0]), min(by, old_at[1])
+        x1 = max(bx + line.width, old_at[0] + old_img.width)
+        y1 = max(by + line.height, old_at[1] + old_img.height)
+        canvas = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+        canvas.paste(old_img, (old_at[0] - x0, old_at[1] - y0))
+        canvas.alpha_composite(line, (bx - x0, by - y0))
+        return key, canvas, (x0, y0)
 
 
 def _wrap(words: list[str], fnt, max_width: int, draw) -> list[list[int]]:
@@ -1094,6 +1125,32 @@ def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: 
 _RING_LAYER: dict = {}
 _CORNER_MASKS: dict = {}
 CORNERS = ("tl", "tr", "bl", "br")
+EDGES = ("top", "bottom", "left", "right")
+
+
+def edge_glow(w: int, h: int, side: str, accent=(255, 255, 255)) -> Image.Image:
+    """A band of soft light along one whole screen edge, fading inward, in
+    the accent colour. Where two bands meet the corner glows brightest."""
+    key = ("edge", w, h, side)
+    mask = _CORNER_MASKS.get(key)
+    if mask is None:
+        import numpy as np
+
+        if side in ("top", "bottom"):
+            t = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
+            t = t if side == "top" else t[::-1]
+            alpha = np.repeat((np.clip(1.0 - t, 0, 1) ** 2.2) * 190.0, w, axis=1)
+        else:
+            t = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
+            t = t if side == "left" else t[:, ::-1]
+            alpha = np.repeat((np.clip(1.0 - t, 0, 1) ** 2.2) * 190.0, h, axis=0)
+        mask = Image.fromarray(alpha.astype(np.uint8), "L")
+        if len(_CORNER_MASKS) > 8:
+            _CORNER_MASKS.clear()
+        _CORNER_MASKS[key] = mask
+    img = Image.new("RGBA", (w, h), tuple(accent) + (0,))
+    img.putalpha(mask)
+    return img
 
 
 def corner_glow(w: int, h: int, corner: str, accent=(255, 255, 255)) -> Image.Image:

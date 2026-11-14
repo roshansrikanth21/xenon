@@ -81,6 +81,32 @@ class PopOutTests(unittest.TestCase):
         self.assertEqual((cx, cy, d), (*g.disc_center, g.disc))
         self.assertEqual(dock.hit(g, ox, oy, True), "disc")
 
+    def test_edge_glow_and_lyric_layer_position(self):
+        top = scene.edge_glow(300, 80, "top", (10, 200, 30)).getchannel("A")
+        self.assertGreater(top.getpixel((150, 0)), 150)
+        self.assertEqual(top.getpixel((150, 79)), 0)
+        self.assertEqual(top.getpixel((0, 0)), top.getpixel((299, 0)))      # full length, even
+        right = scene.edge_glow(60, 200, "right").getchannel("A")
+        self.assertGreater(right.getpixel((59, 100)), right.getpixel((0, 100)))
+        from xenon.lyric_layer import position_now
+
+        st = {"pos": 1000, "updated": 10.0, "playing": True, "duration": 1500}
+        self.assertEqual(position_now(st, now=10.25), 1250)
+        self.assertEqual(position_now(st, now=20.0), 1500)                 # capped at the end
+        self.assertEqual(position_now({**st, "playing": False}, now=20.0), 1000)
+
+    def test_frame_region_matches_the_full_frame(self):
+        box = scene.Box(0, 0, 900, 300)
+        st = ms.MusicSettings()
+        anim = scene.LyricAnimator()
+        lines = [(0, "Hello there"), (2000, "Wonderful night"), (5000, "x")]
+        for pos in (2050, 2600, 4000):
+            key, img, at = anim.frame_region(lines, pos, 6000, box, (255, 255, 255), 1080, st)
+            _, full = anim.frame(lines, pos, 6000, box, (255, 255, 255), 1080, st)
+            canvas = Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0))
+            canvas.paste(img, at)
+            self.assertEqual(canvas.tobytes(), full.tobytes())
+
     def test_corner_glow_is_brightest_in_its_corner(self):
         img = scene.corner_glow(200, 120, "br", (255, 100, 50))
         a = img.getchannel("A")

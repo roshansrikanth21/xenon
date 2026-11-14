@@ -359,6 +359,102 @@ def font_for(text: str, size: int, bold: bool = False) -> ImageFont.FreeTypeFont
 _registered_classes: dict = {}
 
 
+class _LyricProcess:
+    """Stand-in for the lyric layer's window, which lives in a child process
+    (``lyric_layer``) so its animation gets a core of its own. Offers the
+    few surface calls the scene makes; everything else is a message."""
+
+    def __init__(self, box, screen_height: int) -> None:
+        self.box = box
+        self.screen_height = screen_height
+        self.hwnd = 0
+        self.opacity = 255
+        self._sent_opacity = None
+        self._conn = None
+        self._proc = None
+
+    def create(self) -> bool:
+        import multiprocessing
+
+        from . import lyric_layer
+
+        try:
+            ctx = multiprocessing.get_context("spawn")
+            self._conn, child = ctx.Pipe()
+            self._proc = ctx.Process(target=lyric_layer.run, args=(child, self.box, self.screen_height),
+                                     daemon=True, name="xenon-lyrics")
+            self._proc.start()
+            child.close()
+            if self._conn.poll(25):
+                msg = self._conn.recv()
+                if msg[0] == "ready":
+                    self.hwnd = msg[1]
+                    return True
+        except Exception as error:
+            print(f"music widget: lyric process failed ({error}); drawing lyrics in-process", flush=True)
+        self.close()
+        return False
+
+    def send(self, *msg) -> None:
+        try:
+            if self._conn is not None:
+                self._conn.send(msg)
+        except (OSError, EOFError, ValueError):
+            pass
+
+    def place(self, mode: str) -> None:
+        """Attach / float the window, and wait (briefly) until it is done so
+        the layers above it can be stacked after it."""
+        self.send("place", mode)
+        try:
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and self._conn is not None:
+                if self._conn.poll(0.05) and self._conn.recv()[0] == "placed":
+                    if mode == "float":
+                        # A background process can't raise its own window;
+                        # stack it from here, in order with the other layers.
+                        from .wallpaper import send_to_top_most
+                        send_to_top_most(self.hwnd)
+                    return
+        except (OSError, EOFError):
+            pass
+
+    def set_opacity(self, value) -> None:
+        value = max(0, min(255, int(value)))
+        self.opacity = value
+        if value != self._sent_opacity:
+            self._sent_opacity = value
+            self.send("opacity", value)
+
+    def push(self, image) -> bool:
+        return True
+
+    def push_raw(self, data, width: int, height: int) -> bool:
+        self.send("sleep", True)            # the only raw push the scene sends it
+        return True
+
+    def _release_push_gdi(self) -> None:
+        pass
+
+    def pump(self) -> int:
+        return 0
+
+    def close(self) -> None:
+        self.send("quit")
+        proc = self._proc
+        if proc is not None:
+            proc.join(1.5)
+            if proc.is_alive():
+                proc.terminate()
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except OSError:
+                pass
+        self._conn = self._proc = None
+        self.hwnd = 0
+
+
 class _LayeredSurface:
     """A borderless per-pixel-alpha window, driven from the thread that owns
     it. Deliberately bare Win32 (no Tk): the widget is re-parented into the
@@ -553,10 +649,67 @@ class _LayeredSurface:
             screen_dc = user.GetDC(None)
             self._gdi_dc = gdi.CreateCompatibleDC(screen_dc)
             user.ReleaseDC(None, screen_dc)
+        if not (self._bits and self._gdi_dc):
+            return False
+        ctypes.memmove(self._bits, data, width * height * 4)
+        self._region = (0, 0, width, height)
+        return self._present(width, height)
+
+    def push_region(self, image, at=(0, 0)) -> bool:
+        """For a mostly-empty layer: write only ``image`` at ``at`` into the
+        window's pixel buffer (clearing the last frame's block first) and
+        present. A full-size frame cost 7 ms just to convert; this block is
+        a fraction of it, copied with one numpy slice."""
+        import numpy as np
+
+        w, h = self.width, self.height
+        last = getattr(self, "_region", None)
+        if self._push_size != (w, h) or not self._bits or last is None:
+            full = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            if image is not None:
+                full.paste(image, at)
+            ok = self.push(full)
+            self._region = self._clip(image, at)
+            return ok
+        buf = np.ctypeslib.as_array((ctypes.c_uint8 * (w * h * 4)).from_address(self._bits)).reshape(h, w * 4)
+        x0, y0, x1, y1 = last
+        if x1 > x0 and y1 > y0:
+            buf[y0:y1, x0 * 4:x1 * 4] = 0
+        rect = self._clip(image, at)
+        x0, y0, x1, y1 = rect
+        if x1 > x0 and y1 > y0:
+            ix, iy = x0 - at[0], y0 - at[1]
+            part = image.crop((ix, iy, ix + x1 - x0, iy + y1 - y0)) if (ix or iy or x1 - x0 != image.width
+                                                                        or y1 - y0 != image.height) else image
+            if part.mode != "RGBA":
+                part = part.convert("RGBA")
+            buf[y0:y1, x0 * 4:x1 * 4] = np.frombuffer(part.tobytes("raw", "BGRa"), np.uint8).reshape(
+                y1 - y0, (x1 - x0) * 4)
+        self._region = rect
+        return self._present(w, h)
+
+    def _clip(self, image, at) -> tuple:
+        if image is None:
+            return (0, 0, 0, 0)
+        x0, y0 = max(0, at[0]), max(0, at[1])
+        x1, y1 = min(self.width, at[0] + image.width), min(self.height, at[1] + image.height)
+        return (x0, y0, max(x0, x1), max(y0, y1))
+
+    def _present(self, width: int, height: int) -> bool:
+        user = ctypes.windll.user32
+        gdi = ctypes.windll.gdi32
+
+        class BLENDFUNCTION(ctypes.Structure):
+            _fields_ = [
+                ("BlendOp", wintypes.BYTE),
+                ("BlendFlags", wintypes.BYTE),
+                ("SourceConstantAlpha", wintypes.BYTE),
+                ("AlphaFormat", wintypes.BYTE),
+            ]
+
         ok = False
         if self._bits and self._gdi_dc:
             previous = gdi.SelectObject(self._gdi_dc, self._bitmap)
-            ctypes.memmove(self._bits, data, width * height * 4)
 
             screen_dc = user.GetDC(None)
             # pptDst = NULL keeps the window where it is; passing a position
@@ -592,6 +745,7 @@ class _LayeredSurface:
             self.hwnd, None, None, None, None, None, 0, ctypes.byref(blend), ULW_ALPHA)
 
     def _release_push_gdi(self) -> None:
+        self._region = None
         gdi = ctypes.windll.gdi32
         if self._bitmap:
             gdi.DeleteObject(self._bitmap)
@@ -1001,13 +1155,25 @@ class MusicWidget:
             card = layout.card_box
             if card.x < clear:
                 layout = _replace(layout, card_box=scene.Box(clear, card.y, card.w, card.h))
-        corner_names = [f"corner_{c}" for c in scene.CORNERS]
+        # Beat glow round the screen: full-length bands on all four edges
+        # (or just the corners), drawn once per colour; the bass sets their
+        # opacity every ring frame.
+        if settings.glow_shape == "corners":
+            cw, ch = int(width * 0.26), int(height * 0.5)
+            glow_boxes = {
+                "corner_tl": scene.Box(0, 0, cw, ch), "corner_tr": scene.Box(width - cw, 0, cw, ch),
+                "corner_bl": scene.Box(0, floor - ch, cw, ch),
+                "corner_br": scene.Box(width - cw, floor - ch, cw, ch)}
+        else:
+            bh, bw = int(height * 0.17), int(width * 0.075)
+            glow_boxes = {
+                "edge_top": scene.Box(0, 0, width, bh), "edge_bottom": scene.Box(0, floor - bh, width, bh),
+                "edge_left": scene.Box(0, 0, bw, floor), "edge_right": scene.Box(width - bw, 0, bw, floor)}
+        corner_names = list(glow_boxes)
         order = corner_names + ["halo", "ring", "disc", "lyrics", "card"] + (
             ["dock", "vinyl"] if settings.show_dock else [])
-        cw, ch = int(width * 0.26), int(height * 0.5)
         boxes = {
-            "corner_tl": scene.Box(0, 0, cw, ch), "corner_tr": scene.Box(width - cw, 0, cw, ch),
-            "corner_bl": scene.Box(0, floor - ch, cw, ch), "corner_br": scene.Box(width - cw, floor - ch, cw, ch),
+            **glow_boxes,
             "halo": layout.orb_box, "ring": layout.orb_box, "disc": disc_box,
             "lyrics": layout.lyric_box, "card": layout.card_box, "dock": dock_full.box,
             "vinyl": dock.vinyl_box(dock_full),
@@ -1015,6 +1181,12 @@ class MusicWidget:
         surfaces: dict[str, _LayeredSurface] = {}
         for name in order:
             box = boxes[name]
+            if name == "lyrics" and os.environ.get("XENON_LYRICS_INPROCESS") != "1":
+                remote = _LyricProcess(box, height)
+                if remote.create():
+                    remote.set_opacity(255 * settings.opacity)
+                    surfaces[name] = remote
+                    continue
             surface = _LayeredSurface(box.w, box.h, x=box.x, y=box.y)
             if not surface.create():
                 for made in surfaces.values():
@@ -1046,10 +1218,13 @@ class MusicWidget:
                 target=self._dock_loop, daemon=True, name="xenon-music-dock",
                 args=(share, dock_stop, surfaces, boxes, pointer, dock_full, width, height, floor))
             dock_thread.start()
+        lyric_proc = surfaces["lyrics"] if isinstance(surfaces["lyrics"], _LyricProcess) else None
+        lyric_sent: dict = {}
         lyric_thread = threading.Thread(
             target=self._lyric_loop, daemon=True, name="xenon-music-lyrics",
             args=(share, dock_stop, surfaces["lyrics"], blank["lyrics"], height))
-        lyric_thread.start()
+        if lyric_proc is None:
+            lyric_thread.start()
 
         last_attach = time.monotonic()
         last_coverage = 0.0
@@ -1073,7 +1248,7 @@ class MusicWidget:
         try:
             while not self._stop.is_set():
                 now = time.monotonic()
-                if surfaces["lyrics"].pump() % 2:
+                if surfaces["card"].pump() % 2:
                     if self.overlay and not self.fullscreen:
                         # Back to the wallpaper with fresh windows: layers that
                         # were floated come back blank if re-attached.
@@ -1088,9 +1263,9 @@ class MusicWidget:
                     orb_idle_done = False
                     halo_key = None
                     self._vinyl_drawn = self._disc_drawn = None
-                if getattr(surfaces["lyrics"], "full_hits", 0):
-                    flips = surfaces["lyrics"].full_hits
-                    surfaces["lyrics"].full_hits = 0
+                if getattr(surfaces["card"], "full_hits", 0):
+                    flips = surfaces["card"].full_hits
+                    surfaces["card"].full_hits = 0
                     if flips % 2 and self.fullscreen:
                         self._close_backdrop()
                         self.overlay = bool(getattr(self, "_overlay_before_full", False))
@@ -1163,6 +1338,28 @@ class MusicWidget:
                         orb_art_key = halo_key = None
                         orb_idle_done = False
                         self._disc_drawn = None
+                if lyric_proc is not None:
+                    res = self._lyrics.result() or {}
+                    lines = res.get("lines") or []
+                    want = (self._track_key, len(lines), lines[0] if lines else None)
+                    if lyric_sent.get("lines") != want:
+                        lyric_sent["lines"] = want
+                        lyric_proc.send("lines", want, lines)
+                    if lyric_sent.get("settings") is not settings:
+                        lyric_sent["settings"] = settings
+                        from dataclasses import asdict as _asdict
+                        lyric_proc.send("settings", _asdict(settings))
+                    msg = {
+                        "title": track.title if track else "", "key": self._track_key, "playing": playing,
+                        "pos": timeline.position_ms if timeline else 0,
+                        "updated": timeline.updated_monotonic if timeline else 0.0,
+                        "duration": timeline.duration_ms if timeline else 0,
+                        "accent": settings.accent_rgb(scene.accent_from_palette(self._palette)),
+                        "covered": covered, "sleeping": sleeping,
+                    }
+                    if lyric_sent.get("state") != msg:
+                        lyric_sent["state"] = msg
+                        lyric_proc.send("state", msg)
                 # Record once the art has settled (players publish it late).
                 if (track and recorded != (self._track_key, id(self._cover))
                         and now - self._track_changed_at > 2.5):
@@ -1226,8 +1423,9 @@ class MusicWidget:
                     with self._painting():
                         for name in corner_names:
                             box_ = boxes[name]
-                            surfaces[name].push(scene.corner_glow(box_.w, box_.h, name[-2:], accent)
-                                                if look[1] else blank[name])
+                            kind, where = name.split("_", 1)
+                            draw = scene.corner_glow if kind == "corner" else scene.edge_glow
+                            surfaces[name].push(draw(box_.w, box_.h, where, accent) if look[1] else blank[name])
 
                 # -- orb: halo once per look, ring every frame, disc half rate --
                 art_key = (id(self._cover), art_d, accent, settings.disc, settings.halo, settings.backdrop)
@@ -1271,13 +1469,27 @@ class MusicWidget:
                     # average; the pulse jumps on it and eases back down.
                     bass = sum(self._bars[:6]) / 6 if self._bars else 0.0
                     self._bass_avg = 0.92 * getattr(self, "_bass_avg", bass) + 0.08 * bass
-                    kick = max(0.0, bass - self._bass_avg * 1.15) * 4.0 if playing else 0.0
+                    # The bass level depends on the song and the volume (it
+                    # can sit near 0.02): judge it against its own recent
+                    # peak, so every track pulses about as hard.
+                    self._bass_peak = max(bass, getattr(self, "_bass_peak", 0.0) * (0.996 ** (dt * 30)), 0.004)
+                    level = bass / self._bass_peak
+                    kick = max(0.0, bass - self._bass_avg * 1.15) / self._bass_peak * 2.5 if playing else 0.0
                     self._pulse = max(min(1.0, kick), getattr(self, "_pulse", 0.0) * (0.82 ** (dt * 30)))
                     # The screen corners breathe with the bass and flash on
                     # each kick (only the windows' opacity changes).
-                    glow = settings.corner_glow * min(1.0, 0.9 * self._pulse + 0.18 * bass) if playing else 0.0
+                    glow = (settings.corner_glow * min(1.0, 0.85 * self._pulse + 0.35 * level ** 2)
+                            if playing else 0.0)
                     for name in corner_names:
                         surfaces[name].set_opacity(255 * settings.opacity * min(1.0, glow) * fade_in)
+                    if os.environ.get("XENON_DOCK_FPS") == "1":
+                        self._glow_max = max(getattr(self, "_glow_max", 0.0), glow)
+                        if now - getattr(self, "_glow_logged", 0.0) > 5:
+                            self._glow_logged = now
+                            print(f"music widget: glow max {self._glow_max:.2f} bass {bass:.2f} "
+                                  f"pulse {self._pulse:.2f} fade {fade_in:.2f} "
+                                  f"pushed {surfaces[corner_names[0]]._push_size}", flush=True)
+                            self._glow_max = 0.0
                     scale = 1.0 + 0.07 * settings.bounce * self._pulse
                     box = layout.orb_box
                     surfaces["ring"].push_raw(scene.render_ring_bgra(
@@ -1319,12 +1531,14 @@ class MusicWidget:
             dock_stop.set()
             if dock_thread is not None:
                 dock_thread.join(timeout=2.0)
-            lyric_thread.join(timeout=2.0)
+            if lyric_thread.is_alive():
+                lyric_thread.join(timeout=2.0)
             pointer.stop()
             from .wallpaper import detach_from_desktop
             for surface in surfaces.values():
                 try:
-                    detach_from_desktop(surface.hwnd)
+                    if not isinstance(surface, _LyricProcess):
+                        detach_from_desktop(surface.hwnd)
                     surface.close()
                 except Exception:
                     pass
@@ -1345,7 +1559,7 @@ class MusicWidget:
         else:
             # Each attach sends its window to the bottom, so go top-down.
             for name in reversed(order):
-                attach_behind_icons(surfaces[name].hwnd)
+                self._attach(surfaces[name])
 
     @staticmethod
     def _on_orb(layout, x: int, y: int) -> bool:
@@ -1507,9 +1721,16 @@ class MusicWidget:
         progress = SpotifyProgress()
         drawn = None
         repaint = share.repaint
+        stats = os.environ.get("XENON_DOCK_FPS") == "1"
+        pushes, build_ms, worst_gap, last_push, since = 0, 0.0, 0.0, 0.0, time.monotonic()
         while not stop.is_set():
             start = time.monotonic()
             settings = share.settings
+            if stats and start - since >= 5.0:
+                if pushes:
+                    print(f"music widget: lyrics {pushes / (start - since):.0f} fps, "
+                          f"frame {build_ms / pushes:.1f} ms, worst gap {worst_gap * 1000:.0f} ms", flush=True)
+                pushes, build_ms, worst_gap, since = 0, 0.0, 0.0, start
             try:
                 if share.sleeping or share.covered:
                     time.sleep(0.2)
@@ -1538,6 +1759,11 @@ class MusicWidget:
                         if not share.sleeping:
                             surface.push(image if image is not None else blank)
                     self._has_frame = True
+                    if stats:
+                        done = time.monotonic()
+                        if last_push and done - last_push < 0.5:
+                            worst_gap = max(worst_gap, done - last_push)
+                        pushes, build_ms, last_push = pushes + 1, build_ms + (done - start) * 1000, done
             except Exception as error:
                 print(f"music widget: lyric frame failed: {error}", flush=True)
                 time.sleep(0.5)
@@ -1639,7 +1865,18 @@ class MusicWidget:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
+    def _attach(self, surface) -> None:
+        if isinstance(surface, _LyricProcess):
+            surface.place("attach")
+            return
+        from .wallpaper import clear_top_most
+        clear_top_most(surface.hwnd)
+        attach_behind_icons(surface.hwnd)
+
     def _float(self, surface: "_LayeredSurface") -> None:
+        if isinstance(surface, _LyricProcess):
+            surface.place("float")
+            return
         from .wallpaper import WS_EX_TRANSPARENT, detach_from_desktop, send_to_top_most, show
         user = ctypes.windll.user32
         detach_from_desktop(surface.hwnd)
@@ -1719,7 +1956,6 @@ class MusicWidget:
     def _toggle_overlay_locked(self, *surfaces) -> None:
         """Wallpaper <-> floating overlay for every layer. The overlay is
         click-through and never takes focus, so it can stay up while you work."""
-        from .wallpaper import clear_top_most
         self.overlay = not self.overlay
         self._needs_frame = True
         if self.overlay:
@@ -1728,8 +1964,7 @@ class MusicWidget:
         else:
             # each attach goes to the bottom: top layer first, like _place_all
             for surface in reversed(surfaces):
-                clear_top_most(surface.hwnd)
-                attach_behind_icons(surface.hwnd)
+                self._attach(surface)
 
     def _refresh_assets(self, track, timeline) -> None:
         if not track:

@@ -20,6 +20,7 @@ LYRIC_CASES = ("upper", "original")
 LYRIC_ALIGNS = ("left", "center")
 LYRIC_MOTIONS = ("wipe", "fade", "pop")
 LINE_MOTIONS = ("slide", "fade", "cut")
+GLOW_SHAPES = ("edges", "corners")
 # Theme presets: name -> glow colour. "album" follows the cover art,
 # "custom" uses ``custom_color``.
 THEMES = {
@@ -65,6 +66,7 @@ _CHOICES = {
     "lyric_align": LYRIC_ALIGNS,
     "lyric_motion": LYRIC_MOTIONS,
     "line_motion": LINE_MOTIONS,
+    "glow_shape": GLOW_SHAPES,
 }
 
 
@@ -88,7 +90,8 @@ class MusicSettings:
     smoothing: float = 0.5           # 0 = twitchy, 0.95 = very slow fall
     spin_speed: float = 0.0          # degrees per second (0: the disc stays still)
     bounce: float = 1.0              # how hard the disc pulses on the beat
-    corner_glow: float = 1.0         # screen corners light up on the bass (0 = off)
+    corner_glow: float = 1.0         # the screen edges light up on the bass (0 = off)
+    glow_shape: str = "edges"        # edges (all four, full length) | corners
     fps: int = 30
     halo: bool = False               # soft light behind the disc (off: looked cheap)
     backdrop: float = 0.0            # dark pool of shade behind the orb
@@ -115,7 +118,7 @@ class MusicSettings:
 
     def layout_key(self) -> tuple:
         """Fields that move or resize the windows; a change rebuilds them."""
-        return (self.side, round(self.orb_size, 3), self.show_dock)
+        return (self.side, round(self.orb_size, 3), self.show_dock, self.glow_shape)
 
     def accent_rgb(self, palette_accent: tuple[int, int, int]) -> tuple[int, int, int]:
         if self.accent == "custom":
