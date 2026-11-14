@@ -418,8 +418,8 @@ class OrbArt:
             self.dim = dim
         if disc == "glow":
             rim = Image.new("RGBA", (d, d), (0, 0, 0, 0))
-            ImageDraw.Draw(rim).ellipse((1, 1, d - 2, d - 2), outline=accent + (110,), width=max(2, d // 160))
-            self.rim = rim.filter(ImageFilter.GaussianBlur(1.2))
+            ImageDraw.Draw(rim).ellipse((1, 1, d - 2, d - 2), outline=(255, 255, 255, 60), width=max(1, d // 240))
+            self.rim = rim.filter(ImageFilter.GaussianBlur(0.6))
 
         # Halo: a big soft light behind the disc (the album-art glow), and
         # an optional dark pool under everything so it reads on any wallpaper.
@@ -441,10 +441,10 @@ class OrbArt:
             if halo:
                 light = Image.new("L", (size, size), 0)
                 hd = ImageDraw.Draw(light)
-                for k in range(14, 0, -1):
-                    r = d / 2 * (1 + 0.075 * k)
-                    hd.ellipse((c - r, c - r, c + r, c + r), fill=int(150 * (1 - k / 15) ** 2))
-                light = light.filter(ImageFilter.GaussianBlur(d / 14))
+                for k in range(10, 0, -1):
+                    r = d / 2 * (1 + 0.04 * k)
+                    hd.ellipse((c - r, c - r, c + r, c + r), fill=int(70 * (1 - k / 11) ** 2))
+                light = light.filter(ImageFilter.GaussianBlur(d / 20))
                 glow = Image.new("RGBA", (size, size), accent + (0,))
                 glow.putalpha(light)
                 layer.alpha_composite(glow)
@@ -522,9 +522,12 @@ def render_orb(box: Box, layout: SceneLayout, art: OrbArt, bars: list[float], sp
         _draw_visualizer(ImageDraw.Draw(shapes), st.visualizer, values, cx, cy, inner, reach, d)
         # Light bleed around the shapes, blurred at quarter size, merged
         # with the crisp shapes into one alpha: one composite for the ring.
-        bleed = _blur_quarter(shapes, d / 90, 1.6 * max(0.2, st.glow))
+        alpha = shapes
+        if st.glow > 0:
+            bleed = _blur_quarter(shapes, d / 160, 0.55 * st.glow)
+            alpha = ImageChops.lighter(bleed, shapes)
         ring = Image.new("RGBA", image.size, accent + (0,))
-        ring.putalpha(ImageChops.lighter(bleed, shapes))
+        ring.putalpha(alpha)
         image.alpha_composite(ring)
 
     if art.art is not None:
@@ -635,8 +638,11 @@ def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: 
         reach = (screen_height * 0.15 * st.ray_length * (1.0 if playing else 0.35)
                  * (1.0 + 0.15 * min(1.0, energy)) * max(0.0, intro))
         _draw_visualizer(ImageDraw.Draw(shapes), st.visualizer, values, cx, cy, inner, reach, d)
-    bleed = _blur_quarter(shapes, d / 90, 1.6 * max(0.2, st.glow))
-    alpha = ImageChops.lighter(bleed, shapes)
+    alpha = shapes
+    if st.glow > 0:
+        # A tight sheen right on the rays, not a wash of light round them.
+        bleed = _blur_quarter(shapes, d / 160, 0.55 * st.glow)
+        alpha = ImageChops.lighter(bleed, shapes)
     if intro < 0.999:
         k = max(0.0, min(1.0, intro))
         alpha = alpha.point(lambda v: int(v * k))

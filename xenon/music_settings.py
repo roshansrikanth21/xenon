@@ -77,7 +77,7 @@ class MusicSettings:
     smoothing: float = 0.5           # 0 = twitchy, 0.95 = very slow fall
     spin_speed: float = 9.0          # degrees per second
     fps: int = 30
-    halo: bool = True                # album-art glow behind the disc
+    halo: bool = False               # soft light behind the disc (off: looked cheap)
     backdrop: float = 0.0            # dark pool of shade behind the orb
     # lyrics
     show_lyrics: bool = True
@@ -116,19 +116,24 @@ def parse_color(text: str) -> tuple[int, int, int] | None:
         return None
 
 
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 
 
 def _migrate(data: dict) -> dict:
     """Old files stored every field, so a changed default never reached
-    them. Version 2 moved to the poster lyrics and 30 fps: carry those over
-    unless the user had picked something other than the old default."""
-    if not isinstance(data.get("version"), int) or data["version"] < 2:
+    them. Version 2 moved to the poster lyrics and 30 fps, version 3 turned
+    the light halo off: carry those over unless the user had picked
+    something other than the old default."""
+    version = data.get("version") if isinstance(data.get("version"), int) else 0
+    if version < 3:
         data = dict(data)
-        if data.get("lyric_style") == "reveal":
-            data.pop("lyric_style")
-        if data.get("fps") == 20:
-            data.pop("fps")
+        if version < 2:
+            if data.get("lyric_style") == "reveal":
+                data.pop("lyric_style")
+            if data.get("fps") == 20:
+                data.pop("fps")
+        if data.get("halo") is True:
+            data.pop("halo")
     return data
 
 

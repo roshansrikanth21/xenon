@@ -102,7 +102,7 @@ class SettingsWindow:
         self._slider(look, "orb_size", "Orb size", 0.6, 1.4)
         self._slider(look, "opacity", "Opacity", 0.15, 1.0)
         self._slider(look, "backdrop", "Backdrop shade", 0.0, 1.0)
-        self._check(look, "halo", "Album-art glow")
+        self._check(look, "halo", "Soft light behind the disc")
         self._check(look, "show_card", "Now-playing card")
 
         self._choice(viz, "visualizer", "Style", ms.VISUALIZERS)

@@ -117,12 +117,14 @@ def _disc_image(d: int, cover: Image.Image | None, accent) -> Image.Image:
     size = int(d * 1.5)
     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     c = size / 2
-    glow = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(glow).ellipse((c - d * 0.56, c - d * 0.56, c + d * 0.56, c + d * 0.56), fill=120)
-    glow = glow.filter(ImageFilter.GaussianBlur(d / 9))
-    halo = Image.new("RGBA", (size, size), tuple(accent) + (0,))
-    halo.putalpha(glow)
-    out.alpha_composite(halo)
+    # A soft dark drop shadow for depth instead of a coloured light aura.
+    shadow = Image.new("L", (size, size), 0)
+    oy = d * 0.04
+    ImageDraw.Draw(shadow).ellipse((c - d * 0.5, c - d * 0.5 + oy, c + d * 0.5, c + d * 0.5 + oy), fill=150)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(d / 14))
+    dark = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    dark.putalpha(shadow)
+    out.alpha_composite(dark)
     if cover is not None:
         art = cover.convert("RGB").resize((d, d), Image.LANCZOS)
     else:
@@ -136,7 +138,7 @@ def _disc_image(d: int, cover: Image.Image | None, accent) -> Image.Image:
     art.putalpha(mask.resize((d, d), Image.LANCZOS))
     out.alpha_composite(art, (int(c - d / 2), int(c - d / 2)))
     ImageDraw.Draw(out).ellipse((c - d / 2, c - d / 2, c + d / 2, c + d / 2),
-                                outline=tuple(accent) + (90,), width=max(1, d // 120))
+                                outline=(255, 255, 255, 40), width=1)
     return out
 
 

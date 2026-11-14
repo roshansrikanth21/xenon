@@ -121,6 +121,16 @@ class MigrationTests(unittest.TestCase):
             s = ms.load(path)                       # saved as version 2: kept
             self.assertEqual((s.lyric_style, s.fps), ("reveal", 20))
 
+    def test_v3_turns_the_old_halo_off_but_keeps_a_new_choice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.json")
+            with open(path, "w") as f:
+                json.dump({"version": 2, "halo": True, "fps": 20}, f)
+            s = ms.load(path)
+            self.assertEqual((s.halo, s.fps), (False, 20))
+            ms.save(ms.coerce({"halo": True}), path)
+            self.assertTrue(ms.load(path).halo)
+
 
 if __name__ == "__main__":
     unittest.main()
