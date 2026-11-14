@@ -168,6 +168,9 @@ _RULES: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
     (r"media (?:play ?pause|toggle)|play ?pause", _kind("media_toggle")),
     (r"media next", _kind("media_next")),
     (r"media (?:previous|prev|back)", _kind("media_prev")),
+    # ---- Holo-Explorer (Augma's hand-controlled holograms)
+    (r"(?:(?:open|start|show|launch) )?(?:the )?holo ?explorer|(?:open|show|start) (?:the )?(?:arc reactor|periodic table|infinity stones)(?: hologram)?",
+     _kind("holo_on")),
     # ---- Xenon Core (the 3D presence view)
     (r"(?:(?:open|show|start|launch) )?(?:the |xenon |your )?(?:energy )?core(?: view| mode)?|show (?:me )?yourself",
      _kind("core_on")),

@@ -1076,6 +1076,8 @@ class Tray:
             item("Music widget settings…", lambda: app.post(app.open_music_settings)),
             item("Xenon Core (3D)", lambda: app.post(app.open_core),
                  enabled=lambda _i: bool(getattr(app, "core_url", None))),
+            item("Holo-Explorer (webcam holograms)", lambda: app.post(app.open_holo),
+                 enabled=lambda _i: bool(getattr(app, "hud_url", None))),
             item("Hand control (webcam)", lambda: app.post(app.open_hand_control),
                  enabled=lambda _i: bool(getattr(app, "hud_url", None))),
             item("Copy phone link", lambda: app.post(app.copy_phone_link),
@@ -1576,6 +1578,10 @@ class OrbApp:
         if kind == "widget_settings":
             self.post(self.open_music_settings)
             return "Opening the music widget settings."
+        if kind == "holo_on":
+            if origin == "remote":
+                return "Holo-Explorer uses the laptop's webcam; open it there."
+            return self.open_holo()
         if kind == "core_on":
             if origin == "remote":
                 return "The core opens on the laptop screen; start it there."
@@ -1599,6 +1605,17 @@ class OrbApp:
         return None
 
     # ----- hand control ------------------------------------------------------
+
+    def open_holo(self) -> str:
+        """Open Augma Imaginarium's Holo-Explorer (static/holo, CC BY-NC)."""
+        if not getattr(self, "hud_url", None):
+            return "Holo-Explorer needs phone access switched on (it shares its little local server)."
+        import webbrowser
+
+        from xenon import remote
+
+        threading.Thread(target=webbrowser.open, args=(remote.holo_url(),), daemon=True, name="xenon-holo").start()
+        return "Opening Holo-Explorer. Show it your hand."
 
     def open_core(self) -> str:
         """Open Xenon Core (static/core.html): Xenon as a 3D energy core."""

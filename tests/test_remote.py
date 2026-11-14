@@ -144,3 +144,33 @@ class CoreTests(unittest.TestCase):
 
     def test_no_path_tricks(self):
         self.assertEqual(self.get("/models/../remote.py")[0], 404)
+
+
+class HoloTests(unittest.TestCase):
+    def setUp(self):
+        self.server = remote.RemoteServer(lambda t: "ok", "k" * 43, port=0)
+        self.assertTrue(self.server.start())
+        self.port = self.server._server.server_address[1]
+        self.addCleanup(self.server.stop)
+
+    def get(self, path, headers=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, b""
+
+    def test_served_unmodified_on_the_laptop(self):
+        import pathlib
+        code, page = self.get("/holo/")
+        self.assertEqual(code, 200)
+        self.assertIn(b"Augma", page)
+        asset = next((pathlib.Path(remote.__file__).with_name("static") / "holo" / "assets").glob("index-*.js"))
+        code, data = self.get(f"/holo/assets/{asset.name}")
+        self.assertEqual((code, data), (200, asset.read_bytes()))
+
+    def test_laptop_only_and_no_path_tricks(self):
+        self.assertEqual(self.get("/holo/", {"Cf-Ray": "x"})[0], 404)
+        self.assertEqual(self.get("/holo/assets/../../remote.py")[0], 404)
+        self.assertEqual(self.get("/holo/LICENSE")[0], 404)
