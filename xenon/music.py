@@ -509,7 +509,15 @@ class MusicController:
                 if played:
                     return f"Playing {played}."
             uri = "spotify:search:" + urllib.parse.quote(command.query)
-            opened_where = self._open_uri(uri)
+            # Reuse the Spotify tab that's already open; only open a new
+            # page when there is none.
+            reused = False
+            if self._web is not None and hasattr(self._web, "open_in_tab"):
+                try:
+                    reused = bool(self._web.open_in_tab(web_url(uri)))
+                except Exception:
+                    reused = False
+            opened_where = "web" if reused else self._open_uri(uri)
             played = self._press_play(command.query, None)
             if played:
                 return f"Playing {played}."

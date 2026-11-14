@@ -335,7 +335,8 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
     image = Image.alpha_composite(image, shadow)
     if st.glow > 0:
         glow = Image.new("RGBA", image.size, accent + (0,))
-        glow.putalpha(_blur_quarter(lit, size / 22, 0.75 * st.glow))
+        # A faint, tight sheen on the sung words, not a fog round them.
+        glow.putalpha(_blur_quarter(lit, size / 48, 0.3 * st.glow))
         image = Image.alpha_composite(image, glow)
     image = Image.alpha_composite(image, glyphs)
 

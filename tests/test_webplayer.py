@@ -133,5 +133,42 @@ class ControllerWithWebPlayerTests(unittest.TestCase):
         self.assertEqual(keys, [])
 
 
+class ReuseTabTests(unittest.TestCase):
+    def test_play_reuses_an_open_spotify_tab(self) -> None:
+        opened, navigated = [], []
+
+        class Web:
+            def open_in_tab(self, url):
+                navigated.append(url)
+                return True
+
+            def play(self, wanted, open_page):
+                return wanted
+
+        ctl = MusicController(None, media_key=lambda c: True,
+                              open_uri=lambda u: opened.append(u) or "web", web=Web())
+        self.assertEqual(ctl.run(MusicCommand("play", "Sweater Weather")), "Playing Sweater Weather.")
+        self.assertEqual(opened, [])
+        self.assertEqual(navigated, ["https://open.spotify.com/search/Sweater%20Weather"])
+
+    def test_no_tab_opens_a_page(self) -> None:
+        opened = []
+
+        class Web:
+            def open_in_tab(self, url):
+                return False
+
+            def play(self, wanted, open_page):
+                return wanted
+
+        ctl = MusicController(None, media_key=lambda c: True,
+                              open_uri=lambda u: opened.append(u) or "web", web=Web())
+        ctl.run(MusicCommand("play", "Starboy"))
+        self.assertEqual(opened, ["spotify:search:Starboy"])
+
+    def test_open_in_tab_refuses_other_sites(self) -> None:
+        self.assertFalse(player([]).open_in_tab("https://evil.example/"))
+
+
 if __name__ == "__main__":
     unittest.main()

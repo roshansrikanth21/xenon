@@ -127,6 +127,7 @@ class SettingsWindow:
 
         self._check(system, "start_with_orb", "Start with the orb")
         self._check(system, "show_dock", "Corner dock (controls + recent songs)")
+        self._check(system, "suggestions", "Suggest similar songs in the dock (asks Deezer)")
         self._slider(system, "fps", "Frame rate", 10, 60, integer=True)
         self._check(system, "pause_when_covered", "Pause when windows cover the desktop")
         ttk.Label(system, text=f"Settings file:\n{ms.settings_path()}", style="Muted.TLabel",

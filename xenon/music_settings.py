@@ -90,6 +90,7 @@ class MusicSettings:
     glow: float = 1.0
     # card
     show_card: bool = True
+    suggestions: bool = True         # dock suggests similar songs (asks Deezer)
     # colour
     accent: str = "album"            # album | white | custom
     custom_color: str = "#8fd3ff"

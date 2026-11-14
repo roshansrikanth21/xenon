@@ -257,6 +257,70 @@ class WebPlayer:
                 return True
         return False
 
+    ADDRESS_NAMES = ("address field", "address and search bar", "search or enter address",
+                     "search with google or enter address", "search or enter web address")
+
+    def open_in_tab(self, url: str) -> bool:
+        """Load ``url`` in the Spotify tab that is already open (switching
+        to it if it's a background tab) instead of opening a new one.
+        False when there is no Spotify tab or the address bar can't be set."""
+        if not url.startswith("https://open.spotify.com/"):
+            return False
+        self.forget()
+        window = self.window() or self._select_spotify_tab()
+        if window is None:
+            return False
+        edit = None
+        try:
+            for candidate in window.descendants(control_type="Edit"):
+                name = (candidate.window_text() or candidate.element_info.name or "").strip().lower()
+                if any(name.startswith(n) for n in self.ADDRESS_NAMES):
+                    edit = candidate
+                    break
+        except Exception:
+            return False
+        if edit is None:
+            return False
+        try:
+            from pywinauto.keyboard import send_keys
+
+            window.set_focus()
+            edit.set_focus()
+            edit.iface_value.SetValue(url)
+            send_keys("{ENTER}")
+        except Exception:
+            return False
+        self._sleep(0.8)
+        return True
+
+    def _select_spotify_tab(self):
+        """Find a background Spotify tab in any browser window and select it.
+        While a song plays, Spotify titles its tab 'Song • Artist'."""
+        for window in self._candidate_windows():
+            title = (window.window_text() or "").lower()
+            if not any(h in title for h in BROWSER_HINTS):
+                continue
+            try:
+                tabs = window.descendants(control_type="TabItem")
+            except Exception:
+                continue
+            for tab in tabs:
+                name = (tab.window_text() or "").lower()
+                if "spotify" in name or " • " in name:
+                    try:
+                        tab.select()
+                    except Exception:
+                        try:
+                            window.set_focus()
+                            tab.click_input()
+                        except Exception:
+                            continue
+                    self._sleep(0.4)
+                    if self.address(window).startswith("https://open.spotify.com"):
+                        self._cached_window = window
+                        return window
+        return None
+
     def play(self, wanted: str, open_page: Callable[[], object] | None = None) -> str | None:
         """Press 'Play <wanted>'. Returns what played, or None if it couldn't."""
         self.forget()  # a command is worth a fresh search

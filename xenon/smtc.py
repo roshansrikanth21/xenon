@@ -100,7 +100,9 @@ class NowPlaying:
 
     # -- commands -----------------------------------------------------------
     def play_pause(self) -> None:
-        self._command("try_change_playback_status_async")
+        # Chromium browsers (Opera, Chrome, Edge) ignore the "toggle"
+        # command; send an explicit pause or play based on the live status.
+        self._command("play_pause")
 
     def next_track(self) -> None:
         self._command("try_skip_next_async")
@@ -114,9 +116,25 @@ class NowPlaying:
             return
 
         async def send() -> None:
-            session = await self._session()
-            if session is not None:
+            session = await self._shown_session()
+            if session is None:
+                return
+            if method == "play_pause":
+                status = session.get_playback_info().playback_status.name
+                ok = await (session.try_pause_async() if status == "PLAYING" else session.try_play_async())
+                if not ok:
+                    await session.try_toggle_play_pause_async()
+            else:
                 await getattr(session, method)()
+            # Refresh right away so the button flips without waiting a poll.
+            try:
+                track, timeline, _props = await self._read(session)
+                with self._lock:
+                    if self._track is not None:
+                        track.art = self._track.art
+                self._publish(track, timeline)
+            except Exception:
+                pass
 
         asyncio.run_coroutine_threadsafe(send(), loop)
 
@@ -141,7 +159,12 @@ class NowPlaying:
                         track, timeline, props = await self._read(session)
                         key = (track.title, track.artist, track.album, track.app)
                         if key != last_key:
+                            previous = art
                             art = await self._thumbnail(props)
+                            if art and previous and art == previous and last_key is not None:
+                                # The player still shows the last song's art:
+                                # wait for the real one (retried below).
+                                art = None
                             last_key = key
                             retry = 0
                         elif not art:
@@ -166,6 +189,21 @@ class NowPlaying:
             self._loop.close()
             self._loop = None
 
+    async def _shown_session(self):
+        """The session the widget is showing (by app id), so a button never
+        lands on some other app that happens to be Windows' "current"."""
+        from winsdk.windows.media.control import (
+            GlobalSystemMediaTransportControlsSessionManager as MediaManager,
+        )
+        manager = await MediaManager.request_async()
+        with self._lock:
+            app = self._track.app if self._track else ""
+        if app:
+            for session in manager.get_sessions():
+                if self._app_of(session) == app:
+                    return session
+        return await self._session(manager)
+
     async def _session(self, manager=None):
         if manager is None:
             from winsdk.windows.media.control import (
@@ -173,16 +211,28 @@ class NowPlaying:
             )
             manager = await MediaManager.request_async()
         current = manager.get_current_session()
-        if current is not None and _has_media(current):
-            return current
-        # Several players register sessions; prefer the one that is playing.
-        playing = None
+        # Several apps register sessions (WhatsApp does, for its own window).
+        # Prefer one that is playing a real track (it has an artist), then
+        # the current one if it plays, then anything playing, then current.
+        playing, music = None, None
         for session in manager.get_sessions():
             if not _has_media(session):
                 continue
-            if session.get_playback_info().playback_status.name == "PLAYING":
-                playing = session
-                break
+            if session.get_playback_info().playback_status.name != "PLAYING":
+                continue
+            playing = playing or session
+            if music is None:
+                try:
+                    props = await session.try_get_media_properties_async()
+                    if props.artist:
+                        music = session
+                except Exception:
+                    pass
+        if music is not None:
+            return music
+        if current is not None and _has_media(current):
+            if current.get_playback_info().playback_status.name == "PLAYING" or playing is None:
+                return current
         return playing or current
 
     async def _read(self, session):

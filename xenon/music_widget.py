@@ -22,6 +22,7 @@ import ctypes
 import ctypes.wintypes as wintypes
 import io
 import math
+import sys
 import threading
 import time
 
@@ -622,6 +623,55 @@ def _work_area_bottom(height: int) -> int:
     return height
 
 
+class _KeepFocus:
+    """Playing a song may have to bring the browser forward (to load the
+    Spotify tab). Afterwards put it back: minimised again if it was, else
+    behind the other windows, and hand focus back to where it was (the
+    desktop, when the click came from the dock)."""
+
+    _BROWSER_CLASSES = ("Chrome_WidgetWin_1", "MozillaWindowClass")
+
+    def __enter__(self):
+        self._prev = None
+        self._iconic: dict[int, bool] = {}
+        if sys.platform != "win32":
+            return self
+        try:
+            user32 = ctypes.windll.user32
+            self._prev = user32.GetForegroundWindow()
+            proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+            def collect(hwnd, _):
+                buffer = ctypes.create_unicode_buffer(64)
+                user32.GetClassNameW(hwnd, buffer, 64)
+                if buffer.value in self._BROWSER_CLASSES and user32.IsWindowVisible(hwnd):
+                    self._iconic[int(hwnd)] = bool(user32.IsIconic(hwnd))
+                return True
+
+            self._cb = proto(collect)
+            user32.EnumWindows(self._cb, 0)
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, *_exc):
+        if sys.platform != "win32" or not self._prev:
+            return False
+        try:
+            user32 = ctypes.windll.user32
+            fg = user32.GetForegroundWindow()
+            if fg and fg != self._prev and int(fg) in self._iconic:
+                if self._iconic[int(fg)]:
+                    user32.ShowWindow(fg, 7)            # SW_SHOWMINNOACTIVE
+                else:
+                    # HWND_BOTTOM, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+                    user32.SetWindowPos(fg, 1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+                user32.SetForegroundWindow(self._prev)
+        except Exception:
+            pass
+        return False
+
+
 class _Pointer:
     """Where the mouse is, whether the left button is down, and whether the
     desktop itself is under it.
@@ -766,6 +816,9 @@ class MusicWidget:
         from .music_history import MusicHistory
 
         self._history = MusicHistory()
+        from .music_suggest import Suggester
+        self._suggester = Suggester()
+        self._suggest_for = None
         self._dock_rows: list = []
         self._controller = None
         self._settings_proc = None
@@ -987,7 +1040,9 @@ class MusicWidget:
                 track, timeline = self._now_playing.state()
                 self._refresh_assets(track, timeline)
                 playing = bool(timeline and timeline.playing)
-                if track and (recorded != (self._track_key, self._art_key)):
+                # Record once the art has settled (players publish it late).
+                if (track and recorded != (self._track_key, self._art_key)
+                        and now - self._track_changed_at > 2.5):
                     recorded = (self._track_key, self._art_key)
                     try:
                         self._history.record(track.title, track.artist, track.app, self._cover)
@@ -1011,17 +1066,31 @@ class MusicWidget:
 
                 # -- dock: hover opens it, clicks act -------------------------
                 if "dock" in surfaces:
-                    if dock_key is None:
+                    exclude = (track.title.strip().lower(), track.artist.strip().lower()) if track else None
+                    if settings.suggestions and track and self._suggest_for != self._track_key:
+                        self._suggest_for = self._track_key
+                        recent = [(e.title, e.artist) for e in self._history.recent(exclude, 4)]
+                        self._suggester.request(track.title, track.artist, recent)
+                    suggest_v = self._suggester.version if settings.suggestions else -1
+                    if dock_key != (self._track_key, self._art_key, suggest_v):
+                        picks = []
+                        if settings.suggestions:
+                            picks = [s for s in self._suggester.current() if s.key != exclude][:3]
+                        taken = {s.key for s in picks}
+                        recent = [e for e in self._history.recent(exclude, dock.MAX_ROWS) if e.key not in taken]
+                        entries = picks + recent[:dock.MAX_ROWS - len(picks)]
                         rows = []
-                        exclude = (track.title.strip().lower(), track.artist.strip().lower()) if track else None
-                        for entry in self._history.recent(exclude, dock.MAX_ROWS):
-                            rows.append((entry.title, entry.artist, self._history.thumbnail(entry)))
-                        self._dock_rows = self._history.recent(exclude, dock.MAX_ROWS)
+                        for i, entry in enumerate(entries):
+                            if i < len(picks):
+                                rows.append((entry.title, entry.artist, entry.cover, True))
+                            else:
+                                rows.append((entry.title, entry.artist, self._history.thumbnail(entry), False))
+                        self._dock_rows = entries
                         dock_geom = _replace(dock.dock_geometry(width, height, len(rows), floor), box=dock_full.box)
                         dock_content = dock.DockContent(
                             track.title if track else "", track.artist if track else "",
                             playing, self._cover, rows)
-                        dock_key = (self._track_key, self._art_key)
+                        dock_key = (self._track_key, self._art_key, suggest_v)
                     if dock_content.playing != playing or dock_content.cover is not self._cover:
                         dock_content = dock.DockContent(dock_content.title, dock_content.artist, playing,
                                                         self._cover, dock_content.rows)
@@ -1211,7 +1280,8 @@ class MusicWidget:
 
                 if self._controller is None:
                     self._controller = MusicController.from_env()
-                reply = self._controller.run(MusicCommand("play", f"{entry.title} {entry.artist}".strip()))
+                with _KeepFocus():
+                    reply = self._controller.run(MusicCommand("play", f"{entry.title} {entry.artist}".strip()))
                 print(f"music widget: {reply}", flush=True)
         else:
             return False

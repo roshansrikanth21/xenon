@@ -64,8 +64,8 @@ def dock_geometry(width: int, height: int, rows: int, bottom: int | None = None)
 
     glow = int(d * 0.25)
     bx = 0
-    by = min(py - pad, cy - d // 2 - glow)
-    bw = px + pw + pad * 2
+    by = min(py - 20, cy - d // 2 - glow)
+    bw = px + pw + 24      # room for the panel's soft shadow
     box = Box(bx, max(0, by), bw, floor - max(0, by))
     return DockGeometry(box, (cx, cy), d, panel, targets, rows)
 
@@ -143,11 +143,16 @@ def _disc_image(d: int, cover: Image.Image | None, accent) -> Image.Image:
 
 
 def _icon(draw: ImageDraw.ImageDraw, name: str, b: Box, playing: bool, hot: bool) -> None:
-    r = max(6, b.w // 4)
-    draw.rounded_rectangle((b.x, b.y, b.x + b.w - 1, b.y + b.h - 1), radius=r,
-                           fill=(255, 255, 255, 46 if hot else 22), outline=(255, 255, 255, 60), width=1)
-    cx, cy, s = b.x + b.w / 2, b.y + b.h / 2, b.w * 0.22
-    ink = (255, 255, 255, 235)
+    # Round buttons; play/pause is the solid white primary one.
+    primary = name == "playpause"
+    if primary:
+        draw.ellipse((b.x, b.y, b.x + b.w - 1, b.y + b.h - 1), fill=(255, 255, 255, 255 if hot else 236))
+    else:
+        draw.ellipse((b.x, b.y, b.x + b.w - 1, b.y + b.h - 1), fill=(255, 255, 255, 40 if hot else 14))
+    cx, cy, s = b.x + b.w / 2, b.y + b.h / 2, b.w * 0.2
+    ink = (12, 12, 16, 255) if primary else (255, 255, 255, 250 if hot else 215)
+    if primary and not playing:
+        cx += s * 0.15   # optical centre of the triangle
     if name == "playpause":
         if playing:
             bw = s * 0.55
@@ -169,6 +174,66 @@ def _icon(draw: ImageDraw.ImageDraw, name: str, b: Box, playing: bool, hot: bool
             draw.line((cx + math.cos(a) * s * 0.7, cy + math.sin(a) * s * 0.7,
                        cx + math.cos(a) * s * 1.15, cy + math.sin(a) * s * 1.15), fill=ink, width=max(2, int(s / 3)))
         draw.ellipse((cx - s * 0.78, cy - s * 0.78, cx + s * 0.78, cy + s * 0.78), outline=ink, width=max(2, int(s / 3)))
+
+
+_SHADOW = 18   # px of soft shadow drawn round the panel
+
+
+def _panel_back(w: int, h: int) -> Image.Image:
+    """Frosted dark glass: a soft shadow, a near-black body with a faint
+    top sheen, and a hairline border."""
+    s = _SHADOW
+    out = Image.new("RGBA", (w + s * 2, h + s * 2), (0, 0, 0, 0))
+    r = max(16, min(24, h // 12))
+    shade = Image.new("L", out.size, 0)
+    ImageDraw.Draw(shade).rounded_rectangle((s, s + 4, s + w - 1, s + h + 3), radius=r, fill=130)
+    shade = shade.filter(ImageFilter.GaussianBlur(s / 2))
+    dark = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    dark.putalpha(shade)
+    out.alpha_composite(dark)
+
+    body = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    mask = Image.new("L", (w * 2, h * 2), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w * 2 - 1, h * 2 - 1), radius=r * 2, fill=255)
+    mask = mask.resize((w, h), Image.LANCZOS)
+    top, bottom = (24, 25, 32), (10, 10, 14)
+    grad = Image.linear_gradient("L").resize((w, h))
+    fill = Image.merge("RGB", [grad.point(lambda v, a=a, b=b: int(a + (b - a) * v / 255)) for a, b in zip(top, bottom)])
+    body = fill.convert("RGBA")
+    body.putalpha(mask.point(lambda v: v * 222 // 255))
+    out.alpha_composite(body, (s, s))
+    ImageDraw.Draw(out).rounded_rectangle((s, s, s + w - 1, s + h - 1), radius=r,
+                                          outline=(255, 255, 255, 26), width=1)
+    # a brighter hairline along the top edge catches the light
+    ImageDraw.Draw(out).line((s + r, s, s + w - r, s), fill=(255, 255, 255, 46), width=1)
+    return out
+
+
+def _spaced(draw, xy, text: str, fnt, fill, spacing: float = 0.14) -> None:
+    x, y = xy
+    gap = fnt.size * spacing
+    for ch in text:
+        draw.text((x, y), ch, font=fnt, fill=fill)
+        x += draw.textlength(ch, font=fnt) + gap
+
+
+def _play_badge(img: Image.Image, x: int, y: int, size: int) -> None:
+    """A dark veil and a small white play triangle over a hovered cover."""
+    veil = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    m = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(m).rounded_rectangle((0, 0, size - 1, size - 1), radius=max(6, size // 5), fill=110)
+    veil.putalpha(m)
+    img.alpha_composite(veil, (x, y))
+    d = ImageDraw.Draw(img)
+    cx, cy, s = x + size / 2 + size * 0.04, y + size / 2, size * 0.2
+    d.polygon([(cx - s * 0.7, cy - s), (cx - s * 0.7, cy + s), (cx + s, cy)], fill=(255, 255, 255, 245))
+
+
+def _sparkle(draw, cx: float, cy: float, r: float, fill) -> None:
+    """A small four-point star marking a suggested song."""
+    k = r * 0.28
+    draw.polygon([(cx, cy - r), (cx + k, cy - k), (cx + r, cy), (cx + k, cy + k),
+                  (cx, cy + r), (cx - k, cy + k), (cx - r, cy), (cx - k, cy - k)], fill=fill)
 
 
 def _fit(draw, text: str, fnt, width: int) -> str:
@@ -220,15 +285,12 @@ class DockRenderer:
     def _panel_parts(self, geom: DockGeometry, content: DockContent, hover: str | None, accent):
         """Panel pieces in dock-local coordinates, each with a stagger index."""
         key = (geom, content.title, content.artist, content.playing, id(content.cover),
-               tuple((t, a, id(i)) for t, a, i in content.rows), hover, tuple(accent))
+               tuple((r[0], r[1], id(r[2]), len(r) > 3 and r[3]) for r in content.rows), hover, tuple(accent))
         if key == self._parts_key:
             return self._parts
         parts = []
         p = geom.local(geom.panel)
-        back = Image.new("RGBA", (p.w, p.h), (0, 0, 0, 0))
-        ImageDraw.Draw(back).rounded_rectangle((0, 0, p.w - 1, p.h - 1), radius=max(12, p.h // 14),
-                                               fill=(10, 11, 16, 150), outline=(255, 255, 255, 30))
-        parts.append((back, (p.x, p.y), 0))
+        parts.append((_panel_back(p.w, p.h), (p.x - _SHADOW, p.y - _SHADOW), 0))
 
         for i, name in enumerate(BUTTONS):
             b = geom.local(geom.targets[name])
@@ -240,8 +302,9 @@ class DockRenderer:
         img = Image.new("RGBA", (now.w, now.h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         small = font("NOW PLAYING", max(10, now.h // 6), "bold")
-        draw.text((now.h + 10, 0), "NOW PLAYING", font=small, fill=tuple(accent) + (200,))
-        img.alpha_composite(_thumb(content.cover, now.h - 4, max(6, now.h // 6)), (0, 2))
+        _spaced(draw, (now.h + 10, 0), "NOW PLAYING" if content.playing else "PAUSED", small,
+                (255, 255, 255, 120))
+        img.alpha_composite(_thumb(content.cover, now.h - 4, max(8, now.h // 5)), (0, 2))
         tf = font(content.title or "Nothing playing", max(13, int(now.h * 0.34)), "black")
         af = font(content.artist, max(11, int(now.h * 0.24)), "regular")
         tw = now.w - now.h - 12
@@ -251,20 +314,35 @@ class DockRenderer:
             draw.text((now.h + 10, small.size + tf.size + 6), _fit(draw, content.artist, af, tw), font=af,
                       fill=(220, 222, 232, 170))
         parts.append((img, (now.x, now.y), 2))
+        if geom.rows:
+            line = Image.new("RGBA", (now.w, 1), (255, 255, 255, 22))
+            gap = geom.local(geom.targets["row0"]).y - (now.y + now.h)
+            parts.append((line, (now.x, now.y + now.h + gap // 2), 2))
 
-        for i, (title, artist, thumb) in enumerate(content.rows[:geom.rows]):
+        for i, row in enumerate(content.rows[:geom.rows]):
+            title, artist, thumb = row[:3]
+            suggested = len(row) > 3 and row[3]
+            hot = hover == f"row{i}"
             b = geom.local(geom.targets[f"row{i}"])
             img = Image.new("RGBA", (b.w, b.h), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
-            if hover == f"row{i}":
-                draw.rounded_rectangle((0, 1, b.w - 1, b.h - 2), radius=max(8, b.h // 4), fill=(255, 255, 255, 34))
-            ts = b.h - 10
-            img.alpha_composite(_thumb(thumb, ts, max(5, ts // 6)), (5, 5))
-            tf = font(title, max(12, int(b.h * 0.30)), "bold")
-            af = font(artist, max(10, int(b.h * 0.23)), "regular")
-            tw = b.w - ts - 20
-            draw.text((ts + 14, 5), _fit(draw, title, tf, tw), font=tf, fill=(250, 250, 255, 235))
-            draw.text((ts + 14, 7 + tf.size), _fit(draw, artist, af, tw), font=af, fill=(210, 212, 225, 150))
+            if hot:
+                draw.rounded_rectangle((0, 1, b.w - 1, b.h - 2), radius=max(10, b.h // 4), fill=(255, 255, 255, 26))
+            ts = b.h - 12
+            img.alpha_composite(_thumb(thumb, ts, max(6, ts // 5)), (6, 6))
+            if hot:
+                _play_badge(img, 6, 6, ts)
+            tf = font(title, max(12, int(b.h * 0.29)), "bold")
+            af = font(artist, max(10, int(b.h * 0.22)), "regular")
+            mark = 18 if suggested else 0
+            tw = b.w - ts - 24 - mark
+            ty = (b.h - tf.size - af.size - 3) // 2 - 1
+            draw.text((ts + 16, ty), _fit(draw, title, tf, tw), font=tf,
+                      fill=(255, 255, 255, 250 if hot else 228))
+            draw.text((ts + 16, ty + tf.size + 3), _fit(draw, artist, af, tw), font=af,
+                      fill=(220, 222, 232, 150))
+            if suggested:
+                _sparkle(draw, b.w - 14, b.h / 2, 5, (255, 255, 255, 110 if not hot else 200))
             parts.append((img, (b.x, b.y), 3 + i))
 
         self._parts_key = key
