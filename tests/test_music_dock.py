@@ -99,7 +99,7 @@ class SmoothLyricTests(unittest.TestCase):
 
     def test_animator_fades_words_in_steps(self):
         box = scene.Box(0, 0, 900, 300)
-        st = ms.MusicSettings()
+        st = ms.coerce({"line_motion": "cut"})          # no old line drifting over the first word
         anim = scene.LyricAnimator()
         keys, images = [], []
         for pos in range(3000, 3400, 20):
@@ -111,6 +111,31 @@ class SmoothLyricTests(unittest.TestCase):
         first_word = images[0].crop((0, 0, 200, 300)).getchannel("A").getextrema()[1]
         later = images[-1].crop((0, 0, 200, 300)).getchannel("A").getextrema()[1]
         self.assertGreater(later, first_word)              # rose and lit up
+
+    def test_clock_is_steady_and_snaps_on_seek(self):
+        c = scene.LyricClock()
+        self.assertEqual(c.now(1000, True, "a", t=0.0), 1000)
+        mid = c.now(1300, True, "a", t=0.1)                # reading jumped ahead 200 ms
+        self.assertTrue(1100 <= mid < 1300)                # folded in, not jumped
+        later = c.now(1150, True, "a", t=0.15)             # reading fell back: never go backwards
+        self.assertGreaterEqual(later, mid)
+        self.assertEqual(c.now(60000, True, "a", t=0.2), 60000)   # a seek snaps
+        self.assertEqual(c.now(500, True, "b", t=0.25), 500)      # new song snaps
+
+    def test_wipe_crosses_the_word_and_lines_slide(self):
+        box = scene.Box(0, 0, 900, 300)
+        st = ms.coerce({"lyric_motion": "wipe", "line_motion": "slide"})
+        anim = scene.LyricAnimator()
+        lines = [(0, "Hello"), (2000, "Wonderful")]
+        prog = scene.word_progress(2000, 6000, ["Wonderful"], 2100, "wipe")
+        self.assertTrue(0 < prog[0] < 1)
+        # mid-sweep: the left of the word is lit brighter than its right
+        _, full = anim.frame(lines, 5000, 6000, box, (255, 255, 255), 1080, st)
+        fb = full.getchannel("A").getbbox()
+        mid = anim.frame(lines, 2500, 6000, box, (255, 255, 255), 1080, st)[1].convert("L")
+        left = mid.crop((fb[0], fb[1], fb[0] + 60, fb[3])).getextrema()[1]
+        right = mid.crop((fb[2] - 60, fb[1], fb[2], fb[3])).getextrema()[1]
+        self.assertGreater(left, right)
 
     def test_rays_are_antialiased(self):
         lay = scene.scene_layout(1920, 1080)

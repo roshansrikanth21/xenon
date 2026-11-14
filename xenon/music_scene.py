@@ -213,20 +213,106 @@ def lyric_state(lines: list[tuple[int, str]], position_ms: int, duration_ms: int
 
 
 def _smooth(t: float) -> float:
+    t = max(0.0, min(1.0, t))
     return t * t * (3 - 2 * t)
+
+
+def _ease_out(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return 1 - (1 - t) ** 3
+
+
+class LyricClock:
+    """A steady playback clock for the lyrics.
+
+    The media session is polled about once a second and each reading can
+    land a little ahead of or behind the running estimate; following it
+    raw made words flicker back and lines stutter. This clock runs on its
+    own and folds small errors in over about half a second (never stepping
+    backwards while playing); a big jump (a seek, a new song) snaps."""
+
+    SNAP_MS = 700
+
+    def __init__(self) -> None:
+        self._pos: float | None = None
+        self._t = 0.0
+        self._key = None
+        self._playing = False
+
+    def now(self, reported_ms: int, playing: bool, key=None, t: float | None = None) -> int:
+        import time as _time
+
+        t = _time.monotonic() if t is None else t
+        if self._pos is None or key != self._key or playing != self._playing:
+            pos = float(reported_ms)
+        else:
+            dt = max(0.0, t - self._t)
+            pos = self._pos + dt * 1000.0 if playing else self._pos
+            err = reported_ms - pos
+            if abs(err) > self.SNAP_MS:
+                pos = float(reported_ms)
+            else:
+                pos += err * min(1.0, dt * 2.0)
+                if playing:
+                    pos = max(pos, self._pos)
+        self._pos, self._t, self._key, self._playing = pos, t, key, playing
+        return int(pos)
+
+
+LINE_EXIT_MS = 260
+LINE_ENTRY_DELAY_MS = 80
+
+
+def word_progress(start: int, end: int, words: list[str], position_ms: int, motion: str = "wipe") -> list[float]:
+    """0..1 per word: how far its highlight has got. A wipe takes as long
+    as the word is sung (kept between 0.14 and 1.1 s); fade and pop take a
+    fixed short time from the word's start."""
+    starts = word_starts(start, end, words)
+    if not starts:
+        return []
+    span = max(400, min(end - start, 8000))
+    ends = starts[1:] + [int(start + span * 0.82)]
+    out = []
+    for ws, we in zip(starts, ends):
+        if motion == "wipe":
+            length = max(140, min(1100, we - ws))
+        else:
+            length = WORD_FADE_MS if motion == "fade" else 260
+        out.append(max(0.0, min(1.0, (position_ms - ws) / length)))
+    return out
+
+
+def _paste_clipped(out: Image.Image, img: Image.Image, x: int, y: int) -> None:
+    left, top = max(0, -x), max(0, -y)
+    right, bottom = min(img.width, out.width - x), min(img.height, out.height - y)
+    if right <= left or bottom <= top:
+        return
+    if (left, top, right, bottom) != (0, 0, img.width, img.height):
+        img = img.crop((left, top, right, bottom))
+    out.alpha_composite(img, (x + left, y + top))
+
+
+def _scale_alpha(img: Image.Image, k: float) -> Image.Image:
+    if k >= 0.999:
+        return img
+    img = img.copy()
+    img.putalpha(img.getchannel("A").point(lambda v, k=k: int(v * k)))
+    return img
 
 
 class LyricAnimator:
     """Smooth lyric frames for little work per frame.
 
-    Each line is drawn twice, once with every word unsung and once with
-    every word lit (shadow, glow and the next line included), and kept.
-    A frame is the unsung image with each word's patch cross-faded toward
-    the lit one by how far that word is sung, the whole line rising and
-    fading in as it enters. The next line is drawn ahead on a background
-    thread, so a line change never stalls the render loop."""
+    Each line is drawn twice (every word unsung, every word lit, shadow
+    and glow included) and cut into one sprite pair per word, kept for the
+    line. A frame stacks the sprites: unsung words faint, sung ones lit and
+    lifted a touch, and the word being sung highlighted by a soft-edged
+    sweep that crosses it in the time it is sung (or a fade / pop). A new
+    line slides up into place as the old one drifts up and out. The next
+    line is drawn ahead on a background thread, so a line change never
+    stalls a frame."""
 
-    LEVELS = 24          # visible steps per word fade (quantises redraws)
+    STEPS = 48           # visible steps per word highlight (quantises redraws)
 
     def __init__(self) -> None:
         import threading
@@ -237,15 +323,38 @@ class LyricAnimator:
         self._wake = threading.Event()
         self._thread = None
 
+    # -- per-line parts, cached ------------------------------------------------
     def _build(self, key):
         text, upcoming, previous, box, accent, screen_height, settings = key
         n = len(text.split())
         regions: list = []
-        base = render_lyrics(box, LyricFrame(text, (0,) * n, REVEAL_STEPS, upcoming, previous),
-                             accent, screen_height, settings, regions)
+        faint = render_lyrics(box, LyricFrame(text, (0,) * n, REVEAL_STEPS, upcoming, previous),
+                              accent, screen_height, settings, regions)
         lit = render_lyrics(box, LyricFrame(text, (REVEAL_STEPS,) * n, REVEAL_STEPS, upcoming, previous),
                             accent, screen_height, settings)
-        return base, lit, regions
+        size = regions[0][4] if regions else int(screen_height / 8.5 * _settings(settings).lyric_size)
+        # Everything below works on the line's own bounding box (plus room
+        # for the lift), not the whole layer: full-size copies were most of
+        # a frame's cost.
+        boxes = [b for b in (faint.getbbox(), lit.getbbox()) if b]
+        if boxes:
+            m = int(size * 0.06 * 2) + 4
+            bb = (max(0, min(b[0] for b in boxes)), max(0, min(b[1] for b in boxes) - m),
+                  min(faint.width, max(b[2] for b in boxes)), min(faint.height, max(b[3] for b in boxes) + 2))
+        else:
+            bb = (0, 0, 1, 1)
+        empty = faint.crop(bb)
+        sprites = []
+        words_lit = Image.new("RGBA", empty.size, (0, 0, 0, 0))
+        for r in regions:
+            rect = r[:4]
+            sx, sy = rect[0] - bb[0], rect[1] - bb[1]
+            lit_word = lit.crop(rect)
+            sprites.append((faint.crop(rect), lit_word, sx, sy))
+            empty.paste((0, 0, 0, 0), (sx, sy, sx + rect[2] - rect[0], sy + rect[3] - rect[1]))
+            words_lit.alpha_composite(lit_word, (sx, sy))
+        return {"empty": empty, "sprites": sprites, "size": size, "words_lit": words_lit,
+                "origin": bb[:2], "full": faint.size}
 
     def _get(self, key):
         with self._lock:
@@ -258,7 +367,8 @@ class LyricAnimator:
     def _store(self, key, value) -> None:
         with self._lock:
             self._cache[key] = value
-            while len(self._cache) > 4:
+            self._cache[key] = self._cache.pop(key)      # newest last
+            while len(self._cache) > 5:
                 self._cache.pop(next(iter(self._cache)))
 
     def _prefetch(self, key) -> None:
@@ -287,46 +397,114 @@ class LyricAnimator:
             except Exception:
                 pass
 
+    @staticmethod
+    def _line(lines, index):
+        start, text = lines[index]
+        nxt = lines[index + 1] if index + 1 < len(lines) else None
+        prev = lines[index - 1][1].strip() if index > 0 else ""
+        return start, text.strip(), (nxt[1].strip() if nxt else ""), prev
+
+    # -- one word ----------------------------------------------------------------
+    def _word(self, faint, lit, q: float, motion: str, size: int):
+        """The word's picture at highlight ``q`` and how far it lifts."""
+        if q <= 0.0:
+            return faint, 0.0
+        if q >= 1.0:
+            return lit, 1.0
+        w, h = faint.size
+        if motion == "wipe":
+            soft = max(6, int(size * 0.5))
+            front = q * (w + soft)
+            row = bytes(max(0, min(255, int((front - x) * 255 / soft))) for x in range(w))
+            mask = Image.frombytes("L", (w, 1), row).resize((w, h), Image.NEAREST)
+            patch = faint.copy()
+            patch.paste(lit, (0, 0), mask)
+            return patch, _ease_out(q)
+        k = _smooth(q)
+        patch = Image.blend(faint, lit, k)
+        if motion == "pop":
+            grow = 1.0 + 0.10 * math.sin(math.pi * q)
+            if grow > 1.004:
+                big = patch.resize((max(1, int(w * grow)), max(1, int(h * grow))), Image.BILINEAR)
+                patch = big.crop(((big.width - w) // 2, (big.height - h) // 2,
+                                  (big.width - w) // 2 + w, (big.height - h) // 2 + h))
+        return patch, k
+
+    # -- a frame -----------------------------------------------------------------
     def frame(self, lines, position_ms: int, duration_ms: int, box: Box, accent=(255, 255, 255),
               screen_height: int = 1440, settings=None):
         """(key, image): ``key`` changes only when the picture would."""
         st = _settings(settings)
-        state = lyric_state(lines, position_ms, duration_ms)
-        if state is None:
-            return None, None
         accent = tuple(accent)
+        motion = getattr(st, "lyric_motion", "wipe")
+        line_motion = getattr(st, "line_motion", "slide")
+        lift_k = getattr(st, "lyric_lift", 1.0)
         style = st.lyric_style
-        if 0 <= state.index + 1 < len(lines):
-            nxt = lyric_state(lines, lines[state.index + 1][0], duration_ms)
-            if nxt is not None and nxt.text:
-                self._prefetch((nxt.text, nxt.upcoming, nxt.previous, box, accent, screen_height, st))
         if style == "fade":
-            levels = tuple(1.0 for _ in state.levels)
+            motion = "all"
+        index = line_at(lines, position_ms)
+        if index < 0:
+            if not (lines and lines[0][0] - position_ms < 2500):
+                return None, None
+            key = ("pre", lines[0][1].strip(), box, accent, screen_height, st)
+            parts = self._get(("", lines[0][1].strip(), "", box, accent, screen_height, st))
+            out = Image.new("RGBA", parts["full"], (0, 0, 0, 0))
+            out.paste(parts["empty"], parts["origin"])
+            return key, out
+
+        start, text, upcoming, previous = self._line(lines, index)
+        end = lines[index + 1][0] if index + 1 < len(lines) else (duration_ms or start + 5000)
+        static = (box, accent, screen_height, st)
+        parts = self._get((text, upcoming, previous) + static)
+        if index + 1 < len(lines):
+            ns, nt, nu, np_ = self._line(lines, index + 1)
+            if nt:
+                self._prefetch((nt, nu, np_) + static)
+
+        words = text.split()
+        if motion == "all":
+            progress = [1.0] * len(words)
         else:
-            levels = tuple(round(_smooth(v) * self.LEVELS) / self.LEVELS for v in state.levels)
-        entry = 1.0 if style == "karaoke" else round(_smooth(state.entry) * self.LEVELS) / self.LEVELS
-        key = (state.text, state.upcoming, state.previous, levels, entry, box, accent, screen_height, st)
-        base, lit, regions = self._get((state.text, state.upcoming, state.previous, box, accent,
-                                        screen_height, st))
-        if not state.text:
-            return key, base
-        out = base.copy()
-        for i, level in enumerate(levels):
-            if level <= 0.0 or i >= len(regions):
-                continue
-            r = regions[i][:4]
-            if level >= 1.0:
-                out.paste(lit.crop(r), r[:2])
-            else:
-                out.paste(Image.blend(base.crop(r), lit.crop(r), level), r[:2])
+            progress = word_progress(start, end, words, position_ms, motion)
+        q = tuple(round(v * self.STEPS) / self.STEPS for v in progress)
+        since = position_ms - start
+        entry = 1.0 if (line_motion == "cut" or style == "karaoke") else \
+            round(max(0.0, min(1.0, (since - LINE_ENTRY_DELAY_MS) / LINE_ENTRY_MS)) * self.STEPS) / self.STEPS
+        exit_t = 1.0
+        if line_motion != "cut" and index > 0 and since < LINE_EXIT_MS:
+            exit_t = round(max(0.0, since / LINE_EXIT_MS) * self.STEPS) / self.STEPS
+        key = (index, text, q, entry, exit_t, motion, line_motion, round(lift_k, 2)) + static
+
+        size = parts["size"]
+        line = parts["empty"].copy()
+        lift_px = size * 0.06 * lift_k
+        for (faint, lit, x, y), v in zip(parts["sprites"], q):
+            img, k = self._word(faint, lit, v, motion, size)
+            _paste_clipped(line, img, x, int(round(y - lift_px * k)))
+
+        out = Image.new("RGBA", parts["full"], (0, 0, 0, 0))
+        under = False
+        if exit_t < 1.0:
+            ps, pt, pu, pp = self._line(lines, index - 1)
+            if pt:
+                old = self._get((pt, pu, pp) + static)
+                t = _ease_out(exit_t)
+                drift = int(t * old["size"] * 1.1) if line_motion == "slide" else 0
+                ox, oy = old["origin"]
+                _paste_clipped(out, _scale_alpha(old["words_lit"], (1.0 - t) ** 2.5), ox, oy - drift)
+                under = True
+        bx, by = parts["origin"]
         if entry < 1.0:
-            size = regions[0][4] if regions else int(screen_height / 8.5)
-            rise = int((1 - entry) * size * 0.35)
-            if rise:
-                moved = Image.new("RGBA", out.size, (0, 0, 0, 0))
-                moved.paste(out.crop((0, 0, out.width, out.height - rise)), (0, rise))
-                out = moved
-            out.putalpha(out.getchannel("A").point(lambda v, e=entry: int(v * e)))
+            e = _ease_out(entry)
+            rise = int((1 - e) * size * 0.55) if line_motion == "slide" else 0
+            line, by = _scale_alpha(line, e), by + rise
+        if under:
+            _paste_clipped(out, line, bx, by)
+        else:
+            # Nothing underneath: a plain paste (no blend, no temporary copies).
+            if by + line.height > out.height:
+                line = line.crop((0, 0, line.width, max(1, out.height - by)))
+            out.paste(line, (bx, by))
         return key, out
 
 

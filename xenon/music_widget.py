@@ -872,8 +872,19 @@ class MusicWidget:
         self._ready.clear()
         self._thread = threading.Thread(target=self._run, name="xenon-music", daemon=True)
         self._thread.start()
+        started = time.monotonic()
         self._ready.wait(timeout=6.0)
         if self._surface is None:
+            if self._thread.is_alive():
+                # A cold start (first audio/media-session setup after boot or
+                # right after the last widget was killed) can take longer;
+                # keep it rather than silently giving up.
+                print("music widget: still starting...", flush=True)
+                self._ready.wait(timeout=24.0)
+                if self._surface is not None:
+                    print(f"music widget: up after {time.monotonic() - started:.1f} s", flush=True)
+                    return True
+            print("music widget: could not create its windows", flush=True)
             self.stop()
             return False
         return True
@@ -1021,7 +1032,8 @@ class MusicWidget:
         from types import SimpleNamespace
         self._painting()
         share = SimpleNamespace(track=None, playing=False, accent=(255, 255, 255), settings=settings,
-                                layout=layout, covered=False, repaint=0, rows_dirty=0, openness=0.0)
+                                layout=layout, covered=False, repaint=0, rows_dirty=0, openness=0.0,
+                                timeline=None, sleeping=False)
         dock_stop = threading.Event()
         dock_thread = None
         if "dock" in surfaces:
@@ -1029,6 +1041,10 @@ class MusicWidget:
                 target=self._dock_loop, daemon=True, name="xenon-music-dock",
                 args=(share, dock_stop, surfaces, boxes, pointer, dock_full, width, height, floor))
             dock_thread.start()
+        lyric_thread = threading.Thread(
+            target=self._lyric_loop, daemon=True, name="xenon-music-lyrics",
+            args=(share, dock_stop, surfaces["lyrics"], blank["lyrics"], height))
+        lyric_thread.start()
 
         last_attach = time.monotonic()
         last_coverage = 0.0
@@ -1039,7 +1055,6 @@ class MusicWidget:
         self._vinyl_drawn = None
         self._disc_drawn = None
         lyric_key = card_key = object()
-        lyric_anim = scene.LyricAnimator()
         orb_art = None
         orb_art_key = None
         halo_key = None
@@ -1125,8 +1140,10 @@ class MusicWidget:
                               and not self.fullscreen)
                 if want_sleep != sleeping:
                     sleeping = want_sleep
+                    share.sleeping = sleeping
                     if sleeping:
-                        audio_ok = self._sleep_surfaces(surfaces)
+                        with self._painting():
+                            audio_ok = self._sleep_surfaces(surfaces)
                     else:
                         audio_ok, _ = self._audio.start()
                         self._track_changed_at = now        # come back with the fade-in
@@ -1162,9 +1179,9 @@ class MusicWidget:
                 fade_in = dock.ease_out_cubic(since_change / 0.45) if self._track_changed_at else 1.0
 
                 # -- dock: its own thread draws it; hand over the state ------
+                share.track, share.playing, share.accent = track, playing, accent
+                share.settings, share.layout, share.timeline = settings, layout, timeline
                 if dock_thread is not None:
-                    share.track, share.playing, share.accent = track, playing, accent
-                    share.settings, share.layout = settings, layout
                     # The open menu shows what the card shows: hand over.
                     surfaces["card"].set_opacity(
                         255 * settings.opacity * (1.0 - dock.ease_out_cubic(min(1.0, share.openness * 3.0))))
@@ -1172,25 +1189,6 @@ class MusicWidget:
                 if sleeping:
                     time.sleep(0.03)        # the record and its dock stay live
                     continue
-
-                # -- lyrics: only when what is lit actually changes ------------
-                if now >= next_lyric:
-                    # Each line is drawn once (ahead of time); a frame only
-                    # cross-fades word patches, so word fades and the line's
-                    # entrance can run at 30 fps.
-                    key, image = None, None
-                    if track and settings.show_lyrics:
-                        lines = (self._lyrics.result() or {}).get("lines") or []
-                        if lines:
-                            key, image = lyric_anim.frame(lines, position, duration, layout.lyric_box,
-                                                          accent, height, settings)
-                    if key != lyric_key:
-                        lyric_key = key
-                        surfaces["lyrics"].push(image if image is not None else blank["lyrics"])
-                        self._has_frame = True
-                        next_lyric = now + 1.0 / 30
-                    else:
-                        next_lyric = now + 0.015
 
                 # -- card: title, art, progress --------------------------------
                 if now >= next_card:
@@ -1289,6 +1287,7 @@ class MusicWidget:
             dock_stop.set()
             if dock_thread is not None:
                 dock_thread.join(timeout=2.0)
+            lyric_thread.join(timeout=2.0)
             pointer.stop()
             from .wallpaper import detach_from_desktop
             for surface in surfaces.values():
@@ -1452,6 +1451,49 @@ class MusicWidget:
                 print(f"music widget: dock frame failed: {error}", flush=True)
                 time.sleep(0.5)
             period = 1.0 / 60 if busy else 1.0 / 20
+            time.sleep(max(0.002, period - (time.monotonic() - start)))
+
+    def _lyric_loop(self, share, stop, surface, blank, height) -> None:
+        """The lyric layer on its own thread: a steady clock (``LyricClock``)
+        and cheap sprite frames (``LyricAnimator``), pushed only when the
+        picture changes, up to ``lyric_fps`` times a second. On the render
+        loop they had to wait behind 20-ms ray frames, which made the
+        highlight stutter."""
+        from . import music_scene as scene
+
+        anim = scene.LyricAnimator()
+        clock = scene.LyricClock()
+        drawn = None
+        repaint = share.repaint
+        while not stop.is_set():
+            start = time.monotonic()
+            settings = share.settings
+            try:
+                if share.sleeping or share.covered:
+                    time.sleep(0.2)
+                    continue
+                if share.repaint != repaint:
+                    repaint = share.repaint
+                    drawn = object()
+                track, timeline, layout = share.track, share.timeline, share.layout
+                key, image = None, None
+                if track and timeline and settings.show_lyrics:
+                    lines = (self._lyrics.result() or {}).get("lines") or []
+                    if lines:
+                        position = clock.now(timeline.position_now(), timeline.playing, self._track_key)
+                        position += int(settings.lyric_offset * 1000)
+                        key, image = anim.frame(lines, position, timeline.duration_ms, layout.lyric_box,
+                                                share.accent, height, settings)
+                if key != drawn:
+                    drawn = key
+                    with self._painting():
+                        if not share.sleeping:
+                            surface.push(image if image is not None else blank)
+                    self._has_frame = True
+            except Exception as error:
+                print(f"music widget: lyric frame failed: {error}", flush=True)
+                time.sleep(0.5)
+            period = 1.0 / max(20, settings.lyric_fps)
             time.sleep(max(0.002, period - (time.monotonic() - start)))
 
     _SLEEP_KEEP = ("dock", "vinyl")

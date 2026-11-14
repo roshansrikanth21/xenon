@@ -31,17 +31,87 @@ _LABELS = {
 }
 
 
+_MOTION_LABELS = {"wipe": "Sweep across the word", "fade": "Fade in", "pop": "Pop"}
+_LINE_LABELS = {"slide": "Slide up", "fade": "Fade", "cut": "Instant"}
+
+_DEMO_LINES = [(0, "Say my name under the lights"), (2600, "One more time tonight"),
+               (4800, "Hold on to me"), (7000, "")]
+
+
+class LyricPreview:
+    """A small live preview of the lyric animation on the Lyrics tab: a
+    demo verse on a loop, drawn by the same animator the widget uses with
+    the settings as they are right now."""
+
+    W, H = 500, 170
+    LOOP_MS = 7600
+
+    def __init__(self, parent, settings_now) -> None:
+        import time
+
+        from . import music_scene as scene
+
+        self._scene = scene
+        self._settings_now = settings_now
+        self._anim = scene.LyricAnimator()
+        self._start = time.monotonic()
+        self._photo = None
+        self._drawn = None
+        self._job = None
+        frame = tk.Frame(parent, bg="#07080b", highlightthickness=1, highlightbackground="#2a2d38")
+        frame.pack(fill="x", pady=(0, 10))
+        self._label = tk.Label(frame, bg="#07080b", width=self.W, height=self.H, bd=0)
+        self._label.pack()
+        self._tick()
+
+    def _tick(self) -> None:
+        import time
+
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            return
+        st = self._settings_now()
+        pos = int((time.monotonic() - self._start) * 1000) % self.LOOP_MS
+        box = self._scene.Box(0, 0, self.W, self.H)
+        try:
+            key, img = self._anim.frame(_DEMO_LINES, pos, self.LOOP_MS, box, st.accent_rgb((255, 190, 90)),
+                                        420, st)
+        except Exception:
+            key, img = None, None
+        if key != self._drawn:
+            self._drawn = key
+            back = Image.new("RGBA", (self.W, self.H), (7, 8, 11, 255))
+            if img is not None:
+                back.alpha_composite(img)
+            self._photo = ImageTk.PhotoImage(back.convert("RGB"))
+            self._label.configure(image=self._photo)
+        try:
+            self._job = self._label.after(max(15, int(1000 / max(20, st.lyric_fps))), self._tick)
+        except tk.TclError:
+            self._job = None
+
+    def stop(self) -> None:
+        if self._job is not None:
+            try:
+                self._label.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+
+
 class SettingsWindow:
     def __init__(self, parent: tk.Misc | None = None, on_change=None) -> None:
         self._own_root = parent is None
         self.top = tk.Tk() if parent is None else tk.Toplevel(parent)
         self.top.title("Xenon music widget")
         self.top.configure(bg=BG)
-        self.top.geometry("520x620")
-        self.top.minsize(460, 520)
+        self.top.geometry("560x780")
+        self.top.minsize(500, 640)
         self._on_change = on_change
         self._settings = ms.load()
         self._vars: dict[str, tk.Variable] = {}
+        self._labels_for: dict[str, dict] = {}
         self._pending = None
         self._style()
         self._build()
@@ -66,6 +136,7 @@ class SettingsWindow:
         style.configure("TLabel", background=BG, foreground=FG)
         style.configure("Muted.TLabel", foreground=MUTED, font=("Segoe UI", 9))
         style.configure("Head.TLabel", font=("Segoe UI Semibold", 15))
+        style.configure("Section.TLabel", foreground=ACCENT, font=("Segoe UI Semibold", 10))
         style.configure("TCheckbutton", background=BG, foreground=FG)
         style.map("TCheckbutton", background=[("active", BG)])
         style.configure("TButton", background=PANEL, foreground=FG, borderwidth=0, padding=(12, 6))
@@ -112,13 +183,20 @@ class SettingsWindow:
         self._slider(viz, "bounce", "Beat bounce", 0.0, 2.0)
         self._slider(viz, "spin_speed", "Spin speed (deg/s, 0 = still)", 0.0, 60.0)
 
+        self._preview = LyricPreview(lyr, lambda: self._settings)
         self._check(lyr, "show_lyrics", "Show synced lyrics")
         self._choice(lyr, "lyric_style", "Style", ms.LYRIC_STYLES)
         self._slider(lyr, "lyric_size", "Size", 0.5, 1.6)
         self._choice(lyr, "lyric_case", "Case", ms.LYRIC_CASES)
-        self._choice(lyr, "lyric_align", "Alignment", ms.LYRIC_ALIGNS)
+        self._choice(lyr, "lyric_align", "Alignment", ms.LYRIC_ALIGNS, {"left": "Left", "center": "Centred"})
         self._slider(lyr, "unsung_opacity", "Unsung words", 0.0, 1.0)
         self._check(lyr, "show_upcoming", "Show the next line")
+        ttk.Label(lyr, text="Animation", style="Section.TLabel").pack(anchor="w", pady=(12, 2))
+        self._choice(lyr, "lyric_motion", "Word highlight", ms.LYRIC_MOTIONS, _MOTION_LABELS)
+        self._choice(lyr, "line_motion", "Line change", ms.LINE_MOTIONS, _LINE_LABELS)
+        self._slider(lyr, "lyric_lift", "Word lift", 0.0, 2.0)
+        self._slider(lyr, "lyric_fps", "Smoothness (fps)", 20, 60, integer=True)
+        self._slider(lyr, "lyric_offset", "Sync (s, + = sooner)", -2.0, 2.0)
 
         self._slider(audio, "sensitivity", "Sensitivity", 0.3, 3.0)
         self._slider(audio, "smoothing", "Smoothing", 0.0, 0.95)
@@ -154,15 +232,17 @@ class SettingsWindow:
         ttk.Label(row, text=label, width=18).pack(side="left")
         return row
 
-    def _choice(self, parent, key: str, label: str, options) -> None:
+    def _choice(self, parent, key: str, label: str, options, labels: dict | None = None) -> None:
         row = self._row(parent, label)
-        names = [_LABELS.get(o, o) for o in options]
-        var = tk.StringVar(value=_LABELS.get(getattr(self._settings, key), getattr(self._settings, key)))
+        labels = labels or _LABELS
+        names = [labels.get(o, o) for o in options]
+        var = tk.StringVar(value=labels.get(getattr(self._settings, key), getattr(self._settings, key)))
         box = ttk.Combobox(row, values=names, textvariable=var, state="readonly")
         box.pack(side="left", fill="x", expand=True)
         lookup = dict(zip(names, options))
         box.bind("<<ComboboxSelected>>", lambda _e: self._set(key, lookup[var.get()]))
         self._vars[key] = var
+        self._labels_for[key] = labels
 
     def _slider(self, parent, key: str, label: str, lo, hi, integer: bool = False) -> None:
         row = self._row(parent, label)
@@ -237,12 +317,13 @@ class SettingsWindow:
         for key, var in self._vars.items():
             value = getattr(self._settings, key)
             if isinstance(var, tk.StringVar):
-                var.set(_LABELS.get(value, value))
+                var.set(self._labels_for.get(key, _LABELS).get(value, value))
             else:
                 var.set(value)
         self._swatch.configure(bg=self._settings.custom_color)
 
     def close(self) -> None:
+        self._preview.stop()
         if self._pending is not None:
             self.top.after_cancel(self._pending)
             self._save()

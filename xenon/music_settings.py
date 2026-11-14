@@ -18,6 +18,8 @@ SIDES = ("right", "left")
 LYRIC_STYLES = ("poster", "reveal", "karaoke", "stack", "fade")
 LYRIC_CASES = ("upper", "original")
 LYRIC_ALIGNS = ("left", "center")
+LYRIC_MOTIONS = ("wipe", "fade", "pop")
+LINE_MOTIONS = ("slide", "fade", "cut")
 # Theme presets: name -> glow colour. "album" follows the cover art,
 # "custom" uses ``custom_color``.
 THEMES = {
@@ -37,6 +39,9 @@ _RANGES = {
     "lyric_size": (0.5, 1.6),
     "unsung_opacity": (0.0, 1.0),
     "glow": (0.0, 2.0),
+    "lyric_lift": (0.0, 2.0),
+    "lyric_offset": (-2.0, 2.0),
+    "lyric_fps": (20, 60),
     "spin_speed": (0.0, 60.0),
     "bounce": (0.0, 2.0),
     "idle_minutes": (0.0, 120.0),
@@ -57,6 +62,8 @@ _CHOICES = {
     "lyric_style": LYRIC_STYLES,
     "lyric_case": LYRIC_CASES,
     "lyric_align": LYRIC_ALIGNS,
+    "lyric_motion": LYRIC_MOTIONS,
+    "line_motion": LINE_MOTIONS,
 }
 
 
@@ -92,6 +99,11 @@ class MusicSettings:
     lyric_align: str = "left"
     unsung_opacity: float = 0.18
     glow: float = 1.0
+    lyric_motion: str = "wipe"       # how a sung word lights: wipe | fade | pop
+    line_motion: str = "slide"       # how lines change: slide | fade | cut
+    lyric_lift: float = 1.0          # how far a sung word rises
+    lyric_offset: float = 0.0        # seconds; + shows the lyrics sooner
+    lyric_fps: int = 60              # lyric animation frame rate
     # card
     show_card: bool = True
     suggestions: bool = True         # dock suggests similar songs (asks Deezer)
