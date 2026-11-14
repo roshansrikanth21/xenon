@@ -682,6 +682,23 @@ class OrbTasks:
             origin,
         ))
 
+    def local_choice(self, prompt_id: str, title: str, labels: list[str],
+                     on_pick: Callable[[str | None], None], origin: str = "typed") -> None:
+        """A choice card for one of Xenon's own questions (Xtreme mode's
+        "close these apps?"), registered like the busy card so a spoken
+        "the first one" / "keep apps open" / "never mind" answers it, and
+        read out when the request was spoken. A choice is not an approval:
+        nothing here mints a token."""
+        prompt = ChoicePrompt(prompt_id, title, list(labels), on_pick)
+        with self._lock:
+            self._choices = [p for p in self._choices if p.prompt_id != prompt_id]
+            self._choices.append(prompt)
+        self._post(lambda: self._ui.task_choice(
+            prompt.prompt_id, prompt.title, prompt.labels,
+            lambda label: self._resolve_choice(prompt.prompt_id, label),
+            "voice" if origin.startswith("voice") else origin,
+        ))
+
     def _resolve_choice(self, prompt_id: str, label: str | None) -> None:
         with self._lock:
             prompt = next((p for p in self._choices if p.prompt_id == prompt_id), None)
@@ -1497,7 +1514,156 @@ class OrbApp:
             print(f"global hotkeys unavailable: {error}", file=sys.stderr, flush=True)
         self._last = time.perf_counter()
         self._start_game_watch()
+        try:
+            from xenon import orb_commands
+
+            orb_commands.set_handler(self._orb_command)
+        except Exception as error:
+            print(f"voice controls unavailable: {error}", file=sys.stderr, flush=True)
+        if tray:
+            # Only the real app learns (tests build the orb without a tray
+            # and must not write to the real habit store).
+            self._start_habits()
         self._tick()
+
+    # ----- voice / typed controls ------------------------------------------
+
+    def _orb_command(self, cmd, origin: str = "") -> str | None:
+        """Run one of Xenon's own controls (``orb_commands``) for the voice
+        loop or the typed path. Called off the Tk thread: everything that
+        touches the orb goes through ``post``; the reply is said at once."""
+        kind = cmd.kind
+        spoken = "voice" if origin.startswith("voice") else origin
+        if kind == "game_on":
+            if self.game_mode:
+                return "Game mode is already on."
+            self.post(self.enter_game_mode)
+            try:
+                from xenon import game_mode
+                keep = game_mode.load().keep_voice
+            except Exception:
+                keep = True
+            return "Game mode on." + (" Say game mode off when you're done." if keep
+                                      else " Press Control Alt G to come back.")
+        if kind in {"game_off", "xtreme_off"}:
+            if not self.game_mode:
+                return "Game mode isn't on." if kind == "game_off" else "Xtreme mode isn't on."
+            self.post(lambda: self.exit_game_mode(by_hand=True))
+            return "Back to normal. Everything's on again."
+        if kind == "xtreme_on":
+            if self.game_mode and self.xtreme:
+                return "Xtreme mode is already on."
+
+            def go() -> None:
+                if self.game_mode:
+                    self.exit_game_mode(by_hand=True)
+                self.enter_xtreme_mode(spoken)
+
+            self.post(go)
+            return "Checking what's heavy. I'll ask before closing anything."
+        if kind in {"widget_on", "widget_off"}:
+            want = kind == "widget_on"
+            if self.music_widget_running() == want:
+                return f"The music widget is already {'on' if want else 'off'}."
+            self.post(self.toggle_music_widget)
+            return f"Music widget {'on' if want else 'off'}."
+        if kind == "widget_settings":
+            self.post(self.open_music_settings)
+            return "Opening the music widget settings."
+        from xenon import learning
+
+        if kind in {"learn_on", "learn_off"}:
+            return learning.set_learning(kind == "learn_on")
+        if kind == "forget_history":
+            return learning.forget()
+        if kind == "listening_summary":
+            store = learning.store()
+            try:
+                return store.describe_listening() if store is not None else None
+            except Exception:
+                return None
+        return None
+
+    # ----- habits ------------------------------------------------------------
+
+    def _start_habits(self) -> None:
+        """Learn locally what you play and use (see ``patterns``): which app
+        is in front every couple of seconds (exe names only, never titles),
+        and what is playing when the music widget is off (it reports while
+        it runs). Seeds from the widget's song list once; refreshes Spotify
+        history every half hour when the login allows it."""
+        if os.environ.get("XENON_PATTERNS", "").strip().lower() in {"0", "off", "false", "no"}:
+            return
+
+        def run() -> None:
+            from xenon import learning
+
+            store = learning.store()
+            if store is None:
+                return
+            try:
+                from xenon.music_history import MusicHistory
+
+                store.import_history([
+                    {"title": e.title, "artist": e.artist, "app": e.app, "played_at": e.played_at}
+                    for e in MusicHistory().recent(None, 200)
+                ])
+            except Exception:
+                pass
+            player = None
+            last_sync = 0.0
+            me = os.getpid()
+            from xenon.game_mode import _exe_of_window
+
+            while not self._closing:
+                now = time.time()
+                try:
+                    if learning.enabled():
+                        hwnd = ctypes.windll.user32.GetForegroundWindow()
+                        pid = wintypes.DWORD()
+                        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        exe = _exe_of_window(hwnd) if hwnd and pid.value != me else ""
+                        store.focus(exe or None, now)
+                        if self.music_widget_running():
+                            if player is not None:
+                                player.stop()
+                                player = None
+                        else:
+                            if player is None:
+                                from xenon.smtc import NowPlaying
+
+                                player = NowPlaying()
+                                player.start()
+                            track, timeline = player.state()
+                            if track is not None:
+                                from xenon.media_titles import tidy
+
+                                track = tidy(track)
+                                store.track_update(track.title, track.artist, track.album, track.app,
+                                                   playing=bool(timeline and timeline.playing),
+                                                   video=getattr(track, "video", False), now=now)
+                        if now - last_sync > 1800:
+                            last_sync = now
+                            threading.Thread(target=self._sync_spotify, args=(store,), daemon=True,
+                                             name="xenon-spotify-history").start()
+                except Exception as error:
+                    print(f"habits: {error}", file=sys.stderr, flush=True)
+                time.sleep(2.0)
+            if player is not None:
+                player.stop()
+
+        threading.Thread(target=run, daemon=True, name="xenon-habits").start()
+
+    @staticmethod
+    def _sync_spotify(store) -> None:
+        try:
+            from xenon import music, patterns
+
+            client = music.spotify_client() if hasattr(music, "spotify_client") else None
+            if client is not None:
+                patterns.spotify_sync(store, client)
+        except Exception:
+            pass
 
     def _start_companion(self) -> None:
         try:
@@ -1541,7 +1707,14 @@ class OrbApp:
         }
         if self.tasks is not None and self.tasks.has_task():
             self.stop_task()
-        if restore["voice"]:
+        # Voice keeps listening (it only transcribes when it hears speech)
+        # so "game mode off" works; game_mode.json keep_voice=false stops it.
+        try:
+            keep_voice = game_mode.load().keep_voice
+        except Exception:
+            keep_voice = True
+        restore["voice_stopped"] = bool(restore["voice"] and not keep_voice)
+        if restore["voice_stopped"]:
             self._toggle_voice()
         for card in [*self._cards.values(), *self._choice_cards.values()]:
             try:
@@ -1605,7 +1778,7 @@ class OrbApp:
         threading.Thread(target=come_back, daemon=True, name="xenon-game-back").start()
         if self.hidden and not restore.get("hidden", False):
             self.toggle_hidden()
-        if restore.get("voice") and self._voice_stop is None:
+        if restore.get("voice_stopped") and self._voice_stop is None:
             self._toggle_voice()
         self._last = time.perf_counter()
         print("game mode off", flush=True)
@@ -1620,10 +1793,11 @@ class OrbApp:
         else:
             self.enter_xtreme_mode()
 
-    def enter_xtreme_mode(self) -> None:
+    def enter_xtreme_mode(self, origin: str = "typed") -> None:
         """Find the heavy apps (one-second sample, off the Tk thread), ask on
         a card which way to go, then game mode plus the laptop tuned up (see
-        ``xtreme``). Dismissing the card cancels."""
+        ``xtreme``). Dismissing the card cancels. Asked by voice, the card's
+        question is read out and can be answered by voice."""
         if self.game_mode or self._xtreme_busy or self._closing:
             return
         self._xtreme_busy = True
@@ -1638,11 +1812,11 @@ class OrbApp:
             except Exception as error:
                 print(f"xtreme: could not list apps: {error}", file=sys.stderr, flush=True)
                 heavy = []
-            self.post(lambda: self._ask_xtreme(heavy))
+            self.post(lambda: self._ask_xtreme(heavy, origin))
 
         threading.Thread(target=scan, daemon=True, name="xenon-xtreme-scan").start()
 
-    def _ask_xtreme(self, found) -> None:
+    def _ask_xtreme(self, found, origin: str = "typed") -> None:
         self.model.set_state(self._rest_state())
 
         def size(a) -> str:
@@ -1674,7 +1848,10 @@ class OrbApp:
             close = bool(heavy) and choice == labels[0]
             self.post(lambda: self._go_xtreme([a.exe for a in heavy] if close else []))
 
-        self.task_choice("xtreme", title, labels, picked)
+        if self.tasks is not None:
+            self.tasks.local_choice("xtreme", title, labels, picked, origin)
+        else:
+            self.task_choice("xtreme", title, labels, picked)
 
     def _go_xtreme(self, close_exes) -> None:
         from xenon import game_mode, xtreme
@@ -2694,6 +2871,16 @@ class OrbApp:
         if self._closing:
             return
         self._closing = True
+        try:
+            from xenon import learning
+
+            store = learning.store()
+            if store is not None:
+                store.finish()
+                store.focus(None)
+                store.flush(1.0)
+        except Exception:
+            pass
         if self.xtreme:
             try:
                 from xenon import xtreme as _x

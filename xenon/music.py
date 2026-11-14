@@ -38,7 +38,11 @@ TOKEN_URL = "https://accounts.spotify.com/api/token"
 DEFAULT_REDIRECT = "http://127.0.0.1:8888/callback"
 SCOPES = (
     "user-read-playback-state user-modify-playback-state "
-    "user-read-currently-playing user-library-read playlist-read-private"
+    "user-read-currently-playing user-library-read playlist-read-private "
+    # For xenon.patterns: learn what you play even when Xenon wasn't
+    # watching. Tokens from before these were added simply get HTTP 403 on
+    # those two endpoints until ``xenon spotify login`` is run again.
+    "user-read-recently-played user-top-read"
 )
 
 # ----------------------------------------------------------------- parsing --
@@ -399,6 +403,55 @@ class SpotifyClient:
     def now_playing(self) -> dict | None:
         return self.call("GET", "/me/player/currently-playing")
 
+    # read-only history, for xenon.patterns (needs the newer scopes; an old
+    # token raises SpotifyError(403) and the caller treats that as "not yet")
+
+    def recently_played(self, after_ms: int | None = None, limit: int = 50) -> list[dict]:
+        """Your last plays as plain dicts, oldest data first is not promised.
+
+        ``played_at`` is converted to epoch seconds so callers never parse
+        Spotify's ISO strings themselves.
+        """
+        from datetime import datetime
+
+        params = {"limit": max(1, min(int(limit), 50)), "after": int(after_ms) if after_ms else None}
+        payload = self.call("GET", "/me/player/recently-played", params) or {}
+        out: list[dict] = []
+        for item in payload.get("items", []) if isinstance(payload, dict) else []:
+            track = (item or {}).get("track") or {}
+            stamp = str((item or {}).get("played_at") or "")
+            if not track.get("name") or not stamp:
+                continue
+            try:
+                played = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            out.append({
+                "track_id": str(track.get("id") or ""),
+                "title": str(track.get("name") or ""),
+                "artist": ", ".join(str(a.get("name", "")) for a in track.get("artists", []) if a),
+                "album": str((track.get("album") or {}).get("name") or ""),
+                "played_at": played,
+            })
+        return out
+
+    def top(self, kind: str = "artists", time_range: str = "short_term", limit: int = 10) -> list:
+        """Your top artists or tracks as [{name, artist, id}] (artist is ""
+        for kind="artists")."""
+        if kind not in {"artists", "tracks"}:
+            raise ValueError("kind must be 'artists' or 'tracks'")
+        params = {"time_range": time_range, "limit": max(1, min(int(limit), 50))}
+        payload = self.call("GET", f"/me/top/{kind}", params) or {}
+        out: list[dict] = []
+        for item in payload.get("items", []) if isinstance(payload, dict) else []:
+            if not item or not item.get("name"):
+                continue
+            artist = ""
+            if kind == "tracks":
+                artist = ", ".join(str(a.get("name", "")) for a in item.get("artists", []) if a)
+            out.append({"name": str(item["name"]), "artist": artist, "id": str(item.get("id") or "")})
+        return out
+
 
 # ------------------------------------------------------------- controller --
 
@@ -654,6 +707,13 @@ class MusicController:
             return None
         preferred = [d for d in devices if d.get("type") == "Computer"] or devices
         return preferred[0].get("id")
+
+
+def spotify_client() -> "SpotifyClient | None":
+    """The logged-in Spotify client, or None (not logged in). Used by the
+    habit store to read recently played and top artists."""
+    tokens = load_tokens()
+    return SpotifyClient(tokens) if tokens else None
 
 
 def spotify_app_installed() -> bool:

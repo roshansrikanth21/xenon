@@ -115,6 +115,7 @@ class MusicSettings:
     follow_voice: bool = True        # nudge guessed word timing onto the singing it hears
     lyric_script: str = "original"   # original | latin (Indian scripts spelled in English letters)
     lyrics_for_videos: bool = False  # look up lyrics when a video (not a song) is playing
+    learn_patterns: bool = True      # Xenon learns your songs, listening times and apps (kept on this PC)
     # card
     show_card: bool = True
     suggestions: bool = True         # dock suggests similar songs (asks Deezer)

@@ -1388,6 +1388,20 @@ class MusicWidget:
                 sounding = (audio_ok and track is not None and not media_playing
                             and self._sound.update(self._audio.read_latest(1024), now))
                 playing = media_playing or bool(sounding)
+                # Habits (see ``patterns``): about once a second, what is on
+                # and whether it is really playing. The store queues writes
+                # on its own thread, so this never holds up a frame.
+                if track is not None and now - getattr(self, "_habit_at", 0.0) >= 1.0:
+                    self._habit_at = now
+                    try:
+                        from xenon import learning
+
+                        habits = learning.store() if learning.enabled() else None
+                        if habits is not None:
+                            habits.track_update(track.title, track.artist, track.album, track.app,
+                                                playing=playing, video=getattr(track, "video", False))
+                    except Exception:
+                        pass
 
                 # -- sleep: no music for a while -> only the corner record --
                 if playing:

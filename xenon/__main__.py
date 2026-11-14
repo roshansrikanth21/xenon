@@ -297,7 +297,7 @@ class _OrbBackend:
         self._store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
         self._chat = OpenAICompatibleChat(config) if config is not None else None
         self._assistant = (
-            Assistant(_observer(), self._store, OpenAICompatibleChat(config))
+            Assistant(_observer(), self._store, OpenAICompatibleChat(config), **_context_kwargs())
             if config is not None
             else None
         )
@@ -310,6 +310,7 @@ class _OrbBackend:
         if self._assistant is None:
             raise ChatUnavailable(_NO_MODEL)
         answer = self._assistant.ask(question)
+        _remember_exchange(question, answer.text, "chat", "typed", private=True)
         sources = [
             f"{memory.title} ({memory.source_kind})" for memory in answer.memories
         ]
@@ -326,6 +327,7 @@ class _OrbBackend:
         text = _without_wake(text)
         fast, understood = _smart_reply(text, self._chat)
         if fast is not None:
+            _remember_exchange(text, fast, "command", "typed")
             return OrbReply(fast, note=f"did: {understood}" if understood else "fast path")
         return self._answer(text)
 
@@ -1023,7 +1025,7 @@ def _orb_voice_runner(config):
         assistant = (
             Assistant(
                 _observer(), store, OpenAICompatibleChat(config),
-                max_memories=2, max_context_chars=1800,
+                max_memories=2, max_context_chars=1800, **_context_kwargs(),
             )
             if config is not None
             else None
@@ -1150,14 +1152,16 @@ def _orb_voice_runner(config):
                 ducker.duck()  # keep it down while thinking and replying
                 chime.play("heard")
                 hooks.state("heard", command)
+                heard_as = "voice" if gate.may_start_task else "voice-ambient"
                 reply, private = _voice_dispatch(
                     command,
                     hooks,
-                    lambda text: _smart_reply(text, router_model, origin="voice"),
+                    lambda text: _smart_reply(text, router_model, origin="voice", control_origin=heard_as),
                     answer,
-                    origin="voice" if gate.may_start_task else "voice-ambient",
+                    origin=heard_as,
                 )
                 _exchange(hooks, command, reply, private)
+                _remember_exchange(command, reply, "chat" if private else "command", heard_as, private)
                 if stop.is_set():
                     break
                 say(reply)
@@ -1531,33 +1535,95 @@ def _run_actions(
 
 def _recognised(command: str) -> bool:
     """Can a deterministic parser run this? (Keeps the router honest.)"""
-    from xenon import brightness, music, quick
+    from xenon import brightness, music, orb_commands, quick
 
     command = _without_wake(command)
+    if _habit_rewrite(command) is not None:
+        return True
     return any(
         parser(command) is not None
-        for parser in (quick.parse, brightness.parse, music.parse, fastpath.parse)
+        for parser in (quick.parse, orb_commands.parse, brightness.parse, music.parse, fastpath.parse)
     )
 
 
-def _smart_reply(text: str, model=None, origin: str = "typed") -> tuple[str | None, str | None]:
+def _context_kwargs() -> dict:
+    """What every Assistant gets so it follows the conversation and knows
+    the user's habits (learned locally; only a short summary is sent)."""
+    from xenon import conversation, learning
+
+    return {"history": conversation.shared(), "profile": learning.summary}
+
+
+def _router_context() -> str:
+    """Background for the router: the last few turns (so "play that again"
+    or "turn it up" resolve) and the habits summary (so "my usual" does)."""
+    from xenon import conversation, learning
+
+    parts = []
+    recent = conversation.shared().as_text(3)
+    if recent:
+        parts.append("Recent conversation:\n" + recent)
+    habits = learning.summary()
+    if habits:
+        parts.append("What Xenon knows about the user's habits: " + habits[:400])
+    return "\n\n".join(parts)
+
+
+def _habit_rewrite(command: str) -> str | None:
+    """"play my usual" / "play that again" / "more like this" -> a concrete
+    play command from what the user actually listens to."""
+    from xenon import learning
+
+    store = learning.store()
+    if store is None:
+        return None
+    try:
+        return store.rewrite_music_request(command)
+    except Exception:
+        return None
+
+
+def _remember_exchange(user: str, reply: str, kind: str, origin: str, private: bool = False) -> None:
+    """One place that records each exchange: the conversation memory (so
+    follow-ups resolve) and the habit store's request log."""
+    try:
+        from xenon import conversation, learning
+
+        if user and reply is not None:
+            conversation.shared().add(user, reply, kind=kind, private=private)
+        store = learning.store()
+        if store is not None and learning.enabled():
+            store.log_request(user, kind, ok=bool(reply), origin=origin)
+    except Exception:
+        pass
+
+
+def _smart_reply(text: str, model=None, origin: str = "typed",
+                 control_origin: str | None = None) -> tuple[str | None, str | None]:
     """Run a request as a command if possible: instant parsers first, then
-    the model's reading of it. Returns (reply, understood_command)."""
-    reply = _voice_fast_reply(text, origin=origin)
+    the model's reading of it. Returns (reply, understood_command).
+
+    ``control_origin`` is who asked, for Xenon's own switches (game mode,
+    Xtreme): heard in the background ("voice-ambient") they are refused."""
+    control = control_origin or origin
+    reply = _voice_fast_reply(text, origin=origin, control_origin=control)
     if reply is not None or model is None:
         return reply, None
     from xenon import router
 
-    command = router.route(_without_wake(text), model.complete, _recognised)
+    command = router.route(_without_wake(text), model.complete, _recognised, _router_context())
     if command is None:
         return None, None
     # A routed command is the model's reading of his words, so it gets the
     # stricter origin.
-    return _voice_fast_reply(command, origin="model" if origin == "typed" else origin), command
+    routed = "model" if origin == "typed" else origin
+    return _voice_fast_reply(command, origin=routed,
+                             control_origin="model" if control == "typed" else control), command
 
 
 def _voice_fast_reply(
-    command: str, backend=None, search_fn=None, music_controller=None, origin: str = "typed"
+    command: str, backend=None, search_fn=None, music_controller=None, origin: str = "typed",
+    control_origin: str | None = None,
 ) -> str | None:
     """Run open/focus/search/music without a model, or return None otherwise.
 
@@ -1572,6 +1638,19 @@ def _voice_fast_reply(
     quick_command = quick.parse(command)
     if quick_command is not None:
         return quick.run(quick_command)
+    # Xenon's own controls (game/Xtreme mode, the music widget and its
+    # settings, learning) before brightness and fastpath, which would read
+    # "make the glow brighter" / "start xtreme" as something else.
+    from xenon import orb_commands
+
+    control = orb_commands.parse(command)
+    if control is not None:
+        return orb_commands.run(control, control_origin or origin)
+    # Habit phrases ("play my usual", "play that again") become a concrete
+    # play command before the music parser reads "usual" as a playlist.
+    rewritten = _habit_rewrite(command)
+    if rewritten:
+        command = rewritten
     from xenon import brightness
 
     bright = brightness.parse(command)

@@ -218,6 +218,7 @@ class SettingsWindow:
         self._check(system, "suggestions", "Suggest similar songs in the dock (asks Deezer)")
         self._slider(system, "fps", "Frame rate", 10, 60, integer=True)
         self._check(system, "pause_when_covered", "Pause when windows cover the desktop")
+        self._check(system, "learn_patterns", "Learn my songs, listening times and apps (stays on this PC)")
         ttk.Label(system, text=f"Settings file:\n{ms.settings_path()}", style="Muted.TLabel",
                   justify="left").pack(anchor="w", pady=(14, 0))
 

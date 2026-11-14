@@ -17,7 +17,9 @@ Settings, ``%APPDATA%/xenon/game_mode.json``::
     {"close_apps": ["chrome.exe"], "auto": false, "keep_apps": ["discord.exe"]}
 
 ``keep_apps`` is for Xtreme mode (see ``xtreme``): apps it never offers
-to close.
+to close. ``keep_voice`` (default true) leaves voice listening in game and
+Xtreme mode, so you can say "game mode off"; the listener only transcribes
+when it hears speech, but set it false to squeeze out the last bit.
 """
 from __future__ import annotations
 
@@ -43,6 +45,7 @@ class GameModeConfig:
     close_apps: list = field(default_factory=list)   # exe names, asked to close on entry
     auto: bool = False                               # enter when a full-screen game runs
     keep_apps: list = field(default_factory=list)    # Xtreme mode never offers to close these
+    keep_voice: bool = True                          # voice keeps listening, so "game mode off" works
 
 
 def config_path() -> Path:
@@ -64,7 +67,7 @@ def load(path: Path | None = None) -> GameModeConfig:
         return [str(a).strip() for a in value if str(a).strip()] if isinstance(value, list) else []
 
     return GameModeConfig(close_apps=names("close_apps"), auto=bool(data.get("auto", False)),
-                          keep_apps=names("keep_apps"))
+                          keep_apps=names("keep_apps"), keep_voice=bool(data.get("keep_voice", True)))
 
 
 def save(config: GameModeConfig, path: Path | None = None) -> None:
