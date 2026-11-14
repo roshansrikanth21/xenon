@@ -167,3 +167,20 @@ class VinylDockAndBounceTests(unittest.TestCase):
             self.assertEqual(ms.load(path).spin_speed, 0.0)
             ms.save(ms.coerce({"spin_speed": 9.0}), path)
             self.assertEqual(ms.load(path).spin_speed, 9.0)
+
+
+class AlbumColourTests(unittest.TestCase):
+    def test_main_colour_wins_over_a_few_bright_pixels(self):
+        import sys
+        if sys.platform != "win32":
+            self.skipTest("Windows only module")
+        from xenon.music_scene import accent_from_palette
+        from xenon.music_widget import palette_from_image
+
+        img = Image.new("RGB", (100, 100), (200, 70, 110))          # a pink cover
+        for x in range(5):
+            img.putpixel((x, 0), (0, 255, 0))                       # a few green pixels
+        r, g, b = accent_from_palette(palette_from_image(img))
+        self.assertTrue(r > 200 and g < r and b < r and r - g > 60)  # bright pink-red, not green
+        grey = Image.new("RGB", (50, 50), (128, 128, 128))
+        self.assertEqual(accent_from_palette(palette_from_image(grey)), (255, 255, 255))

@@ -611,12 +611,20 @@ def render_card(box: Box, title: str, artist: str, cover: Image.Image | None,
 
 
 def accent_from_palette(palette: list[tuple[int, int, int]]) -> tuple[int, int, int]:
-    """A light, slightly tinted glow colour from the art (pure white when
-    the art is grey), so the scene picks up the album's mood."""
+    """The rays' colour from the album's main colour: same hue, lifted to a
+    bright, glowing tone (pure white when the art is grey or black-and-white)."""
+    import colorsys
+
     if not palette:
         return (255, 255, 255)
     r, g, b = palette[0]
-    return (int(r * 0.35 + 255 * 0.65), int(g * 0.35 + 255 * 0.65), int(b * 0.35 + 255 * 0.65))
+    h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    if s < 0.18 or v < 0.08:
+        return (255, 255, 255)
+    s = max(0.45, min(0.75, s))
+    v = 1.0
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (int(r * 255), int(g * 255), int(b * 255))
 
 
 # ------------------------------------------------------------------ split orb

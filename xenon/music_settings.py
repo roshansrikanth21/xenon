@@ -126,7 +126,7 @@ SETTINGS_VERSION = 4
 # so behaviour toggles (autostart, dock, side) stay as the user set them.
 VIDEO_LOOK = {
     "disc": "glow", "visualizer": "rays", "bar_count": 120, "ray_length": 1.0,
-    "orb_size": 1.0, "opacity": 1.0, "accent": "white", "halo": False,
+    "orb_size": 1.0, "opacity": 1.0, "accent": "album", "halo": False,
     "backdrop": 0.0, "glow": 0.6, "fps": 30, "spin_speed": 0.0, "bounce": 1.0,
     "sensitivity": 1.0, "smoothing": 0.5,
     "show_lyrics": True, "lyric_style": "poster", "lyric_case": "upper",

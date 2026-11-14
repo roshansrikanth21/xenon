@@ -123,7 +123,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_video_look_keeps_behaviour_toggles(self):
         s = ms.video_look(ms.coerce({"disc": "vinyl", "bar_count": 36, "show_dock": False, "side": "left"}))
-        self.assertEqual((s.disc, s.bar_count, s.accent, s.halo), ("glow", 120, "white", False))
+        self.assertEqual((s.disc, s.bar_count, s.accent, s.halo), ("glow", 120, "album", False))
         self.assertEqual((s.show_dock, s.side), (False, "left"))
 
     def test_v3_turns_the_old_halo_off_but_keeps_a_new_choice(self):

@@ -95,30 +95,35 @@ def spectrum_bars(
 
 
 def palette_from_image(image: Image.Image, count: int = 3) -> list[tuple[int, int, int]]:
-    """A few bright, saturated colors to paint the bars with, so the widget
-    inherits the album's own mood."""
-    small = image.convert("RGB").resize((24, 24))
-    pixels = list(small.getdata())
-    scored = sorted(
-        (
-            (max(r, g, b) - min(r, g, b)) + 0.35 * (r + g + b) / 3,
-            (r, g, b),
-        )
-        for r, g, b in pixels
-    )
+    """The album's main colours, most important first: the cover is reduced
+    to a handful of colours and each is scored by how much of the cover it
+    fills and how colourful it is (near-black, near-white and grey count
+    for little), so a pink desert cover gives pink, not its one red pixel."""
+    import colorsys
+
+    small = image.convert("RGB").resize((48, 48))
+    try:
+        quant = small.quantize(colors=8, method=Image.Quantize.MEDIANCUT)
+        pal = quant.getpalette() or []
+        counts = sorted(quant.getcolors() or [], reverse=True)
+        swatches = [(n, tuple(pal[i * 3:i * 3 + 3])) for n, i in counts]
+    except Exception:
+        swatches = [(1, c) for c in small.getdata()]
+    total = sum(n for n, _ in swatches) or 1
+    scored = []
+    for n, (r, g, b) in swatches:
+        h, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        colourful = sat * min(1.0, val * 1.6)          # dark or grey: little colour
+        scored.append(((n / total) ** 0.6 * (0.08 + colourful), (r, g, b)))
+    scored.sort(reverse=True)
     palette: list[tuple[int, int, int]] = []
-    for _, color in reversed(scored):
-        if any(
-            sum(abs(a - b) for a, b in zip(color, picked)) < 60
-            for picked in palette
-        ):
+    for _, color in scored:
+        if any(sum(abs(a - b) for a, b in zip(color, picked)) < 60 for picked in palette):
             continue
         palette.append(color)
         if len(palette) >= count:
             break
-    if not palette:
-        palette = [(120, 130, 160)]
-    return palette
+    return palette or [(120, 130, 160)]
 
 
 def current_line(lines: list[tuple[int, str]], position_ms: int) -> str:
