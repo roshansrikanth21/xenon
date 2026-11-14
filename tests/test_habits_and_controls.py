@@ -181,3 +181,40 @@ class VoiceWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PcControlTests(unittest.TestCase):
+    """Lock / shut down / restart / cancel, with fake executors: the test
+    run never touches the real PC."""
+
+    def test_parse(self):
+        cases = {"lock my pc": "lock_pc", "shut down my laptop": "shutdown_pc", "restart my computer": "restart_pc",
+                 "cancel shutdown": "cancel_shutdown", "don't shut down": "cancel_shutdown"}
+        for text, kind in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(oc.parse(text).kind, kind)
+        for text in ("shut down", "lock", "turn off the music widget", "stop"):
+            with self.subTest(text=text):
+                cmd = oc.parse(text)
+                self.assertTrue(cmd is None or cmd.kind not in oc.PC_KINDS)
+
+    def test_shutdown_waits_and_never_forces(self):
+        calls = []
+        ok = type("R", (), {"returncode": 0})()
+        reply = oc.pc_action("shutdown_pc", runner=lambda args: calls.append(args) or ok)
+        self.assertEqual(calls[0][:4], ["shutdown", "/s", "/t", str(oc.SHUTDOWN_DELAY_S)])
+        self.assertNotIn("/f", calls[0])
+        self.assertIn("cancel", reply.lower())
+        oc.pc_action("cancel_shutdown", runner=lambda args: calls.append(args) or ok)
+        self.assertEqual(calls[1], ["shutdown", "/a"])
+
+    def test_lock(self):
+        locked = []
+        self.assertEqual(oc.pc_action("lock_pc", lock=lambda: locked.append(1)), "Locked.")
+        self.assertEqual(locked, [1])
+
+    def test_background_speech_cannot_shut_down(self):
+        cmd = oc.parse("shut down my pc")
+        self.assertFalse(oc.allowed(cmd, "voice-ambient"))
+        self.assertTrue(oc.allowed(cmd, "remote"))
+        self.assertTrue(oc.allowed(cmd, "voice"))

@@ -255,6 +255,16 @@ class PatternStore:
         except Exception as error:  # noqa: BLE001
             self._log("track_update", error)
 
+    def now_playing(self, now: float | None = None, fresh_s: float = 15.0) -> dict | None:
+        """What is on right now ({title, artist, playing}), if a player
+        reported it in the last ``fresh_s`` seconds; for the phone page."""
+        now = time.time() if now is None else now
+        with self._state_lock:
+            current = self._current
+            if current is None or now - current["last"] > fresh_s:
+                return None
+            return {"title": current["title"], "artist": current["artist"], "playing": current["playing"]}
+
     @staticmethod
     def _credit(current: dict, now: float) -> None:
         """Count the time since the last poll if the track was playing then."""

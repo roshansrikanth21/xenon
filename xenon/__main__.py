@@ -1656,6 +1656,31 @@ def _remote_handler(config):
     return handle
 
 
+def _phone_status(app) -> dict:
+    """What the phone page shows: modes, what is playing, laptop time."""
+    import time as _time
+
+    from xenon import learning
+
+    now = None
+    store = learning.store()
+    try:
+        now = store.now_playing() if store is not None else None
+    except Exception:
+        now = None
+    from xenon.untrusted import strip_invisible
+
+    return {
+        "game": bool(getattr(app, "game_mode", False)),
+        "xtreme": bool(getattr(app, "xtreme", False)),
+        "widget": bool(app.music_widget_running()) if hasattr(app, "music_widget_running") else False,
+        "track": strip_invisible(now["title"])[:80] if now else "",
+        "artist": strip_invisible(now["artist"])[:60] if now else "",
+        "playing": bool(now and now["playing"]),
+        "time": _time.strftime("%H:%M"),
+    }
+
+
 def _start_phone_access(app, config) -> None:
     """Phone -> VM -> this laptop (see ``remote``). Off with
     XENON_REMOTE=off or "enabled": false in %APPDATA%\\xenon\\remote.json."""
@@ -1669,8 +1694,7 @@ def _start_phone_access(app, config) -> None:
             return
         server = remote.RemoteServer(
             _remote_handler(config), settings["key"],
-            status=lambda: {"game": bool(getattr(app, "game_mode", False)),
-                            "xtreme": bool(getattr(app, "xtreme", False))},
+            status=lambda: _phone_status(app),
         )
         if not server.start():
             return

@@ -145,7 +145,13 @@ def _kind(kind: str):
 
 # (pattern, builder). Order matters only where two rules could both match;
 # the more specific one comes first.
+_PC = r"(?:(?:my|the|this) )?(?:pc|computer|laptop|machine|system)"
+_SHUT = r"(?:shut ?down|turn off|power off|switch off|power down)"
+
 _RULES_NEGATION_OK: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
+    # ---- the PC itself (cancel says "don't", so it lives here)
+    (r"(?:cancel|abort|stop) (?:the )?(?:shut ?down|restart|reboot)|(?:don't|dont|do not) (?:shut ?down|restart|reboot)(?: .*)?",
+     _kind("cancel_shutdown")),
     (rf"(?:don't|dont|do not) learn{_HABITS}(?: anymore| any more)?", _kind("learn_off")),
     (rf"(?:stop|don't|dont|do not) (?:follow|following|track|tracking) {_VOICE}", _setting("follow_voice", False)),
     (rf"(?:stop|don't|dont|do not) (?:look|looking|find|finding|fetch|fetching|get|getting) up {_VIDEOS}",
@@ -158,6 +164,10 @@ _RULES_NEGATION_OK: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
 )
 
 _RULES: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
+    # ---- the PC itself
+    (rf"lock {_PC}|lock (?:my |the )?screen|lock (?:it|up)", _kind("lock_pc")),
+    (rf"{_SHUT} {_PC}(?: now)?|shut ?down now", _kind("shutdown_pc")),
+    (rf"(?:restart|reboot) {_PC}(?: now)?", _kind("restart_pc")),
     # ---- game mode
     (rf"{_GAME} (?:off|stop)", _kind("game_off")),
     (rf"turn {_GAME} off|switch {_GAME} off", _kind("game_off")),
@@ -269,7 +279,9 @@ def parse(text: str) -> OrbCommand | None:
 # ------------------------------------------------------------ permission --
 
 _DIRECT_ORIGINS = frozenset({"voice", "typed", "model", "remote", ""})
-_SENSITIVE = MODE_KINDS | {"forget_history"}
+PC_KINDS = frozenset({"lock_pc", "shutdown_pc", "restart_pc", "cancel_shutdown"})
+_SENSITIVE = MODE_KINDS | {"forget_history", "lock_pc", "shutdown_pc", "restart_pc"}
+SHUTDOWN_DELAY_S = 60
 
 
 def allowed(cmd: OrbCommand, origin: str) -> bool:
@@ -364,14 +376,48 @@ def set_handler(fn: Handler | None) -> None:
     _handler = fn
 
 
+def pc_action(kind: str, runner=None, lock=None) -> str:
+    """Lock, shut down, restart, or cancel. Shut down and restart wait
+    ``SHUTDOWN_DELAY_S`` with Windows' own warning on screen and never
+    force apps closed (no /f), so unsaved work can still ask to be saved
+    and "cancel shutdown" stops it."""
+    import subprocess
+
+    run_ = runner or (lambda args: subprocess.run(args, capture_output=True, text=True, timeout=15,
+                                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)))
+    if kind == "lock_pc":
+        try:
+            (lock or (lambda: __import__("ctypes").windll.user32.LockWorkStation()))()
+        except Exception:
+            return "I couldn't lock it."
+        return "Locked."
+    if kind == "cancel_shutdown":
+        result = run_(["shutdown", "/a"])
+        ok = getattr(result, "returncode", 0) == 0
+        return "Cancelled. It's staying on." if ok else "There was nothing to cancel."
+    if kind in {"shutdown_pc", "restart_pc"}:
+        verb = "Shutting down" if kind == "shutdown_pc" else "Restarting"
+        flag = "/s" if kind == "shutdown_pc" else "/r"
+        result = run_(["shutdown", flag, "/t", str(SHUTDOWN_DELAY_S), "/c",
+                       f"Xenon: {verb.lower()} in {SHUTDOWN_DELAY_S} seconds. Say or tap cancel shutdown to stop."])
+        if getattr(result, "returncode", 0) != 0:
+            return "Windows wouldn't schedule that (one may already be pending: say cancel shutdown first)."
+        return f"{verb} in {SHUTDOWN_DELAY_S} seconds. Say cancel shutdown to stop it."
+    return ""
+
+
 def run(cmd: OrbCommand, origin: str = "") -> str:
     """Carry out ``cmd`` and return a short spoken reply."""
     if not allowed(cmd, origin):
         if cmd.kind in MODE_KINDS:
             return "I only switch modes when you ask me directly."
+        if cmd.kind in PC_KINDS:
+            return "I only lock or shut down the PC when you ask me directly."
         return "I only change that when you ask me directly."
     if cmd.kind in _SETTINGS_KINDS:
         return apply_setting(cmd)
+    if cmd.kind in PC_KINDS:
+        return pc_action(cmd.kind)
     handler = _handler
     if handler is None:
         return "That needs the orb running."

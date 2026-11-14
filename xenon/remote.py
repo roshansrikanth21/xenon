@@ -262,42 +262,13 @@ def phone_link(url: str, key: str) -> str:
     return f"{url.rstrip('/')}/#k={key}"
 
 
-PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="robots" content="noindex"><title>Xenon</title>
-<style>
-:root{--bg:#0b0b12;--card:#161624;--fg:#ecebf5;--dim:#8d8aa6;--acc:#a98bff}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;
-padding:max(16px,env(safe-area-inset-top)) 16px 24px}
-h1{font-size:22px;margin:4px 0 2px}.dim{color:var(--dim);font-size:13px}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0}
-button{background:var(--card);color:var(--fg);border:1px solid #2a2840;border-radius:14px;padding:16px 6px;font-size:15px}
-button:active{background:#221f38}.wide{grid-column:span 3}.acc{border-color:var(--acc)}
-form{display:flex;gap:8px}input{flex:1;min-width:0;background:var(--card);color:var(--fg);border:1px solid #2a2840;border-radius:14px;padding:14px;font-size:16px}
-#reply{margin-top:16px;background:var(--card);border-radius:14px;padding:14px;min-height:52px;white-space:pre-wrap}
-</style></head><body>
-<h1>Xenon</h1><div class="dim" id="status">connecting…</div>
-<div class="grid">
-<button data-c="previous song">⏮ Prev</button><button data-c="pause" class="acc">⏯ Pause</button><button data-c="next song">⏭ Next</button>
-<button data-c="volume down">🔉 Vol −</button><button data-c="resume">▶ Play</button><button data-c="volume up">🔊 Vol +</button>
-<button data-c="play my usual" class="wide">🎧 Play my usual</button>
-<button data-c="game mode on">🎮 Game on</button><button data-c="go xtreme">⚡ Xtreme</button><button data-c="game mode off">✖ Game off</button>
-<button data-c="what's playing">🎵 What's on</button><button data-c="what do i listen to most">📊 My taste</button><button data-c="turn off the music widget">🖼 Widget off</button>
-</div>
-<form id="f"><input id="t" placeholder="Ask Xenon…" autocomplete="off" maxlength="300"><button>Send</button></form>
-<div id="reply" class="dim">Replies show here.</div>
-<script>
-const k=(location.hash.match(/k=([^&]+)/)||[])[1]||localStorage.getItem('xk')||'';
-if(k){try{localStorage.setItem('xk',k)}catch(e){} if(location.hash)history.replaceState(null,'',location.pathname)}
-const R=document.getElementById('reply'),S=document.getElementById('status');
-async function send(text){R.className='';R.textContent='…';
- try{const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json','X-Xenon-Key':k},body:JSON.stringify({text})});
-  if(r.status==401){R.textContent='This link has the wrong key. Copy a fresh link from Xenon on the laptop.';return}
-  if(!r.ok){R.textContent='Xenon is offline (the laptop is asleep or off).';return}
-  R.textContent=(await r.json()).reply}catch(e){R.textContent='Xenon is offline (the laptop is asleep or off).'}}
-document.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>send(b.dataset.c));
-document.getElementById('f').onsubmit=e=>{e.preventDefault();const t=document.getElementById('t');if(t.value.trim()){send(t.value.trim());t.value=''}};
-fetch('/api/status',{headers:{'X-Xenon-Key':k}}).then(r=>r.ok?r.json():Promise.reject(r.status)).then(s=>{S.textContent=(s.track?('Playing: '+s.track):'Connected')+(s.game?' · game mode':'')})
- .catch(c=>{S.textContent=c==401?'Wrong key':'Laptop offline'});
-</script></body></html>"""
+def _load_page() -> str:
+    """The phone page (static/phone.html): one file, no
+    external fonts, scripts or images (the page's CSP allows none)."""
+    try:
+        return (Path(__file__).with_name("static") / "phone.html").read_text(encoding="utf-8")
+    except OSError:
+        return "<!doctype html><title>Xenon</title><p>Phone page missing.</p>"
+
+
+PAGE = _load_page()
