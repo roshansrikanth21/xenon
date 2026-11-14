@@ -118,6 +118,22 @@ def parse_color(text: str) -> tuple[int, int, int] | None:
 
 SETTINGS_VERSION = 3
 
+# The look from the reference clip: a big lit album globe, a dense ring of
+# long white rays, no halo, poster lyrics. Applied over the current settings
+# so behaviour toggles (autostart, dock, side) stay as the user set them.
+VIDEO_LOOK = {
+    "disc": "glow", "visualizer": "rays", "bar_count": 120, "ray_length": 1.0,
+    "orb_size": 1.0, "opacity": 1.0, "accent": "white", "halo": False,
+    "backdrop": 0.0, "glow": 0.6, "fps": 30, "spin_speed": 9.0,
+    "sensitivity": 1.0, "smoothing": 0.5,
+    "show_lyrics": True, "lyric_style": "poster", "lyric_case": "upper",
+    "lyric_align": "left", "lyric_size": 1.0, "show_upcoming": True,
+}
+
+
+def video_look(current: "MusicSettings") -> "MusicSettings":
+    return coerce({**asdict(current), **VIDEO_LOOK})
+
 
 def _migrate(data: dict) -> dict:
     """Old files stored every field, so a changed default never reached

@@ -135,6 +135,7 @@ class SettingsWindow:
         foot = ttk.Frame(self.top, padding=(14, 0, 14, 12))
         foot.pack(fill="x")
         ttk.Button(foot, text="Reset to defaults", command=self._reset).pack(side="left")
+        ttk.Button(foot, text="Video look", command=self._video_look).pack(side="left", padx=(8, 0))
         ttk.Button(foot, text="Done", command=self.close).pack(side="right")
         self.top.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -221,8 +222,14 @@ class SettingsWindow:
         if self._on_change is not None:
             self._on_change(self._settings)
 
+    def _video_look(self) -> None:
+        self._apply(ms.video_look(self._settings))
+
     def _reset(self) -> None:
-        self._settings = ms.MusicSettings()
+        self._apply(ms.MusicSettings())
+
+    def _apply(self, settings) -> None:
+        self._settings = settings
         self._save()
         for key, var in self._vars.items():
             value = getattr(self._settings, key)

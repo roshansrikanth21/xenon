@@ -129,6 +129,7 @@ class NowPlaying:
         async def main() -> None:
             last_key = None
             art = None
+            retry = 0
             while not self._stop.is_set():
                 try:
                     manager = await MediaManager.request_async()
@@ -142,6 +143,14 @@ class NowPlaying:
                         if key != last_key:
                             art = await self._thumbnail(props)
                             last_key = key
+                            retry = 0
+                        elif not art:
+                            # Players often publish the thumbnail a moment
+                            # after the title (or drop it across a pause):
+                            # keep asking every few polls until it lands.
+                            retry += 1
+                            if retry % 3 == 0:
+                                art = await self._thumbnail(props)
                         # Each poll builds a fresh Track; carry the art over.
                         track.art = art
                         self._publish(track, timeline)

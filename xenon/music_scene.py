@@ -366,7 +366,11 @@ def ring_values(bars: list[float], count: int = BAR_COUNT) -> list[float]:
         lo = int(f)
         hi = min(n - 1, lo + 1)
         v = bars[lo] + (bars[hi] - bars[lo]) * (f - lo)
-        out.append(max(0.0, min(1.2, v)))
+        # Highs carry far less energy than bass: tilt them up and lift
+        # quiet bands, so the whole ring reaches out (not just the bottom).
+        v = max(0.0, v) * (1.0 + 1.4 * i / max(1, half - 1))
+        v = v ** 0.75 if v > 0 else 0.0
+        out.append(min(1.2, v))
     # bottom -> top on the right, mirrored on the left
     return out + out[::-1]
 
