@@ -268,7 +268,7 @@ def parse(text: str) -> OrbCommand | None:
 
 # ------------------------------------------------------------ permission --
 
-_DIRECT_ORIGINS = frozenset({"voice", "typed", "model", ""})
+_DIRECT_ORIGINS = frozenset({"voice", "typed", "model", "remote", ""})
 _SENSITIVE = MODE_KINDS | {"forget_history"}
 
 

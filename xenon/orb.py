@@ -1074,6 +1074,8 @@ class Tray:
             item("Music widget", lambda: app.post(app.toggle_music_widget),
                  checked=lambda _i: app.music_widget_running()),
             item("Music widget settings…", lambda: app.post(app.open_music_settings)),
+            item("Copy phone link", lambda: app.post(app.copy_phone_link),
+                 enabled=lambda _i: getattr(app, "phone", None) is not None),
             item(lambda _i: f"Companion screen: {app.companion_url or 'off'}" + (
                      f" ({app._companion.lan_note})" if app._companion is not None and app._companion.lan_note
                      else ""),
@@ -1583,6 +1585,43 @@ class OrbApp:
             except Exception:
                 return None
         return None
+
+    # ----- phone access ------------------------------------------------------
+
+    def copy_phone_link(self) -> None:
+        """Ask the VM for the relay's current address (it changes when the
+        VM restarts) and put the phone link on the clipboard."""
+        phone = getattr(self, "phone", None)
+        if phone is None:
+            self._show_error("Phone access is off.")
+            return
+        _server, tunnel, key = phone
+        self.model.set_state("thinking", "getting the phone link")
+
+        def fetch() -> None:
+            from xenon import remote
+
+            url = tunnel.url()
+
+            def done() -> None:
+                self.model.set_state(self._rest_state())
+                if not url:
+                    self._show_error("Couldn't reach the Azure VM for the phone link. "
+                                     "Is the xenon-relay service running there?")
+                    return
+                link = remote.phone_link(url, key)
+                self.root.clipboard_clear()
+                self.root.clipboard_append(link)
+                self.panel.set_chat(False)
+                self.panel.clear()
+                self.panel.set_header("Phone link copied", "", "#a98bff")
+                self.panel.append("Send it to yourself and open it on your phone (add it to your home "
+                                  "screen). Keep it private: it is the key. It changes if the VM restarts.")
+                self._place_panel()
+
+            self.post(done)
+
+        threading.Thread(target=fetch, daemon=True, name="xenon-phone-link").start()
 
     # ----- habits ------------------------------------------------------------
 

@@ -1195,6 +1195,7 @@ def _orb(args: argparse.Namespace) -> int:
         _orb_voice_runner(config),
         task_services=_orb_task_services(config),
     )
+    _start_phone_access(app, config)
     from xenon import music_settings
 
     if music_settings.load().start_with_orb and os.environ.get("XENON_MUSIC_WIDGET", "").strip().lower() not in {"0", "off", "false", "no"}:
@@ -1581,6 +1582,108 @@ def _habit_rewrite(command: str) -> str | None:
         return store.rewrite_music_request(command)
     except Exception:
         return None
+
+
+class _NoScreen:
+    """Observer for phone requests: answers never read the laptop screen
+    (a leaked phone link must not become a window onto it)."""
+
+    def observe(self):
+        from xenon.screen import ScreenContext
+
+        return ScreenContext(app_name="", title="", text="", used_vision=False)
+
+
+def _remote_handler(config):
+    """What a phone request may run (see ``remote``): Xenon's own controls
+    (not "forget my history"), habits, music, volume and timers, then the
+    model's reading of the request limited to those, then a short answer
+    that never sees the screen. No fastpath (opening apps, web search) and
+    no tasks."""
+    import threading as _threading
+
+    from xenon import brightness, music, orb_commands, quick
+
+    chat = OpenAICompatibleChat(config) if config is not None else None
+    local = _threading.local()
+
+    def phone_parsers(command: str) -> bool:
+        command = _without_wake(command)
+        control = orb_commands.parse(command)
+        if control is not None:
+            return control.kind != "forget_history"
+        return (_habit_rewrite(command) is not None or quick.parse(command) is not None
+                or brightness.parse(command) is not None or music.parse(command) is not None)
+
+    def run(command: str) -> str | None:
+        command = _without_wake(command)
+        control = orb_commands.parse(command)
+        if control is not None:
+            if control.kind == "forget_history":
+                return "Forgetting your history only works at the laptop."
+            return orb_commands.run(control, "remote")
+        command = _habit_rewrite(command) or command
+        for parse, execute in ((quick.parse, quick.run), (brightness.parse, brightness.run)):
+            parsed = parse(command)
+            if parsed is not None:
+                return execute(parsed)
+        parsed = music.parse(command)
+        if parsed is not None:
+            return music.MusicController.from_env().run(parsed)
+        return None
+
+    def handle(text: str) -> str:
+        reply = run(text)
+        understood = None
+        if reply is None and chat is not None:
+            from xenon import router
+
+            understood = router.route(_without_wake(text), chat.complete, phone_parsers, _router_context())
+            if understood:
+                reply = run(understood)
+        if reply is None:
+            if config is None:
+                return "I can do music, game mode and the widget from here. Questions need a model set up."
+            assistant = getattr(local, "assistant", None)
+            if assistant is None:
+                assistant = local.assistant = Assistant(
+                    _NoScreen(), None, OpenAICompatibleChat(config),
+                    max_memories=0, max_context_chars=0, **_context_kwargs())
+            reply = assistant.ask(text, brief=True).text
+        _remember_exchange(text, reply, "command" if understood or reply else "chat", "remote")
+        return reply
+
+    return handle
+
+
+def _start_phone_access(app, config) -> None:
+    """Phone -> VM -> this laptop (see ``remote``). Off with
+    XENON_REMOTE=off or "enabled": false in %APPDATA%\\xenon\\remote.json."""
+    if os.environ.get("XENON_REMOTE", "").strip().lower() in {"0", "off", "false", "no"}:
+        return
+    try:
+        from xenon import remote
+
+        settings = remote.load_config()
+        if not settings.get("enabled", True):
+            return
+        server = remote.RemoteServer(
+            _remote_handler(config), settings["key"],
+            status=lambda: {"game": bool(getattr(app, "game_mode", False)),
+                            "xtreme": bool(getattr(app, "xtreme", False))},
+        )
+        if not server.start():
+            return
+        vm = settings.get("vm") or remote.VM
+        if not vm:
+            print('phone access: set "vm" (user@host) in %APPDATA%/xenon/remote.json', file=sys.stderr, flush=True)
+            return
+        tunnel = remote.Tunnel(key_file=settings.get("ssh_key"), vm=vm)
+        tunnel.start()
+        app.phone = (server, tunnel, settings["key"])
+        print("phone access: on (tray > Copy phone link)", flush=True)
+    except Exception as error:
+        print(f"phone access unavailable: {error}", file=sys.stderr, flush=True)
 
 
 def _remember_exchange(user: str, reply: str, kind: str, origin: str, private: bool = False) -> None:
