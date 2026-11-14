@@ -1128,22 +1128,46 @@ CORNERS = ("tl", "tr", "bl", "br")
 EDGES = ("top", "bottom", "left", "right")
 
 
+def _wobble(n: int, seed: int, waves: int = 4):
+    """A smooth, irregular 0..1 profile of length ``n`` (a few sines with
+    fixed random phases), so a glow can be thicker and brighter in places."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    u = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    out = np.zeros(n, dtype=np.float32)
+    for k in range(waves):
+        freq = rng.uniform(0.6, 2.6) * (k + 1)
+        out += np.sin(2 * np.pi * (u * freq + rng.uniform(0, 1))) / (k + 1)
+    out -= out.min()
+    return out / max(1e-6, float(out.max()))
+
+
+_EDGE_SEEDS = {"top": 11, "bottom": 23, "left": 37, "right": 51}
+
+
 def edge_glow(w: int, h: int, side: str, accent=(255, 255, 255)) -> Image.Image:
-    """A band of soft light along one whole screen edge, fading inward, in
-    the accent colour. Where two bands meet the corner glows brightest."""
+    """Soft light along one screen edge, in the accent colour. Kept close to
+    the edge and deliberately uneven: thicker, brighter patches drift along
+    it and others fade almost out, so it reads as light spilling in, not a
+    neon frame."""
     key = ("edge", w, h, side)
     mask = _CORNER_MASKS.get(key)
     if mask is None:
         import numpy as np
 
-        if side in ("top", "bottom"):
-            t = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
-            t = t if side == "top" else t[::-1]
-            alpha = np.repeat((np.clip(1.0 - t, 0, 1) ** 2.2) * 190.0, w, axis=1)
-        else:
-            t = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
-            t = t if side == "left" else t[:, ::-1]
-            alpha = np.repeat((np.clip(1.0 - t, 0, 1) ** 2.2) * 190.0, h, axis=0)
+        along_n, depth_n = (w, h) if side in ("top", "bottom") else (h, w)
+        shape = _wobble(along_n, _EDGE_SEEDS.get(side, 7))
+        reach = 0.35 + 0.65 * shape                       # how far in, per point along the edge
+        power = 0.25 + 0.75 * _wobble(along_n, _EDGE_SEEDS.get(side, 7) + 100, 3) ** 1.3
+        t = np.linspace(0.0, 1.0, depth_n, dtype=np.float32)[:, None]   # 0 at the edge
+        alpha = np.clip(1.0 - t / reach[None, :], 0.0, 1.0) ** 2.4 * power[None, :] * 190.0
+        if side == "bottom":
+            alpha = alpha[::-1]
+        elif side in ("left", "right"):
+            alpha = alpha.T
+            if side == "right":
+                alpha = alpha[:, ::-1]
         mask = Image.fromarray(alpha.astype(np.uint8), "L")
         if len(_CORNER_MASKS) > 8:
             _CORNER_MASKS.clear()

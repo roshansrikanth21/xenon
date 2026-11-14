@@ -83,9 +83,10 @@ class PopOutTests(unittest.TestCase):
 
     def test_edge_glow_and_lyric_layer_position(self):
         top = scene.edge_glow(300, 80, "top", (10, 200, 30)).getchannel("A")
-        self.assertGreater(top.getpixel((150, 0)), 150)
-        self.assertEqual(top.getpixel((150, 79)), 0)
-        self.assertEqual(top.getpixel((0, 0)), top.getpixel((299, 0)))      # full length, even
+        edge = [top.getpixel((x, 0)) for x in range(300)]
+        self.assertGreater(max(edge), 120)
+        self.assertGreater(max(edge) - min(edge), 40)                      # uneven, not a neon frame
+        self.assertEqual(top.getpixel((150, 79)), 0)                        # stays near the edge
         right = scene.edge_glow(60, 200, "right").getchannel("A")
         self.assertGreater(right.getpixel((59, 100)), right.getpixel((0, 100)))
         from xenon.lyric_layer import position_now

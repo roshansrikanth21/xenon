@@ -359,6 +359,9 @@ def font_for(text: str, size: int, bold: bool = False) -> ImageFont.FreeTypeFont
 _registered_classes: dict = {}
 
 
+_EDGE_WEIGHT = {"edge_bottom": 1.0, "edge_top": 0.6, "edge_left": 0.8, "edge_right": 0.75}
+
+
 class _LyricProcess:
     """Stand-in for the lyric layer's window, which lives in a child process
     (``lyric_layer``) so its animation gets a core of its own. Offers the
@@ -1165,7 +1168,7 @@ class MusicWidget:
                 "corner_bl": scene.Box(0, floor - ch, cw, ch),
                 "corner_br": scene.Box(width - cw, floor - ch, cw, ch)}
         else:
-            bh, bw = int(height * 0.17), int(width * 0.075)
+            bh = bw = int(height * 0.075)        # stays near the edge
             glow_boxes = {
                 "edge_top": scene.Box(0, 0, width, bh), "edge_bottom": scene.Box(0, floor - bh, width, bh),
                 "edge_left": scene.Box(0, 0, bw, floor), "edge_right": scene.Box(width - bw, 0, bw, floor)}
@@ -1480,8 +1483,14 @@ class MusicWidget:
                     # each kick (only the windows' opacity changes).
                     glow = (settings.corner_glow * min(1.0, 0.85 * self._pulse + 0.35 * level ** 2)
                             if playing else 0.0)
-                    for name in corner_names:
-                        surfaces[name].set_opacity(255 * settings.opacity * min(1.0, glow) * fade_in)
+                    # Each edge answers a little differently (the bottom
+                    # hardest) and sways on its own, so it never reads as
+                    # one even frame.
+                    for i, name in enumerate(corner_names):
+                        weight = _EDGE_WEIGHT.get(name, 0.85)
+                        sway = 0.75 + 0.25 * math.sin(now * (0.7 + 0.37 * i) + i * 1.9)
+                        surfaces[name].set_opacity(
+                            255 * settings.opacity * min(1.0, glow * weight * sway) * fade_in)
                     if os.environ.get("XENON_DOCK_FPS") == "1":
                         self._glow_max = max(getattr(self, "_glow_max", 0.0), glow)
                         if now - getattr(self, "_glow_logged", 0.0) > 5:
