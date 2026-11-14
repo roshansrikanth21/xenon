@@ -1,0 +1,195 @@
+<!doctype html>
+<!--
+  Xenon Holo: Xenon's own hand-controlled hologram. The Xenon core sits in
+  the middle with a ring of panels around it built from your data (what is
+  playing, your top artists, CPU and RAM, modes, talk). Pinch a button to
+  press it, close your fist and drag to spin the ring, hold an open palm to
+  make Xenon listen, pinch with both hands and pull apart to zoom.
+
+  Inspired by Augma Imaginarium's Holo-Explorer (CC BY-NC 4.0); none of
+  its code is used. The core and ring models are from their Futurist
+  Lantern (CC BY-NC 4.0, see static/models/CREDITS.md). three.js (MIT) and
+  MediaPipe (Apache 2.0) load from their CDNs; the camera picture is
+  processed in this tab and never leaves the laptop.
+-->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xenon · Holo</title>
+<style>
+:root{--holo:#6ff3ff;--dim:#7a8b93;--fg:#e9f3f6;--mono:ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace}
+html,body{margin:0;height:100%;background:#020406;color:var(--fg);overflow:hidden;font:12px var(--mono)}
+video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);
+  filter:grayscale(1) brightness(.28) contrast(1.2) sepia(.4) hue-rotate(150deg)}
+#gl,#ov{position:fixed;inset:0;width:100%;height:100%}
+#ov{pointer-events:none}
+.hud{position:fixed;inset:22px;pointer-events:none;display:flex;flex-direction:column;justify-content:space-between}
+.row{display:flex;justify-content:space-between;align-items:flex-end;gap:20px}
+.k{color:var(--dim);letter-spacing:.26em;font-size:10px;text-transform:uppercase}
+.brand{letter-spacing:.46em;color:var(--holo);font-weight:600}
+.legend{display:grid;grid-template-columns:auto auto;gap:5px 14px}.legend b{color:var(--holo);font-weight:500}
+#toast{position:fixed;left:50%;bottom:70px;transform:translateX(-50%);color:var(--holo);font-size:15px;text-shadow:0 0 12px rgba(111,243,255,.5);
+  transition:opacity .4s;opacity:0;text-align:center;max-width:80vw}
+.gate{position:fixed;inset:0;display:grid;place-items:center;background:#020406;z-index:5;text-align:center}
+.gate button{background:transparent;border:1px solid rgba(111,243,255,.4);color:var(--holo);font:12px var(--mono);letter-spacing:.3em;padding:16px 28px;cursor:pointer}
+.gate p{color:var(--dim);max-width:440px;line-height:1.7;margin:18px auto 0}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head><body>
+<video id="cam" playsinline muted></video><canvas id="gl"></canvas><canvas id="ov"></canvas>
+<div class="hud">
+  <div class="row" style="align-items:flex-start"><div><div class="brand">XENON HOLO</div><div class="k" style="margin-top:7px" id="status">Starting</div></div>
+    <div style="text-align:right"><div class="k">Xenon</div><div style="margin-top:6px;letter-spacing:.3em;color:var(--holo)" id="orb">STANDING BY</div></div></div>
+  <div class="row"><div class="legend">
+    <b>PINCH</b><span class="k">press a button</span><b>FIST + DRAG</b><span class="k">spin the ring</span>
+    <b>OPEN PALM</b><span class="k">hold to talk to Xenon</span><b>TWO-HAND PINCH</b><span class="k">pull apart to zoom</span></div>
+    <div class="k">Esc to close</div></div>
+</div>
+<div id="toast"></div>
+<div class="gate" id="gate"><div><div class="brand" style="font-size:15px;margin-bottom:22px">XENON HOLO</div>
+<button id="go">START</button><p>Uses your webcam. Tracking runs in this tab; the picture never leaves your laptop.</p></div></div>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {MeshoptDecoder} from 'three/addons/libs/meshopt_decoder.module.js';
+
+const key=(location.hash.match(/k=([^&]+)/)||[])[1]||(()=>{try{return sessionStorage.getItem('xk')||''}catch(e){return ''}})();
+if(location.hash){try{sessionStorage.setItem('xk',key)}catch(e){} window.history.replaceState(null,'',location.pathname+location.search)}
+addEventListener('keydown',e=>{if(e.key==='Escape')window.close()});
+const $=id=>document.getElementById(id);
+let toastT=0;function toast(t){const el=$('toast');el.textContent=t;el.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>el.style.opacity=0,3500)}
+async function command(text){try{const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json','X-Xenon-Key':key},body:JSON.stringify({text})});
+  toast(r.ok?(await r.json()).reply:'Xenon did not answer.');setTimeout(poll,600)}catch(e){toast('Xenon is not reachable.')}}
+
+// ---- 3D scene (transparent over the camera) --------------------------------------
+const r=new THREE.WebGLRenderer({canvas:$('gl'),antialias:true,alpha:true});r.setPixelRatio(Math.min(2,devicePixelRatio));r.setSize(innerWidth,innerHeight);
+r.setClearColor(0x000000,0);r.toneMapping=THREE.ACESFilmicToneMapping;r.toneMappingExposure=.85;
+const scene=new THREE.Scene();
+const cam=new THREE.PerspectiveCamera(40,innerWidth/innerHeight,.01,100);let camDist=8.6;cam.position.set(0,2.1,camDist);cam.lookAt(0,1.05,0);
+scene.add(new THREE.HemisphereLight(0x6fdcff,0x050608,.5));const sun=new THREE.DirectionalLight(0xffffff,.7);sun.position.set(3,5,4);scene.add(sun);
+const coreLight=new THREE.PointLight(0x6ff3ff,3,9,1.6);coreLight.position.set(0,1.85,0);scene.add(coreLight);
+addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();r.setSize(innerWidth,innerHeight);sizeOv()});
+
+// The core: Futurist Lantern models, re-lit as glass, with Xenon's energy inside.
+const energyU={uCharge:{value:.3},uTime:{value:0}};
+const energy=new THREE.Mesh(new THREE.SphereGeometry(.3,40,28),new THREE.ShaderMaterial({uniforms:energyU,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+  vertexShader:`varying vec3 n;varying vec3 v;void main(){n=normalize(normalMatrix*normal);vec4 p=modelViewMatrix*vec4(position,1.);v=normalize(-p.xyz);gl_Position=projectionMatrix*p;}`,
+  fragmentShader:`uniform float uCharge;uniform float uTime;varying vec3 n;varying vec3 v;void main(){float f=pow(1.-max(dot(n,v),0.),1.6);float c=pow(max(dot(n,v),0.),3.);
+    vec3 col=mix(vec3(.25,.85,1.),vec3(1.),c*.7);gl_FragColor=vec4(col*(f*.55+c*.7)*uCharge*(.94+.06*sin(uTime*11.)),1.);}`}));
+energy.position.set(0,1.8,0);scene.add(energy);
+const haloC=document.createElement('canvas');haloC.width=haloC.height=128;{const hg=haloC.getContext('2d'),gr=hg.createRadialGradient(64,64,0,64,64,64);
+  gr.addColorStop(0,'rgba(160,245,255,.9)');gr.addColorStop(.35,'rgba(111,243,255,.25)');gr.addColorStop(1,'rgba(111,243,255,0)');hg.fillStyle=gr;hg.fillRect(0,0,128,128)}
+const halo=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(haloC),transparent:true,depthWrite:false,blending:THREE.AdditiveBlending}));
+halo.position.set(0,1.8,0);halo.scale.setScalar(1.8);scene.add(halo);
+let shell=null;const shellMats=[];
+const loader=new GLTFLoader();loader.setMeshoptDecoder(MeshoptDecoder);
+function fit(obj,h,y){const b=new THREE.Box3().setFromObject(obj),s=b.getSize(new THREE.Vector3()),c=b.getCenter(new THREE.Vector3());const k=h/Math.max(s.x,s.y,s.z);obj.scale.setScalar(k);obj.position.set(-c.x*k,y-c.y*k,-c.z*k)}
+loader.loadAsync('/models/core.glb').then(g=>{shell=new THREE.Group();shell.add(g.scene);fit(g.scene,1.7,1.85);
+  g.scene.traverse(o=>{if(!o.isMesh)return;const m=new THREE.MeshPhysicalMaterial({map:o.material.map,normalMap:o.material.normalMap,roughness:.18,metalness:.6,clearcoat:.6,
+    emissive:new THREE.Color(0x2fb8ff),emissiveIntensity:.05,transparent:true,opacity:.36,depthWrite:false,side:THREE.DoubleSide});o.material=m;shellMats.push(m);
+    o.add(new THREE.Mesh(o.geometry,new THREE.MeshBasicMaterial({color:0x6ff3ff,wireframe:true,transparent:true,opacity:.05,depthWrite:false})))});scene.add(shell)}).catch(()=>{});
+
+// ---- panels: Xenon's data on a ring around the core ------------------------------------
+const W=560,H=340,ring=new THREE.Group();scene.add(ring);
+const panels=[];let st={};
+function panel(id,title,draw){const c=document.createElement('canvas');c.width=W;c.height=H;const tex=new THREE.CanvasTexture(c);tex.colorSpace=THREE.SRGBColorSpace;
+  const mesh=new THREE.Mesh(new THREE.PlaneGeometry(2.1,2.1*H/W),new THREE.MeshBasicMaterial({map:tex,transparent:true,depthWrite:false,side:THREE.DoubleSide}));
+  const p={id,title,draw,c,g:c.getContext('2d'),tex,mesh,buttons:[],hover:-1,flash:-1,flashT:0};mesh.userData.p=p;ring.add(mesh);panels.push(p);return p}
+function frame(p){const g=p.g;g.clearRect(0,0,W,H);g.fillStyle='rgba(6,18,26,.62)';g.fillRect(0,0,W,H);
+  g.strokeStyle='rgba(111,243,255,.55)';g.lineWidth=2;g.strokeRect(3,3,W-6,H-6);
+  g.fillStyle='#6ff3ff';[[0,0],[W-26,0],[0,H-4],[W-26,H-4]].forEach(([x,y])=>g.fillRect(x+3,y+3,22,2));
+  g.font='600 20px ui-monospace,Consolas,monospace';g.fillStyle='#6ff3ff';g.fillText(p.title,24,40);
+  g.fillStyle='rgba(111,243,255,.25)';g.fillRect(24,52,W-48,1)}
+function btn(p,i,x,y,w,h,label,cmd,lit){const g=p.g;p.buttons.push({x,y,w,h,cmd});
+  const hot=p.hover===i,fl=p.flash===i;g.fillStyle=fl?'rgba(255,255,255,.55)':lit?'rgba(111,243,255,.30)':hot?'rgba(111,243,255,.18)':'rgba(111,243,255,.06)';g.fillRect(x,y,w,h);
+  g.strokeStyle=hot||lit?'#6ff3ff':'rgba(111,243,255,.4)';g.lineWidth=hot?2.5:1.2;g.strokeRect(x,y,w,h);
+  g.font='500 19px ui-monospace,Consolas,monospace';g.fillStyle='#e9f3f6';g.textAlign='center';g.fillText(label,x+w/2,y+h/2+7);g.textAlign='left'}
+function text(p,t,x,y,size,color){const g=p.g;g.font=`${size||22}px system-ui,Segoe UI,sans-serif`;g.fillStyle=color||'#e9f3f6';
+  let s=String(t||'');while(g.measureText(s).width>W-x-24&&s.length>3)s=s.slice(0,-2);if(s!==String(t||''))s+='…';g.fillText(s,x,y)}
+function bar(p,label,v,y){const g=p.g;text(p,`${label}  ${Math.round(v)}%`,24,y,20,'#9fb4bc');g.fillStyle='rgba(111,243,255,.12)';g.fillRect(24,y+12,W-48,14);
+  g.fillStyle=v>85?'#ff8f8f':'#6ff3ff';g.fillRect(24,y+12,(W-48)*Math.min(1,v/100),14)}
+panel('np','01 · NOW PLAYING',p=>{text(p,st.track||'Nothing playing',24,100,28);text(p,st.artist||'',24,134,20,'#9fb4bc');
+  btn(p,0,24,190,160,70,'◀◀','media previous');btn(p,1,200,190,160,70,'▶ ❚❚','media play pause',st.playing);btn(p,2,376,190,160,70,'▶▶','media next')});
+panel('taste','02 · MY TASTE',p=>{const top=(st.top||[]).slice(0,3);if(!top.length)text(p,'Still learning what you like',24,110,20,'#9fb4bc');
+  top.forEach((a,i)=>btn(p,i,24,72+i*62,W-48,52,`${i+1}  ${a}`,'play '+a));btn(p,3,24,262,W-48,52,'PLAY MY USUAL','play my usual')});
+panel('sys','03 · SYSTEM',p=>{bar(p,'CPU',st.cpu||0,100);bar(p,'RAM',st.ram||0,160);text(p,`Laptop ${st.time||'--:--'}`,24,240,20,'#9fb4bc');
+  text(p,st.xtreme?'Xtreme mode on':st.game?'Game mode on':'Normal mode',24,276,20,'#6ff3ff')});
+panel('modes','04 · MODES',p=>{btn(p,0,24,84,W-48,60,'GAME MODE',st.game?'game mode off':'game mode on',st.game&&!st.xtreme);
+  btn(p,1,24,158,W-48,60,'XTREME',st.xtreme?'xtreme mode off':'go xtreme',st.xtreme);
+  btn(p,2,24,232,W-48,60,'MUSIC WIDGET',st.widget?'turn off the music widget':'turn on the music widget',st.widget)});
+panel('talk','05 · TALK',p=>{text(p,'Hold an open palm, or press:',24,100,20,'#9fb4bc');btn(p,0,24,130,W-48,80,'🎙  TALK TO XENON','listen now');
+  btn(p,1,24,226,W-48,60,"WHAT'S PLAYING?","what's playing")});
+function redraw(p){p.buttons=[];frame(p);p.draw(p);p.tex.needsUpdate=true}
+let ringAngle=0,ringVel=0;const RADIUS=3.1;
+function placePanels(){panels.forEach((p,i)=>{const a=ringAngle+i/panels.length*Math.PI*2;p.mesh.position.set(Math.sin(a)*RADIUS,.3,Math.cos(a)*RADIUS);
+  p.mesh.lookAt(cam.position.x,.3,cam.position.z);const front=Math.cos(a);p.mesh.material.opacity=.25+.75*Math.max(0,front)})}
+
+// ---- live state ------------------------------------------------------------------------
+const LABEL={idle:'STANDING BY',standby:'SAY XENON',listening:'LISTENING',heard:'GOT IT',thinking:'THINKING',searching:'SEARCHING',speaking:'SPEAKING',working:'WORKING',confirm:'CONFIRM ON SCREEN',error:'ERROR'};
+async function poll(){try{const res=await fetch('/api/status',{headers:{'X-Xenon-Key':key}});if(!res.ok)return;st=await res.json();
+  $('orb').textContent=st.xtreme?'XTREME':st.game?'GAME MODE':(LABEL[st.orb]||'STANDING BY');panels.forEach(redraw)}catch(e){$('orb').textContent='OFFLINE'}}
+panels.forEach(redraw);poll();setInterval(poll,1500);
+
+// ---- hands -----------------------------------------------------------------------------
+const ov=$('ov'),og=ov.getContext('2d');let OW=0,OH=0;function sizeOv(){OW=ov.width=innerWidth*devicePixelRatio;OH=ov.height=innerHeight*devicePixelRatio}sizeOv();
+const video=$('cam'),ray=new THREE.Raycaster(),ndc=new THREE.Vector2();
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+function pose(p){const size=dist(p[0],p[9])||1,pinch=dist(p[4],p[8])/size<.32;
+  const ext=(t,j)=>dist(p[t],p[0])>dist(p[j],p[0])*1.12;const ix=ext(8,6),mx=ext(12,10),rx=ext(16,14),px=ext(20,18);
+  const fist=!ix&&!mx&&!rx&&!px&&!pinch,palm=ix&&mx&&rx&&px&&!pinch&&dist(p[8],p[20])/size>1.1;
+  return {size,pinch,fist,palm,tip:p[8],wrist:p[0]}}
+function hit(tip){ndc.set((1-tip.x)*2-1,-(tip.y*2-1));ray.setFromCamera(ndc,cam);
+  const hits=ray.intersectObjects(panels.map(p=>p.mesh),false);for(const h of hits){const p=h.object.userData.p;if(p.mesh.material.opacity<.6||!h.uv)continue;
+    const x=h.uv.x*W,y=(1-h.uv.y)*H;const i=p.buttons.findIndex(b=>x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h);return {p,i}}return null}
+const hands=[{},{}];let palmT=0,lastListen=0,zoomStart=null;
+function track(res,now){const list=(res&&res.landmarks)||[];og.clearRect(0,0,OW,OH);
+  panels.forEach(p=>{if(p.hover!==-1&&!list.length){p.hover=-1;redraw(p)}});
+  const poses=list.map(pose);
+  // two-hand pinch: pull apart to zoom
+  if(poses.length===2&&poses[0].pinch&&poses[1].pinch){const d=dist(poses[0].tip,poses[1].tip);if(zoomStart===null)zoomStart={d,cam:camDist};
+    camDist=Math.max(5,Math.min(12,zoomStart.cam*zoomStart.d/Math.max(.05,d)));}else zoomStart=null;
+  poses.forEach((q,hi)=>{const h=hands[hi]||(hands[hi]={});const now2=now;
+    // fist + drag spins the ring
+    if(q.fist){if(h.fistX!==undefined){const dx=(1-q.wrist.x)-h.fistX;ringVel=dx*9;ringAngle+=dx*9}h.fistX=1-q.wrist.x}else h.fistX=undefined;
+    // pinch presses what the index finger points at
+    const target=hit(q.tip);panels.forEach(p=>{const want=target&&target.p===p?target.i:-1;if(p.hover!==want){p.hover=want;redraw(p)}});
+    if(q.pinch&&!h.pinched&&target&&target.i>=0&&zoomStart===null){const b=target.p.buttons[target.i];target.p.flash=target.i;redraw(target.p);
+      setTimeout(()=>{target.p.flash=-1;redraw(target.p)},220);command(b.cmd)}
+    h.pinched=q.pinch;
+    // open palm held: Xenon listens
+    if(hi===0){if(q.palm&&!target){if(!palmT)palmT=now2;if(now2-palmT>900&&now2-lastListen>5000){lastListen=now2;palmT=0;command('listen now')}}else palmT=0}
+    // draw the hand and its cursor
+    const P=list[hi];og.strokeStyle='rgba(111,243,255,.5)';og.lineWidth=1.5*devicePixelRatio;og.shadowColor='#6ff3ff';og.shadowBlur=8*devicePixelRatio;
+    [[0,5],[5,9],[9,13],[13,17],[0,17],[5,6],[6,7],[7,8],[9,10],[10,11],[11,12],[13,14],[14,15],[15,16],[17,18],[18,19],[19,20],[0,1],[1,2],[2,3],[3,4]]
+      .forEach(([a,b])=>{og.beginPath();og.moveTo((1-P[a].x)*OW,P[a].y*OH);og.lineTo((1-P[b].x)*OW,P[b].y*OH);og.stroke()});
+    const cx=(1-q.tip.x)*OW,cy=q.tip.y*OH,rad=(q.pinch?9:16)*devicePixelRatio;og.beginPath();og.arc(cx,cy,rad,0,Math.PI*2);
+    og.strokeStyle=q.pinch?'#fff':'#6ff3ff';og.lineWidth=2*devicePixelRatio;og.stroke();
+    if(hi===0&&palmT){const k=Math.min(1,(now2-palmT)/900);og.beginPath();og.arc(cx,cy,30*devicePixelRatio,-Math.PI/2,-Math.PI/2+k*Math.PI*2);og.stroke()}});
+  og.shadowBlur=0;$('status').textContent=list.length?(poses.some(q=>q.fist)?'Spinning':'Hands tracked: '+list.length):'Show your hands'}
+
+$('go').onclick=async()=>{$('gate').style.display='none';
+  try{video.srcObject=await navigator.mediaDevices.getUserMedia({video:{width:1280,height:720,facingMode:'user'},audio:false});await video.play()}
+  catch(e){$('status').textContent='No camera access';toast('Allow the camera to use Xenon Holo.');return}
+  $('status').textContent='Loading hand tracking';
+  const {FilesetResolver,HandLandmarker}=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+  const files=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  const hl=await HandLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:
+    'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:2});
+  handTracker=hl;$('status').textContent='Show your hands'};
+let handTracker=null;
+// Test hook, only with ?debug=1: drive the gesture logic with fake hands.
+if(new URLSearchParams(location.search).has('debug'))window.__holo={track,panels,cam,THREE,placePanels};
+
+// ---- loop ------------------------------------------------------------------------------
+const clock=new THREE.Clock();let charge=.3,spin=0;
+function loop(){const dt=Math.min(.05,clock.getDelta()),t=clock.elapsedTime,now=performance.now();
+  if(handTracker&&video.readyState>=2)track(handTracker.detectForVideo(video,now),now);
+  ringVel*=Math.pow(.04,dt);ringAngle+=ringVel*dt*.6;placePanels();
+  const s=st.orb||'idle',want={listening:.95,heard:1.1,thinking:.75,searching:.75,speaking:.8,working:.7,confirm:.9}[s]??(st.playing?.4:.28);
+  const speak=s==='speaking'?.25*(.5+.5*Math.sin(t*9.5)):0;charge+=(want+(st.energy||0)*.8+speak-charge)*Math.min(1,dt*4);
+  spin+=dt*({thinking:3,searching:3,listening:1.3,heard:1.6}[s]??.35);energyU.uCharge.value=charge;energyU.uTime.value=t;
+  coreLight.intensity=1.5+charge*4;shellMats.forEach(m=>m.emissiveIntensity=.03+charge*.12);halo.scale.setScalar(1.3+charge*1.4);halo.material.opacity=.35+charge*.5;
+  if(shell){shell.rotation.y=spin*.15;shell.position.y=Math.sin(t*.8)*.04}
+  cam.position.set(Math.sin(t*.1)*.4,2.1,camDist);cam.lookAt(0,1.05,0);
+  r.render(scene,cam);requestAnimationFrame(loop)}
+loop();
+</script></body></html>

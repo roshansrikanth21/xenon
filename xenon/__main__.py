@@ -1681,7 +1681,49 @@ def _phone_status(app) -> dict:
         # For Xenon Core: what the orb is doing and how loud the music is.
         "orb": str(getattr(getattr(app, "model", None), "state", "") or ""),
         "energy": _music_energy(app),
+        # For Xenon Holo's panels.
+        "cpu": _cpu_percent(),
+        "ram": _ram_percent(),
+        "top": _top_artists(),
     }
+
+
+_TOP_CACHE: list = [0.0, []]
+
+
+def _top_artists() -> list:
+    """Your top artists (habit store), refreshed at most once a minute."""
+    import time as _time
+
+    from xenon import learning
+    from xenon.untrusted import strip_invisible
+
+    if _time.monotonic() - _TOP_CACHE[0] > 60:
+        _TOP_CACHE[0] = _time.monotonic()
+        try:
+            store = learning.store()
+            _TOP_CACHE[1] = [strip_invisible(a)[:40] for a, _n in (store.top_artists(limit=4) if store else [])]
+        except Exception:
+            _TOP_CACHE[1] = []
+    return list(_TOP_CACHE[1])
+
+
+def _cpu_percent() -> float:
+    try:
+        import psutil
+
+        return round(psutil.cpu_percent(None), 1)
+    except Exception:
+        return 0.0
+
+
+def _ram_percent() -> float:
+    try:
+        import psutil
+
+        return round(psutil.virtual_memory().percent, 1)
+    except Exception:
+        return 0.0
 
 
 def _music_energy(app) -> float:
@@ -1710,6 +1752,7 @@ def _start_phone_access(app, config) -> None:
             return
         app.hud_url = remote.hud_url(settings["key"])
         app.core_url = remote.core_url(settings["key"])
+        app.holo_url = remote.holo_url(settings["key"])
         vm = settings.get("vm") or remote.VM
         if not vm:
             print('phone access: set "vm" (user@host) in %APPDATA%/xenon/remote.json', file=sys.stderr, flush=True)

@@ -174,29 +174,13 @@ class RemoteServer:
                             self._send(404, b'{"error":"not found"}')
                             return
                         self._send(200, data, "model/gltf-binary", PAGE_CSP)
-                elif self.path.split("?")[0] == "/holo" or self.path.startswith("/holo/"):
-                    # Augma's Holo-Explorer, served unmodified (static/holo,
-                    # CC BY-NC). Uses the webcam: laptop only.
+                elif self.path.split("?")[0] in ("/holo", "/holo/"):
+                    # Xenon Holo (hand-controlled panels round the core).
+                    # Uses the webcam: laptop only.
                     if self._via_tunnel():
                         self._send(404, b'{"error":"not found"}')
                         return
-                    path = self.path.split("?")[0].split("#")[0]
-                    if path in ("/holo", "/holo/"):
-                        if path == "/holo":
-                            self.send_response(301)
-                            self.send_header("Location", "/holo/")
-                            self.end_headers()
-                            return
-                        self._send(200, _static("holo/index.html").encode("utf-8"), "text/html; charset=utf-8", HOLO_CSP)
-                        return
-                    name = path.rsplit("/", 1)[1]
-                    target = _STATIC / "holo" / "assets" / name
-                    kinds = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
-                    ext = target.suffix.lower()
-                    if not path.startswith("/holo/assets/") or ext not in kinds or not target.is_file():
-                        self._send(404, b'{"error":"not found"}')
-                        return
-                    self._send(200, target.read_bytes(), kinds[ext], HOLO_CSP)
+                    self._send(200, _static("holo.html").encode("utf-8"), "text/html; charset=utf-8", HOLO_CSP)
                 elif self.path.split("?")[0] == "/hud":
                     # Hand control uses the laptop's webcam: only from the
                     # laptop itself, never through the phone tunnel.
@@ -355,17 +339,16 @@ CORE_CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-
             "worker-src blob:; base-uri 'none'; form-action 'none'")
 
 
-# Holo-Explorer: its fonts (Google Fonts) and MediaPipe (jsDelivr + the
-# model host). Google's usage-logging endpoint is left out on purpose.
+# Xenon Holo: three.js + MediaPipe from jsDelivr, the hand model from
+# Google's model host, WASM for both decoders, the camera in-tab.
 HOLO_CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; "
-            "connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com; "
-            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
-            "img-src 'self' data: blob:; media-src 'self' blob: mediastream:; worker-src blob: 'self' https://cdn.jsdelivr.net; "
+            "connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com; style-src 'unsafe-inline'; "
+            "img-src 'self' data: blob:; media-src 'self' blob: mediastream:; worker-src blob: https://cdn.jsdelivr.net; "
             "base-uri 'none'; form-action 'none'")
 
 
-def holo_url(port: int = PORT) -> str:
-    return f"http://127.0.0.1:{port}/holo/"
+def holo_url(key: str, port: int = PORT) -> str:
+    return f"http://127.0.0.1:{port}/holo#k={key}"
 
 
 def core_url(key: str, port: int = PORT) -> str:

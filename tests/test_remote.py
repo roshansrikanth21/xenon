@@ -161,16 +161,12 @@ class HoloTests(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, b""
 
-    def test_served_unmodified_on_the_laptop(self):
-        import pathlib
-        code, page = self.get("/holo/")
+    def test_xenon_holo_on_the_laptop(self):
+        code, page = self.get("/holo")
         self.assertEqual(code, 200)
-        self.assertIn(b"Augma", page)
-        asset = next((pathlib.Path(remote.__file__).with_name("static") / "holo" / "assets").glob("index-*.js"))
-        code, data = self.get(f"/holo/assets/{asset.name}")
-        self.assertEqual((code, data), (200, asset.read_bytes()))
+        self.assertIn(b"XENON HOLO", page)
+        self.assertIn(b"Inspired by Augma", page)               # ours, credited as inspiration only
 
     def test_laptop_only_and_no_path_tricks(self):
-        self.assertEqual(self.get("/holo/", {"Cf-Ray": "x"})[0], 404)
-        self.assertEqual(self.get("/holo/assets/../../remote.py")[0], 404)
-        self.assertEqual(self.get("/holo/LICENSE")[0], 404)
+        self.assertEqual(self.get("/holo", {"Cf-Ray": "x"})[0], 404)
+        self.assertEqual(self.get("/holo/assets/index.js")[0], 404)     # the copied app is gone
