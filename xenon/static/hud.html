@@ -1,0 +1,134 @@
+<!doctype html>
+<!--
+  Xenon hand control. Inspired by "Holo-Explorer" from Augma Imaginarium
+  (https://repo.augmaimaginarium.com, CC BY-NC 4.0); this is an original
+  implementation, not their code. Hand tracking is Google's MediaPipe
+  (Apache 2.0) running in this browser tab: the camera picture never
+  leaves the laptop. Gestures only drive music (and one question), never
+  anything that closes, locks or shuts down.
+-->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xenon · Hand control</title>
+<style>
+:root{--holo:#6ff3ff;--holo2:rgba(111,243,255,.35);--fg:#e9f3f6;--dim:#7c8f97;--bg:#03060a;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden;font:13px var(--mono)}
+video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);
+  filter:grayscale(1) brightness(.32) contrast(1.15) sepia(.35) hue-rotate(150deg)}
+canvas{position:fixed;inset:0;width:100%;height:100%}
+.vignette{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 45%,rgba(0,0,0,.75) 100%)}
+.scan{position:fixed;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(111,243,255,.035) 0 1px,transparent 1px 3px)}
+.hud{position:fixed;inset:22px;pointer-events:none;display:flex;flex-direction:column;justify-content:space-between}
+.row{display:flex;justify-content:space-between;align-items:flex-start;gap:24px}
+.k{color:var(--dim);letter-spacing:.24em;font-size:10.5px;text-transform:uppercase}
+.v{color:var(--fg);letter-spacing:.06em;margin-top:5px}
+.brand{letter-spacing:.42em;color:var(--holo);font-weight:600}
+.legend{display:grid;grid-template-columns:auto auto;gap:6px 16px}
+.legend .n{color:var(--holo)}
+.reply{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);max-width:min(680px,86vw);text-align:center;
+  font-size:15px;color:var(--holo);text-shadow:0 0 12px var(--holo2);letter-spacing:.03em;transition:opacity .4s}
+.gate{position:fixed;inset:0;display:grid;place-items:center;background:var(--bg);z-index:5}
+.gate button{background:transparent;border:1px solid var(--holo2);color:var(--holo);font:12px var(--mono);letter-spacing:.3em;
+  padding:16px 28px;cursor:pointer}
+.gate button:hover{border-color:var(--holo);box-shadow:0 0 22px var(--holo2)}
+.gate p{color:var(--dim);max-width:420px;text-align:center;line-height:1.6;margin:18px auto 0}
+.corner{position:fixed;width:26px;height:26px;border:1.5px solid var(--holo);opacity:.6;pointer-events:none}
+.c1{top:12px;left:12px;border-right:0;border-bottom:0}.c2{top:12px;right:12px;border-left:0;border-bottom:0}
+.c3{bottom:12px;left:12px;border-right:0;border-top:0}.c4{bottom:12px;right:12px;border-left:0;border-top:0}
+</style></head><body>
+<video id="cam" playsinline muted></video><canvas id="fx"></canvas><div class="vignette"></div><div class="scan"></div>
+<i class="corner c1"></i><i class="corner c2"></i><i class="corner c3"></i><i class="corner c4"></i>
+<div class="hud">
+  <div class="row">
+    <div><div class="brand">XENON</div><div class="k" style="margin-top:6px">Hand control · 01</div></div>
+    <div style="text-align:right"><div class="k">Status</div><div class="v" id="status">Starting camera</div></div>
+  </div>
+  <div class="row">
+    <div class="legend">
+      <span class="n">01</span><span class="k">Pinch · play / pause</span>
+      <span class="n">02</span><span class="k">Swipe · next / previous</span>
+      <span class="n">03</span><span class="k">Pinch + drag · volume</span>
+      <span class="n">04</span><span class="k">Peace sign · what's playing</span>
+    </div>
+    <div style="text-align:right"><div class="k">Gesture</div><div class="v" id="gesture">None</div><div class="k" style="margin-top:12px">Esc to close</div></div>
+  </div>
+</div>
+<div class="reply" id="reply"></div>
+<div class="gate" id="gate"><div style="text-align:center"><div class="brand" style="font-size:15px;margin-bottom:22px">XENON</div>
+<button id="go">START HAND CONTROL</button>
+<p>Uses your webcam. Hand tracking runs in this tab; the picture never leaves your laptop.</p></div></div>
+<script type="module">
+const key=(location.hash.match(/k=([^&]+)/)||[])[1]||'';
+if(location.hash)history.replaceState(null,'',location.pathname);
+const $=id=>document.getElementById(id),video=$('cam'),cv=$('fx'),g=cv.getContext('2d');
+let W=0,H=0;function size(){W=cv.width=innerWidth*devicePixelRatio;H=cv.height=innerHeight*devicePixelRatio}size();addEventListener('resize',size);
+addEventListener('keydown',e=>{if(e.key==='Escape')window.close()});
+let replyTimer=0;function show(text){const r=$('reply');r.textContent=text;r.style.opacity=1;clearTimeout(replyTimer);replyTimer=setTimeout(()=>r.style.opacity=0,4200)}
+async function command(text,label){$('gesture').textContent=label;
+  try{const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json','X-Xenon-Key':key},body:JSON.stringify({text})});
+    show(r.ok?(await r.json()).reply:'Xenon did not answer.')}catch(e){show('Xenon is not reachable.')}}
+
+$('go').onclick=async()=>{
+  $('gate').style.display='none';
+  try{video.srcObject=await navigator.mediaDevices.getUserMedia({video:{width:1280,height:720,facingMode:'user'},audio:false});await video.play()}
+  catch(e){$('status').textContent='No camera access';show('Allow the camera to use hand control.');return}
+  $('status').textContent='Loading hand tracking';
+  const {FilesetResolver,HandLandmarker}=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+  const files=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  const hands=await HandLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:
+    'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:'GPU'},
+    runningMode:'VIDEO',numHands:1});
+  $('status').textContent='Tracking';loop(hands)};
+
+async function togglePlay(){let playing=true;
+  try{const r=await fetch('/api/status',{headers:{'X-Xenon-Key':key}});if(r.ok)playing=!!(await r.json()).playing}catch(e){}
+  command(playing?'pause':'resume',playing?'Pinch · pause':'Pinch · play')}
+// ---- gesture reading -------------------------------------------------------
+const d=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const extended=(p,tip,pip)=>d(p[tip],p[0])>d(p[pip],p[0])*1.12;
+let pinchOn=false,pinchT=0,pinchY=0,volY=0,history=[],lastSwipe=0,peaceT=0,lastPeace=0,lastSeen=0;
+function read(p,now){
+  const size=d(p[0],p[9])||1,pinch=d(p[4],p[8])/size<0.32;
+  const ix=extended(p,8,6),mx=extended(p,12,10),rx=extended(p,16,14),px=extended(p,20,18);
+  // pinch: a quick one toggles play/pause; held and dragged it is a volume knob
+  if(pinch&&!pinchOn){pinchOn=true;pinchT=now;pinchY=volY=p[8].y}
+  else if(pinch&&pinchOn){const dy=volY-p[8].y;if(Math.abs(dy)>0.07){volY=p[8].y;command(dy>0?'volume up':'volume down',dy>0?'Volume up':'Volume down')}}
+  else if(!pinch&&pinchOn){pinchOn=false;if(now-pinchT<550&&Math.abs(p[8].y-pinchY)<0.05)togglePlay()}
+  // swipe: open hand moving fast sideways (the picture is mirrored)
+  history.push({t:now,x:p[0].x});history=history.filter(h=>now-h.t<350);
+  if(!pinch&&ix&&mx&&rx&&history.length>3&&now-lastSwipe>1100){const dx=history[history.length-1].x-history[0].x;
+    if(Math.abs(dx)>0.22){lastSwipe=now;history=[];dx<0?command('next song','Swipe → next'):command('previous song','Swipe ← previous')}}
+  // peace sign held for 0.8 s
+  const peace=ix&&mx&&!rx&&!px&&!pinch;
+  if(peace){if(!peaceT)peaceT=now;if(now-peaceT>800&&now-lastPeace>4000){lastPeace=now;peaceT=0;command("what's playing",'Peace sign')}}else peaceT=0;
+  return {size,pinch};
+}
+
+// ---- hologram drawing ------------------------------------------------------
+const BONES=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+function xy(q){return [(1-q.x)*W,q.y*H]}
+function reactor(cx,cy,r,t,pinch){g.save();g.translate(cx,cy);g.shadowColor='#6ff3ff';g.shadowBlur=18*devicePixelRatio;
+  const rings=[[1,.9,8,.35,t*.6],[.78,2.6,14,.85,-t*1.1],[.58,1.4,5,.6,t*1.8]];
+  for(const [k,w,seg,a,rot] of rings){g.rotate(rot%(Math.PI*2));g.strokeStyle=`rgba(111,243,255,${a})`;g.lineWidth=w*devicePixelRatio;
+    for(let i=0;i<seg;i++){const s=i/seg*Math.PI*2;g.beginPath();g.arc(0,0,r*k,s,s+Math.PI*2/seg*.62);g.stroke()}g.rotate(-rot%(Math.PI*2))}
+  const core=g.createRadialGradient(0,0,0,0,0,r*.42);core.addColorStop(0,pinch?'rgba(255,255,255,.95)':'rgba(220,252,255,.8)');core.addColorStop(1,'rgba(111,243,255,0)');
+  g.fillStyle=core;g.beginPath();g.arc(0,0,r*.42,0,Math.PI*2);g.fill();g.restore()}
+function loop(hands){
+  const t0=performance.now();
+  function frame(){const now=performance.now();g.clearRect(0,0,W,H);
+    let res=null;if(video.readyState>=2)res=hands.detectForVideo(video,now);
+    const p=res&&res.landmarks&&res.landmarks[0];
+    if(p){lastSeen=now;const s=read(p,now);
+      g.lineCap='round';g.shadowColor='#6ff3ff';g.shadowBlur=10*devicePixelRatio;g.strokeStyle='rgba(111,243,255,.55)';g.lineWidth=1.6*devicePixelRatio;
+      for(const [a,b] of BONES){const [x1,y1]=xy(p[a]),[x2,y2]=xy(p[b]);g.beginPath();g.moveTo(x1,y1);g.lineTo(x2,y2);g.stroke()}
+      g.fillStyle='#dffcff';for(const q of p){const [x,y]=xy(q);g.beginPath();g.arc(x,y,2.2*devicePixelRatio,0,Math.PI*2);g.fill()}
+      const [cx,cy]=xy({x:(p[0].x+p[9].x)/2,y:(p[0].y+p[9].y)/2});
+      reactor(cx,cy,s.size*H*.95,(now-t0)/1000,s.pinch);
+      const [tx,ty]=xy(p[4]),[ix,iy]=xy(p[8]);g.setLineDash([4*devicePixelRatio,6*devicePixelRatio]);g.strokeStyle=s.pinch?'#ffffff':'rgba(111,243,255,.4)';
+      g.beginPath();g.moveTo(tx,ty);g.lineTo(ix,iy);g.stroke();g.setLineDash([]);
+      $('status').textContent='Hand locked';
+    }else if(now-lastSeen>600){$('status').textContent='Show your hand';pinchOn=false;history=[]}
+    requestAnimationFrame(frame)}
+  frame()}
+</script></body></html>

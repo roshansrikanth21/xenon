@@ -1698,6 +1698,7 @@ def _start_phone_access(app, config) -> None:
         )
         if not server.start():
             return
+        app.hud_url = remote.hud_url(settings["key"])
         vm = settings.get("vm") or remote.VM
         if not vm:
             print('phone access: set "vm" (user@host) in %APPDATA%/xenon/remote.json', file=sys.stderr, flush=True)

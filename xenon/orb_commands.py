@@ -164,6 +164,9 @@ _RULES_NEGATION_OK: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
 )
 
 _RULES: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
+    # ---- hand control (the webcam gesture HUD)
+    (r"(?:(?:open|start|show|launch|turn on|enable) )?(?:the )?(?:hand control|hand tracking|gesture control|hud|holograms?)",
+     _kind("hud_on")),
     # ---- the PC itself
     (rf"lock {_PC}|lock (?:my |the )?screen|lock (?:it|up)", _kind("lock_pc")),
     (rf"{_SHUT} {_PC}(?: now)?|shut ?down now", _kind("shutdown_pc")),

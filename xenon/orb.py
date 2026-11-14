@@ -1074,6 +1074,8 @@ class Tray:
             item("Music widget", lambda: app.post(app.toggle_music_widget),
                  checked=lambda _i: app.music_widget_running()),
             item("Music widget settings…", lambda: app.post(app.open_music_settings)),
+            item("Hand control (webcam)", lambda: app.post(app.open_hand_control),
+                 enabled=lambda _i: bool(getattr(app, "hud_url", None))),
             item("Copy phone link", lambda: app.post(app.copy_phone_link),
                  enabled=lambda _i: getattr(app, "phone", None) is not None),
             item(lambda _i: f"Companion screen: {app.companion_url or 'off'}" + (
@@ -1572,6 +1574,10 @@ class OrbApp:
         if kind == "widget_settings":
             self.post(self.open_music_settings)
             return "Opening the music widget settings."
+        if kind == "hud_on":
+            if origin == "remote":
+                return "Hand control uses the laptop's webcam, so start it at the laptop."
+            return self.open_hand_control()
         from xenon import learning
 
         if kind in {"learn_on", "learn_off"}:
@@ -1585,6 +1591,18 @@ class OrbApp:
             except Exception:
                 return None
         return None
+
+    # ----- hand control ------------------------------------------------------
+
+    def open_hand_control(self) -> str:
+        """Open the webcam gesture HUD (static/hud.html) in the browser."""
+        url = getattr(self, "hud_url", None)
+        if not url:
+            return "Hand control needs phone access switched on (it shares its little local server)."
+        import webbrowser
+
+        threading.Thread(target=webbrowser.open, args=(url,), daemon=True, name="xenon-hud").start()
+        return "Hand control is opening. Pinch to pause, swipe to skip."
 
     # ----- phone access ------------------------------------------------------
 

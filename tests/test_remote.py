@@ -81,3 +81,35 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HudTests(unittest.TestCase):
+    def setUp(self):
+        self.server = remote.RemoteServer(lambda t: "ok", "k" * 43, port=0)
+        self.assertTrue(self.server.start())
+        self.port = self.server._server.server_address[1]
+        self.addCleanup(self.server.stop)
+
+    def get(self, path, headers=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.headers.get("Content-Security-Policy", ""), r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, "", ""
+
+    def test_hud_served_on_the_laptop_with_its_own_policy(self):
+        code, csp, page = self.get("/hud")
+        self.assertEqual(code, 200)
+        self.assertIn("cdn.jsdelivr.net", csp)          # MediaPipe, only on this page
+        self.assertIn("Hand control", page)
+        self.assertNotIn("cdn.jsdelivr.net", self.get("/")[1])   # the phone page stays locked down
+
+    def test_hud_never_served_through_the_phone_tunnel(self):
+        self.assertEqual(self.get("/hud", {"Cf-Ray": "abc"})[0], 404)
+        self.assertEqual(self.get("/hud", {"Cf-Connecting-Ip": "1.2.3.4"})[0], 404)
+
+    def test_phone_cannot_start_hand_control(self):
+        self.assertFalse(remote.allowed_from_phone("open hand control"))
+        from xenon import orb_commands
+        self.assertEqual(orb_commands.parse("open hand control").kind, "hud_on")

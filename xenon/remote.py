@@ -142,21 +142,30 @@ class RemoteServer:
             def log_message(self, *args) -> None:   # no request logs (keys are in headers)
                 pass
 
-            def _send(self, code: int, body: bytes, kind: str = "application/json") -> None:
+            def _send(self, code: int, body: bytes, kind: str = "application/json", csp: str = PAGE_CSP) -> None:
                 self.send_response(code)
                 self.send_header("Content-Type", kind)
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Content-Security-Policy",
-                                 "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-                                 "connect-src 'self'; base-uri 'none'; form-action 'none'")
+                self.send_header("Content-Security-Policy", csp)
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _via_tunnel(self) -> bool:
+                # cloudflared adds these to every request it relays.
+                return bool(self.headers.get("Cf-Ray") or self.headers.get("Cf-Connecting-Ip"))
 
             def do_GET(self) -> None:  # noqa: N802
                 if self.path.split("?")[0] in ("/", "/index.html"):
                     self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                elif self.path.split("?")[0] == "/hud":
+                    # Hand control uses the laptop's webcam: only from the
+                    # laptop itself, never through the phone tunnel.
+                    if self._via_tunnel():
+                        self._send(404, b'{"error":"not found"}')
+                        return
+                    self._send(200, HUD.encode("utf-8"), "text/html; charset=utf-8", HUD_CSP)
                 elif self.path.startswith("/api/status"):
                     if not server.check_key(self.headers.get("X-Xenon-Key")):
                         self._send(401, b'{"error":"key"}')
@@ -272,3 +281,25 @@ def _load_page() -> str:
 
 
 PAGE = _load_page()
+
+
+def _load_hud() -> str:
+    try:
+        return (Path(__file__).with_name("static") / "hud.html").read_text(encoding="utf-8")
+    except OSError:
+        return "<!doctype html><title>Xenon</title><p>Hand control page missing.</p>"
+
+
+HUD = _load_hud()
+PAGE_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+            "connect-src 'self'; base-uri 'none'; form-action 'none'")
+# Hand control loads MediaPipe (script + WASM + model) from its official
+# hosts; the camera picture itself is processed in the tab.
+HUD_CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; "
+           "connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com; style-src 'unsafe-inline'; "
+           "media-src 'self' blob: mediastream:; worker-src blob: https://cdn.jsdelivr.net; img-src 'self' data: blob:; "
+           "base-uri 'none'; form-action 'none'")
+
+
+def hud_url(key: str, port: int = PORT) -> str:
+    return f"http://127.0.0.1:{port}/hud#k={key}"
