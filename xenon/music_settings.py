@@ -21,6 +21,7 @@ LYRIC_ALIGNS = ("left", "center")
 LYRIC_MOTIONS = ("wipe", "fade", "pop")
 LINE_MOTIONS = ("slide", "fade", "cut")
 GLOW_SHAPES = ("edges", "corners")
+LYRIC_SCRIPTS = ("original", "latin")
 # Theme presets: name -> glow colour. "album" follows the cover art,
 # "custom" uses ``custom_color``.
 THEMES = {
@@ -67,6 +68,7 @@ _CHOICES = {
     "lyric_motion": LYRIC_MOTIONS,
     "line_motion": LINE_MOTIONS,
     "glow_shape": GLOW_SHAPES,
+    "lyric_script": LYRIC_SCRIPTS,
 }
 
 
@@ -111,6 +113,8 @@ class MusicSettings:
     lyric_offset: float = 0.0        # seconds; + shows the lyrics sooner
     lyric_fps: int = 60              # lyric animation frame rate
     follow_voice: bool = True        # nudge guessed word timing onto the singing it hears
+    lyric_script: str = "original"   # original | latin (Indian scripts spelled in English letters)
+    lyrics_for_videos: bool = False  # look up lyrics when a video (not a song) is playing
     # card
     show_card: bool = True
     suggestions: bool = True         # dock suggests similar songs (asks Deezer)

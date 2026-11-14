@@ -202,6 +202,9 @@ class SettingsWindow:
         self._slider(lyr, "lyric_fps", "Smoothness (fps)", 20, 60, integer=True)
         self._slider(lyr, "lyric_offset", "Sync (s, + = sooner)", -2.0, 2.0)
         self._check(lyr, "follow_voice", "Follow the singing (time words by the voice)")
+        self._choice(lyr, "lyric_script", "Indian-language lyrics", ms.LYRIC_SCRIPTS,
+                     {"original": "Original script", "latin": "English letters"})
+        self._check(lyr, "lyrics_for_videos", "Look up lyrics for videos too")
 
         self._slider(audio, "sensitivity", "Sensitivity", 0.3, 3.0)
         self._slider(audio, "smoothing", "Smoothing", 0.0, 0.95)

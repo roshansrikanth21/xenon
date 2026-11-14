@@ -52,6 +52,14 @@ def position_now(state: dict, now: float | None = None) -> int:
     return int(pos)
 
 
+def _display(lines: list, settings) -> list:
+    """The lines as shown: Indian scripts in English letters if asked."""
+    if lines and getattr(settings, "lyric_script", "original") == "latin":
+        from .transliterate import latin_lines
+        return latin_lines(lines)
+    return lines
+
+
 def song_times(onsets, position_ms: int, now: float, keep_ms: int = 9000) -> list[int]:
     """Voice bursts (monotonic seconds, shared by both processes on
     Windows) as song positions, judged from where the song is now. Only
@@ -83,6 +91,7 @@ def run(conn, box, screen_height: int) -> None:
     settings = MusicSettings()
     state: dict = {}
     lines: list = []
+    raw_lines: list = []
     word_times: dict = {}
     from collections import deque
     onsets: deque = deque(maxlen=48)       # monotonic times of voice bursts
@@ -113,7 +122,8 @@ def run(conn, box, screen_height: int) -> None:
                     if was_asleep and not state.get("sleeping"):
                         drawn = object()
                 elif kind == "lines":
-                    lines = msg[2]
+                    raw_lines = msg[2]
+                    lines = _display(raw_lines, settings)
                     word_times = msg[3] if len(msg) > 3 else {}
                     onsets.clear()
                     drawn = object()
@@ -121,6 +131,7 @@ def run(conn, box, screen_height: int) -> None:
                     onsets.append(msg[1])
                 elif kind == "settings":
                     settings = coerce(msg[1])
+                    lines = _display(raw_lines, settings)
                     drawn = object()
                 elif kind == "opacity":
                     surface.set_opacity(msg[1])

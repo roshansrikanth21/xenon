@@ -89,12 +89,23 @@ def font(text: str, size: int, weight: str = "black") -> ImageFont.FreeTypeFont:
     """Segoe UI Black for Latin; a script font (Nirmala UI, Yu Gothic, ...)
     when the text needs glyphs Segoe does not have."""
     face = _script_face(text, weight)
-    key = (face, size, weight)
+    from .text_shaping import complex_face
+    key = (face, size, weight, complex_face(text))
     cached = _font_cache.get(key)
     if cached is not None:
         return cached
     result = None
-    if face is not None:
+    from . import text_shaping
+    complex_script = text_shaping.available() and text_shaping.complex_face(text) is not None
+    if complex_script:
+        # Malayalam, Tamil, Hindi, Thai, Arabic... need shaping, which this
+        # Pillow cannot do; Windows draws those words (see text_shaping).
+        path, index = face if face is not None else (_FONT_FILES[weight][0], 0)
+        try:
+            result = text_shaping.truetype(path, size, index, bold=weight != "regular")
+        except OSError:
+            result = None
+    if result is None and face is not None:
         try:
             result = ImageFont.truetype(face[0], size, index=face[1])
         except OSError:
@@ -739,7 +750,9 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
     except Exception:
         small_dy = 0
 
-    line_h = int(size * 1.02)
+    from .text_shaping import complex_face
+    # Indic and Thai letters reach well above and below Latin caps.
+    line_h = int(size * (1.3 if complex_face(text) else 1.02))
     block_h = line_h * len(rows)
     rise = 0 if style in ("karaoke",) else int((1 - frame.entry / REVEAL_STEPS) * size * 0.35)
     top = max(0, int(box.h * 0.46 - block_h / 2)) + rise

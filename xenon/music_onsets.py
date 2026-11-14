@@ -55,6 +55,36 @@ class OnsetDetector:
         return hits
 
 
+class SoundGate:
+    """Is something clearly audible on the speakers? Some players (a
+    streaming site in a browser) never tell Windows they are playing; the
+    widget uses this to wake its visuals anyway. On after ``on_s`` of
+    steady sound, off after ``off_s`` of quiet, so a notification ping or
+    a gap between songs does not flicker it."""
+
+    def __init__(self, level: float = 0.004, on_s: float = 0.5, off_s: float = 1.5) -> None:
+        self.level, self.on_s, self.off_s = level, on_s, off_s
+        self.on = False
+        self._since = None
+
+    def update(self, samples, t: float) -> bool:
+        if samples is None or len(samples) == 0:
+            loud = False
+        else:
+            import numpy as np
+
+            data = np.asarray(samples[-1024:], dtype=np.float32)
+            loud = float(np.sqrt(np.mean(data * data))) > self.level
+        if loud != self.on:
+            if self._since is None:
+                self._since = t
+            if t - self._since >= (self.on_s if loud else self.off_s):
+                self.on, self._since = loud, None
+        else:
+            self._since = None
+        return self.on
+
+
 class BeatBand:
     """How hard one slice of the spectrum is hitting, 0..1, for the edge
     glow. The level is judged against the band's own recent peak (a quiet

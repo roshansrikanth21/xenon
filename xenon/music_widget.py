@@ -336,12 +336,21 @@ _font_cache: dict = {}
 
 
 def font_for(text: str, size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    from . import text_shaping
     face = script_font_file(text, bold)
-    key = (face, size, bold)
+    shape = text_shaping.complex_face(text) if text_shaping.available() else None
+    key = (face, size, bold, shape)
     if key in _font_cache:
         return _font_cache[key]
     font = None
-    if face is not None:
+    if shape is not None:
+        # Needs shaping (Indic, Thai, Arabic...): Windows draws it.
+        path, index = face if face is not None else ("segoeuib.ttf" if bold else "segoeui.ttf", 0)
+        try:
+            font = text_shaping.truetype(path, size, index, bold=bold)
+        except OSError:
+            font = None
+    if font is None and face is not None:
         try:
             font = ImageFont.truetype(face[0], size, index=face[1])
         except OSError:
@@ -359,6 +368,7 @@ def font_for(text: str, size: int, bold: bool = False) -> ImageFont.FreeTypeFont
 _registered_classes: dict = {}
 
 
+from .media_titles import tidy as tidy_media  # noqa: E402
 from .music_onsets import EDGE_BAND as _EDGE_BAND  # noqa: E402
 
 _EDGE_WEIGHT = {"edge_bottom": 1.0, "edge_top": 0.6, "edge_left": 0.8, "edge_right": 0.75}
@@ -1257,10 +1267,12 @@ class MusicWidget:
                 args=(share, dock_stop, surfaces, boxes, pointer, dock_full, width, height, floor))
             dock_thread.start()
         lyric_proc = surfaces["lyrics"] if isinstance(surfaces["lyrics"], _LyricProcess) else None
+        self._tidy_from = self._tidy_to = None
         ring_proc = surfaces["ring"] if isinstance(surfaces["ring"], _RingProcess) else None
         ring_sent: dict = {}
-        from .music_onsets import BANDS, OnsetDetector, BeatBand
+        from .music_onsets import BANDS, OnsetDetector, BeatBand, SoundGate
         self._onsets = OnsetDetector()
+        self._sound = SoundGate()
         self._bands = {name: BeatBand(*spec) for name, spec in BANDS.items() if name != "bass"}
         lyric_sent: dict = {}
         lyric_thread = threading.Thread(
@@ -1363,8 +1375,19 @@ class MusicWidget:
                     covered = is_covered(surfaces["ring"].hwnd, (0, 0, width, height))
 
                 track, timeline = self._now_playing.state()
+                # Browser tab titles: "Watch X - Site" -> "X", videos marked.
+                if track is not self._tidy_from:
+                    self._tidy_from, self._tidy_to = track, tidy_media(track)
+                track = self._tidy_to
                 self._refresh_assets(track, timeline)
-                playing = bool(timeline and timeline.playing)
+                media_playing = bool(timeline and timeline.playing)
+                # Some players (streaming sites in a browser) never report
+                # "playing". If a track is up and the speakers are clearly
+                # sounding, the visuals react anyway; the lyric clock still
+                # goes by what the player reports (``media_playing``).
+                sounding = (audio_ok and track is not None and not media_playing
+                            and self._sound.update(self._audio.read_latest(1024), now))
+                playing = media_playing or bool(sounding)
 
                 # -- sleep: no music for a while -> only the corner record --
                 if playing:
@@ -1399,7 +1422,7 @@ class MusicWidget:
                         from dataclasses import asdict as _asdict
                         lyric_proc.send("settings", _asdict(settings))
                     msg = {
-                        "title": track.title if track else "", "key": self._track_key, "playing": playing,
+                        "title": track.title if track else "", "key": self._track_key, "playing": media_playing,
                         "pos": timeline.position_ms if timeline else 0,
                         "updated": timeline.updated_monotonic if timeline else 0.0,
                         "duration": timeline.duration_ms if timeline else 0,
@@ -1414,7 +1437,8 @@ class MusicWidget:
                         and now - self._track_changed_at > 2.5):
                     recorded = (self._track_key, id(self._cover))
                     try:
-                        self._history.record(track.title, track.artist, track.app, self._cover)
+                        if not getattr(track, "video", False):     # shows stay out of "recent songs"
+                            self._history.record(track.title, track.artist, track.app, self._cover)
                     except Exception:
                         pass
                     share.rows_dirty += 1
@@ -2145,6 +2169,11 @@ class MusicWidget:
             palette_from_image(cover) if cover else [(120, 130, 160)]
         )
         self._hires_key = None
+        if getattr(track, "video", False) and not self._settings.current.lyrics_for_videos:
+            # A show or film: searching song databases for it only finds the
+            # wrong song's cover and lyrics.
+            self._lyrics.request(None)
+            return
         if cover is None or min(cover.size) < 400:
             self._covers.request(track.title, track.artist)
         self._lyrics.request(
