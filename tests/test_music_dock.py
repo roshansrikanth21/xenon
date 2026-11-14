@@ -58,6 +58,35 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(closed.getpixel((p.x + p.w - 5, p.y + 5))[3], 0)   # panel hidden when closed
 
 
+class PopOutTests(unittest.TestCase):
+    def test_items_hug_the_record_on_an_arc(self):
+        g = dock.dock_geometry(3440, 1440, 5, 1392)
+        cx, cy = g.disc_center
+        rows = [g.targets[f"row{i}"] for i in range(5)]
+        xs = [b.x for b in rows]
+        self.assertEqual(xs, sorted(xs))                      # curves out toward the record's middle
+        self.assertGreater(xs[-1] - g.targets["previous"].x, 20)
+        for name, b in g.targets.items():
+            if name == "disc":
+                continue
+            overlaps = b.y < cy + g.disc / 2 and b.y + b.h > cy - g.disc / 2
+            if overlaps:                                     # beside the record, clear of it
+                self.assertGreater(b.x, cx + g.disc / 2 * 1.06, name)
+
+    def test_pieces_start_inside_the_record(self):
+        rows = [("A", "x", None), ("B", "y", None)]
+        g = dock.dock_geometry(1920, 1080, len(rows))
+        content = dock.DockContent("T", "a", True, None, rows)
+        r = dock.DockRenderer()
+        early = r.render(g, content, 0.06, None, draw_disc=False)
+        bbox = early.getchannel("A").getbbox()
+        self.assertIsNotNone(bbox)
+        cx = g.disc_center[0] - g.box.x
+        self.assertLess(bbox[0], cx + g.disc)                # still near the record
+        full = r.render(g, content, 1.0, None, draw_disc=False).getchannel("A").getbbox()
+        self.assertGreater(full[2], bbox[2])                 # flown out to its place
+
+
 class HistoryTests(unittest.TestCase):
     def test_record_dedupes_caps_and_persists(self):
         with tempfile.TemporaryDirectory() as tmp:

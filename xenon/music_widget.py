@@ -22,6 +22,7 @@ import ctypes
 import ctypes.wintypes as wintypes
 import io
 import math
+import os
 import sys
 import threading
 import time
@@ -985,7 +986,7 @@ class MusicWidget:
         dock_full = dock.dock_geometry(width, height, dock.MAX_ROWS, floor)
         if settings.show_dock and settings.side != "left":
             # Keep the card clear of the dock's disc in the corner.
-            clear = dock_full.panel.x
+            clear = max(dock_full.panel.x, dock_full.disc_center[0] + int(dock_full.disc * 0.62))
             card = layout.card_box
             if card.x < clear:
                 layout = _replace(layout, card_box=scene.Box(clear, card.y, card.w, card.h))
@@ -1015,17 +1016,19 @@ class MusicWidget:
         blank = {name: Image.new("RGBA", (boxes[name].w, boxes[name].h), (0, 0, 0, 0)) for name in order}
         pointer = _Pointer()
         pointer.start()
-        dock_renderer = dock.DockRenderer()
-        dock_geom = dock_full
-        dock_content = dock.DockContent()
-        dock_key = None
-        dock_open = False
-        openness = 0.0
-        hover_since = None
-        last_inside = 0.0
-        hover = None
-        press_glow = 0.0
-        dock_drawn = None
+        # The corner record and its pop-out menu run on their own thread
+        # (``_dock_loop``); this loop only hands it the current state.
+        from types import SimpleNamespace
+        self._painting()
+        share = SimpleNamespace(track=None, playing=False, accent=(255, 255, 255), settings=settings,
+                                layout=layout, covered=False, repaint=0, rows_dirty=0, openness=0.0)
+        dock_stop = threading.Event()
+        dock_thread = None
+        if "dock" in surfaces:
+            dock_thread = threading.Thread(
+                target=self._dock_loop, daemon=True, name="xenon-music-dock",
+                args=(share, dock_stop, surfaces, boxes, pointer, dock_full, width, height, floor))
+            dock_thread.start()
 
         last_attach = time.monotonic()
         last_coverage = 0.0
@@ -1057,7 +1060,8 @@ class MusicWidget:
                         break
                     self._toggle_overlay(*[surfaces[n] for n in order])
                     covered = False
-                    lyric_key = card_key = dock_drawn = object()
+                    lyric_key = card_key = object()
+                    share.repaint += 1
                     orb_idle_done = False
                     halo_key = None
                     self._vinyl_drawn = self._disc_drawn = None
@@ -1075,7 +1079,8 @@ class MusicWidget:
                         covered = False
                         last_played = now           # waking it counts as activity
                         # re-parenting drops each window's frame: repaint all
-                        lyric_key = card_key = dock_drawn = object()
+                        lyric_key = card_key = object()
+                        share.repaint += 1
                         orb_idle_done = False
                         halo_key = None
                         self._vinyl_drawn = self._disc_drawn = None
@@ -1086,9 +1091,11 @@ class MusicWidget:
                         result = "rebuild"
                         break
                     settings = fresh
-                    for surface in surfaces.values():
-                        surface.set_opacity(255 * settings.opacity)
-                    lyric_key = card_key = dock_drawn = object()
+                    with self._painting():
+                        for surface in surfaces.values():
+                            surface.set_opacity(255 * settings.opacity)
+                    lyric_key = card_key = object()
+                    share.repaint += 1
                     orb_art_key = halo_key = None
                     orb_idle_done = False
                     if not settings.pause_when_covered:
@@ -1122,7 +1129,8 @@ class MusicWidget:
                     else:
                         audio_ok, _ = self._audio.start()
                         self._track_changed_at = now        # come back with the fade-in
-                        lyric_key = card_key = dock_drawn = object()
+                        lyric_key = card_key = object()
+                        share.repaint += 1
                         orb_art_key = halo_key = None
                         orb_idle_done = False
                         self._disc_drawn = None
@@ -1134,13 +1142,15 @@ class MusicWidget:
                         self._history.record(track.title, track.artist, track.app, self._cover)
                     except Exception:
                         pass
-                    dock_key = None
+                    share.rows_dirty += 1
+                share.covered = covered
                 if covered:
                     time.sleep(0.25)
                     continue
                 if self._needs_frame:
                     self._needs_frame = False
-                    lyric_key = card_key = dock_drawn = object()
+                    lyric_key = card_key = object()
+                    share.repaint += 1
                     orb_idle_done = False
 
                 accent = settings.accent_rgb(scene.accent_from_palette(self._palette))
@@ -1150,89 +1160,13 @@ class MusicWidget:
                 intro = dock.ease_out_back(since_change / 0.7) if self._track_changed_at else 1.0
                 fade_in = dock.ease_out_cubic(since_change / 0.45) if self._track_changed_at else 1.0
 
-                # -- dock: hover opens it, clicks act -------------------------
-                if "dock" in surfaces:
-                    exclude = (track.title.strip().lower(), track.artist.strip().lower()) if track else None
-                    if settings.suggestions and track and self._suggest_for != self._track_key:
-                        self._suggest_for = self._track_key
-                        recent = [(e.title, e.artist) for e in self._history.recent(exclude, 4)]
-                        self._suggester.request(track.title, track.artist, recent)
-                    suggest_v = self._suggester.version if settings.suggestions else -1
-                    if dock_key != (self._track_key, self._art_key, suggest_v):
-                        picks = []
-                        if settings.suggestions:
-                            picks = [s for s in self._suggester.current() if s.key != exclude][:3]
-                        taken = {s.key for s in picks}
-                        recent = [e for e in self._history.recent(exclude, dock.MAX_ROWS) if e.key not in taken]
-                        entries = picks + recent[:dock.MAX_ROWS - len(picks)]
-                        rows = []
-                        for i, entry in enumerate(entries):
-                            if i < len(picks):
-                                rows.append((entry.title, entry.artist, entry.cover, True))
-                            else:
-                                rows.append((entry.title, entry.artist, self._history.thumbnail(entry), False))
-                        self._dock_rows = entries
-                        dock_geom = _replace(dock.dock_geometry(width, height, len(rows), floor), box=dock_full.box)
-                        dock_content = dock.DockContent(
-                            track.title if track else "", track.artist if track else "",
-                            playing, self._cover, rows)
-                        dock_key = (self._track_key, self._art_key, suggest_v)
-                    if dock_content.playing != playing or dock_content.cover is not self._cover:
-                        dock_content = dock.DockContent(dock_content.title, dock_content.artist, playing,
-                                                        self._cover, dock_content.rows)
-                    x, y, on_desktop, _down = pointer.read()
-                    inside = on_desktop and dock.in_dock(dock_geom, x, y, dock_open)
-                    if inside:
-                        last_inside = now
-                        hover_since = hover_since or now
-                        if not dock_open and now - hover_since > 0.12:
-                            dock_open = True
-                    else:
-                        hover_since = None
-                        if dock_open and now - last_inside > 0.5:
-                            dock_open = False
-                    hover = dock.hit(dock_geom, x, y, openness > 0.85) if inside else None
-                    for (px, py, desk_down, ux, uy, desk_up) in pointer.clicks():
-                        # A click counts when it pressed and released on the
-                        # same control, with the desktop under the pointer.
-                        def target_at(cx_, cy_, desk_):
-                            if not desk_:
-                                return None
-                            if dock.in_dock(dock_geom, cx_, cy_, dock_open):
-                                return dock.hit(dock_geom, cx_, cy_, dock_open)
-                            return "orb" if self._on_orb(layout, cx_, cy_) else None
-                        target = target_at(px, py, desk_down)
-                        if target and target == target_at(ux, uy, desk_up):
-                            press_glow = 1.0
-                            if target == "disc":
-                                dock_open = not dock_open
-                                last_inside = now
-                            elif self._dock_action(target):
-                                dock_open = False
-                    step = (now - getattr(self, "_dock_tick", now)) / 0.32
-                    self._dock_tick = now
-                    openness = min(1.0, openness + step) if dock_open else max(0.0, openness - step * 1.3)
-                    press_glow = max(0.0, press_glow - step * 2)
-                    # The open panel shows what the card shows: hand over.
-                    surfaces["card"].set_opacity(255 * settings.opacity * (1.0 - dock.ease_out_cubic(openness)))
-                    # The corner record turns while music plays (about
-                    # 15 rpm, redrawn ~20 times a second).
-                    if playing:
-                        self._dock_spin = (getattr(self, "_dock_spin", 0.0) + step * 0.32 * 90.0) % 360.0
-                    spin = getattr(self, "_dock_spin", 0.0)
-                    eased = dock.ease_out_cubic(openness)
-                    drawn = (round(openness, 3), hover, id(dock_content), accent)
-                    if drawn != dock_drawn:
-                        dock_drawn = drawn
-                        surfaces["dock"].push(dock_renderer.render(
-                            dock_geom, dock_content, eased, hover, accent, draw_disc=False))
-                    # The record has its own small window: spinning it only
-                    # repaints the record, not the whole dock.
-                    spun = (int(spin / 4.5), round(openness, 3), round(press_glow, 2), id(dock_content.cover))
-                    if spun != getattr(self, "_vinyl_drawn", None):
-                        self._vinyl_drawn = spun
-                        surfaces["vinyl"].push(dock_renderer.render_vinyl(
-                            dock_geom, boxes["vinyl"], dock_content, eased, accent, press_glow, spin))
+                # -- dock: its own thread draws it; hand over the state ------
+                if dock_thread is not None:
+                    share.track, share.playing, share.accent = track, playing, accent
+                    share.settings, share.layout = settings, layout
+                    # The open menu shows what the card shows: hand over.
+                    surfaces["card"].set_opacity(
+                        255 * settings.opacity * (1.0 - dock.ease_out_cubic(min(1.0, share.openness * 3.0))))
 
                 if sleeping:
                     time.sleep(0.03)        # the record and its dock stay live
@@ -1346,9 +1280,11 @@ class MusicWidget:
                     orb_idle_done = True
                 else:
                     last_tick = now
-                    # Keep polling the pointer briskly near the dock.
-                    time.sleep(0.016 if (dock_open or openness > 0) else 0.03)
+                    time.sleep(0.03)
         finally:
+            dock_stop.set()
+            if dock_thread is not None:
+                dock_thread.join(timeout=2.0)
             pointer.stop()
             from .wallpaper import detach_from_desktop
             for surface in surfaces.values():
@@ -1362,6 +1298,10 @@ class MusicWidget:
         return result
 
     def _place_all(self, surfaces: dict, order: list[str]) -> None:
+        with self._painting():
+            self._place_all_locked(surfaces, order)
+
+    def _place_all_locked(self, surfaces: dict, order: list[str]) -> None:
         """Stack the layers in ``order`` (bottom first) on the wallpaper or,
         in overlay mode, above every window."""
         if self.overlay:
@@ -1376,6 +1316,139 @@ class MusicWidget:
     def _on_orb(layout, x: int, y: int) -> bool:
         r = layout.orb_diameter / 2
         return (x - layout.orb_cx) ** 2 + (y - layout.orb_cy) ** 2 <= r * r
+
+    def _painting(self) -> "threading.RLock":
+        """Held while pushing the dock's frames and while re-parenting or
+        re-fading windows, so the dock thread never paints a window that is
+        halfway through being moved."""
+        lock = getattr(self, "_paint_lock", None)
+        if lock is None:
+            lock = self._paint_lock = threading.RLock()
+        return lock
+
+    def _dock_loop(self, share, stop, surfaces, boxes, pointer, dock_full, width, height, floor) -> None:
+        """The corner record and its pop-out menu, on their own thread at up
+        to 60 fps. The main loop's ring and lyric frames take 20-40 ms each,
+        which made the spin and the fan-out stutter while they shared it."""
+        from dataclasses import replace as _replace
+
+        from . import music_dock as dock
+
+        renderer = dock.DockRenderer()
+        geom = dock_full
+        content = dock.DockContent()
+        key = None
+        open_ = False
+        openness = 0.0
+        hover_since = None
+        last_inside = 0.0
+        press = 0.0
+        drawn = vinyl_drawn = None
+        repaint = share.repaint
+        spin = 0.0
+        last = time.monotonic()
+        count_fps = os.environ.get("XENON_DOCK_FPS") == "1"
+        frames, since = 0, last
+        while not stop.is_set():
+            start = time.monotonic()
+            busy = False
+            if count_fps and start - since >= 5.0:
+                print(f"music widget: dock {frames / (start - since):.0f} fps", flush=True)
+                frames, since = 0, start
+            try:
+                now = start
+                dt = min(0.1, now - last)
+                last = now
+                if share.covered:
+                    time.sleep(0.25)
+                    continue
+                if share.repaint != repaint:
+                    repaint = share.repaint
+                    drawn = vinyl_drawn = None
+                settings, track, playing, accent = share.settings, share.track, share.playing, share.accent
+                exclude = (track.title.strip().lower(), track.artist.strip().lower()) if track else None
+                if settings.suggestions and track and self._suggest_for != self._track_key:
+                    self._suggest_for = self._track_key
+                    recent = [(e.title, e.artist) for e in self._history.recent(exclude, 4)]
+                    self._suggester.request(track.title, track.artist, recent)
+                suggest_v = self._suggester.version if settings.suggestions else -1
+                want = (self._track_key, self._art_key, suggest_v, share.rows_dirty)
+                if key != want:
+                    picks = []
+                    if settings.suggestions:
+                        picks = [x for x in self._suggester.current() if x.key != exclude][:3]
+                    taken = {x.key for x in picks}
+                    recent = [e for e in self._history.recent(exclude, dock.MAX_ROWS) if e.key not in taken]
+                    entries = picks + recent[:dock.MAX_ROWS - len(picks)]
+                    rows = []
+                    for i, entry in enumerate(entries):
+                        if i < len(picks):
+                            rows.append((entry.title, entry.artist, entry.cover, True))
+                        else:
+                            rows.append((entry.title, entry.artist, self._history.thumbnail(entry), False))
+                    self._dock_rows = entries
+                    geom = _replace(dock.dock_geometry(width, height, len(rows), floor), box=dock_full.box)
+                    content = dock.DockContent(track.title if track else "", track.artist if track else "",
+                                               playing, self._cover, rows)
+                    key = want
+                    renderer.render(geom, content, 1.0, None, accent, draw_disc=False)   # build the pieces now
+                    drawn = None
+                if content.playing != playing or content.cover is not self._cover:
+                    content = dock.DockContent(content.title, content.artist, playing, self._cover, content.rows)
+                x, y, on_desktop, _down = pointer.read()
+                inside = on_desktop and dock.in_dock(geom, x, y, open_)
+                if inside:
+                    last_inside = now
+                    hover_since = hover_since or now
+                    if not open_ and now - hover_since > 0.12:
+                        open_ = True
+                else:
+                    hover_since = None
+                    if open_ and now - last_inside > 0.5:
+                        open_ = False
+                hover = dock.hit(geom, x, y, openness > 0.85) if inside else None
+                for (px, py, desk_down, ux, uy, desk_up) in pointer.clicks():
+                    # A click counts when it pressed and released on the same
+                    # control, with the desktop under the pointer.
+                    def target_at(cx_, cy_, desk_):
+                        if not desk_:
+                            return None
+                        if dock.in_dock(geom, cx_, cy_, open_):
+                            return dock.hit(geom, cx_, cy_, open_)
+                        return "orb" if self._on_orb(share.layout, cx_, cy_) else None
+                    target = target_at(px, py, desk_down)
+                    if target and target == target_at(ux, uy, desk_up):
+                        press = 1.0
+                        if target == "disc":
+                            open_ = not open_
+                            last_inside = now
+                        elif self._dock_action(target):
+                            open_ = False
+                step = dt / 0.5
+                openness = min(1.0, openness + step) if open_ else max(0.0, openness - step * 1.4)
+                press = max(0.0, press - dt / 0.16)
+                share.openness = openness
+                if playing:
+                    spin = (spin + dt * 90.0) % 360.0
+                eased = dock.ease_out_cubic(openness)
+                with self._painting():
+                    frame = (round(openness, 3), hover, id(content), accent)
+                    if frame != drawn:
+                        drawn = frame
+                        surfaces["dock"].push(renderer.render(geom, content, openness, hover, accent,
+                                                              draw_disc=False))
+                    turn = (round(spin, 2), round(eased, 3), round(press, 2), id(content.cover))
+                    if turn != vinyl_drawn:
+                        vinyl_drawn = turn
+                        surfaces["vinyl"].push(renderer.render_vinyl(
+                            geom, boxes["vinyl"], content, eased, accent, press, spin))
+                        frames += 1
+                busy = playing or 0.0 < openness < 1.0 or press > 0.0 or inside
+            except Exception as error:
+                print(f"music widget: dock frame failed: {error}", flush=True)
+                time.sleep(0.5)
+            period = 1.0 / 60 if busy else 1.0 / 20
+            time.sleep(max(0.002, period - (time.monotonic() - start)))
 
     _SLEEP_KEEP = ("dock", "vinyl")
 
@@ -1482,6 +1555,10 @@ class MusicWidget:
         show(surface.hwnd)
 
     def _toggle_fullscreen(self, surfaces: dict, order: list[str], width: int, height: int) -> None:
+        with self._painting():
+            self._toggle_fullscreen_locked(surfaces, order, width, height)
+
+    def _toggle_fullscreen_locked(self, surfaces: dict, order: list[str], width: int, height: int) -> None:
         """Ctrl+Alt+F: a dark backdrop over every window with the whole
         scene floated on top; again to put it back on the wallpaper. The
         backdrop takes clicks (so the dock and orb work and nothing behind
@@ -1535,6 +1612,10 @@ class MusicWidget:
         return getattr(self, "_backdrop", None) is not None
 
     def _toggle_overlay(self, *surfaces) -> None:
+        with self._painting():
+            self._toggle_overlay_locked(*surfaces)
+
+    def _toggle_overlay_locked(self, *surfaces) -> None:
         """Wallpaper <-> floating overlay for every layer. The overlay is
         click-through and never takes focus, so it can stay up while you work."""
         from .wallpaper import clear_top_most
