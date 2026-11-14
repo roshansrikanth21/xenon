@@ -158,7 +158,7 @@ class RemoteServer:
 
             def do_GET(self) -> None:  # noqa: N802
                 if self.path.split("?")[0] in ("/", "/index.html"):
-                    self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                    self._send(200, _static("phone.html").encode("utf-8"), "text/html; charset=utf-8")
                 elif self.path.split("?")[0] in ("/core", "/models/core.glb", "/models/ring.glb"):
                     # Xenon Core (3D, the Futurist Lantern models): laptop only.
                     if self._via_tunnel():
@@ -180,7 +180,7 @@ class RemoteServer:
                     if self._via_tunnel():
                         self._send(404, b'{"error":"not found"}')
                         return
-                    self._send(200, HUD.encode("utf-8"), "text/html; charset=utf-8", HUD_CSP)
+                    self._send(200, _static("hud.html").encode("utf-8"), "text/html; charset=utf-8", HUD_CSP)
                 elif self.path.startswith("/api/status"):
                     if not server.check_key(self.headers.get("X-Xenon-Key")):
                         self._send(401, b'{"error":"key"}')

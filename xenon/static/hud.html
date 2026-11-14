@@ -60,7 +60,7 @@ canvas{position:fixed;inset:0;width:100%;height:100%}
 <p>Uses your webcam. Hand tracking runs in this tab; the picture never leaves your laptop.</p></div></div>
 <script type="module">
 const key=(location.hash.match(/k=([^&]+)/)||[])[1]||(()=>{try{return sessionStorage.getItem('xk')||''}catch(e){return ''}})();
-if(location.hash){try{sessionStorage.setItem('xk',key)}catch(e){} history.replaceState(null,'',location.pathname)}
+if(location.hash){try{sessionStorage.setItem('xk',key)}catch(e){} window.history.replaceState(null,'',location.pathname)}
 const $=id=>document.getElementById(id),video=$('cam'),cv=$('fx'),g=cv.getContext('2d');
 let W=0,H=0;function size(){W=cv.width=innerWidth*devicePixelRatio;H=cv.height=innerHeight*devicePixelRatio}size();addEventListener('resize',size);
 addEventListener('keydown',e=>{if(e.key==='Escape')window.close()});
@@ -87,7 +87,7 @@ async function togglePlay(){let playing=true;
 // ---- gesture reading -------------------------------------------------------
 const d=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 const extended=(p,tip,pip)=>d(p[tip],p[0])>d(p[pip],p[0])*1.12;
-let pinchOn=false,pinchT=0,pinchY=0,volY=0,history=[],lastSwipe=0,peaceT=0,lastPeace=0,lastSeen=0;
+let pinchOn=false,pinchT=0,pinchY=0,volY=0,trail=[],lastSwipe=0,peaceT=0,lastPeace=0,lastSeen=0;
 function read(p,now){
   const size=d(p[0],p[9])||1,pinch=d(p[4],p[8])/size<0.32;
   const ix=extended(p,8,6),mx=extended(p,12,10),rx=extended(p,16,14),px=extended(p,20,18);
@@ -96,9 +96,9 @@ function read(p,now){
   else if(pinch&&pinchOn){const dy=volY-p[8].y;if(Math.abs(dy)>0.07){volY=p[8].y;command(dy>0?'volume up':'volume down',dy>0?'Volume up':'Volume down')}}
   else if(!pinch&&pinchOn){pinchOn=false;if(now-pinchT<550&&Math.abs(p[8].y-pinchY)<0.05)togglePlay()}
   // swipe: open hand moving fast sideways (the picture is mirrored)
-  history.push({t:now,x:p[0].x});history=history.filter(h=>now-h.t<350);
-  if(!pinch&&ix&&mx&&rx&&history.length>3&&now-lastSwipe>1100){const dx=history[history.length-1].x-history[0].x;
-    if(Math.abs(dx)>0.22){lastSwipe=now;history=[];dx<0?command('next song','Swipe → next'):command('previous song','Swipe ← previous')}}
+  trail.push({t:now,x:p[0].x});trail=trail.filter(h=>now-h.t<350);
+  if(!pinch&&ix&&mx&&rx&&trail.length>3&&now-lastSwipe>1100){const dx=trail[trail.length-1].x-trail[0].x;
+    if(Math.abs(dx)>0.22){lastSwipe=now;trail=[];dx<0?command('next song','Swipe → next'):command('previous song','Swipe ← previous')}}
   // peace sign held for 0.8 s
   const peace=ix&&mx&&!rx&&!px&&!pinch;
   if(peace){if(!peaceT)peaceT=now;if(now-peaceT>800&&now-lastPeace>4000){lastPeace=now;peaceT=0;command("what's playing",'Peace sign')}}else peaceT=0;
@@ -128,7 +128,7 @@ function loop(hands){
       const [tx,ty]=xy(p[4]),[ix,iy]=xy(p[8]);g.setLineDash([4*devicePixelRatio,6*devicePixelRatio]);g.strokeStyle=s.pinch?'#ffffff':'rgba(111,243,255,.4)';
       g.beginPath();g.moveTo(tx,ty);g.lineTo(ix,iy);g.stroke();g.setLineDash([]);
       $('status').textContent='Hand locked';
-    }else if(now-lastSeen>600){$('status').textContent='Show your hand';pinchOn=false;history=[]}
+    }else if(now-lastSeen>600){$('status').textContent='Show your hand';pinchOn=false;trail=[]}
     requestAnimationFrame(frame)}
   frame()}
 </script></body></html>
