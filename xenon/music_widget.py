@@ -174,6 +174,9 @@ def player_region(width: int, height: int) -> tuple[int, int, int, int]:
 VINYL_RPM = 33.3333
 LABEL_FRACTION = 0.40      # album-art label diameter / record diameter
 HOTKEY_ID = 0x584D         # "XM"
+HOTKEY_FULL = 0x5846       # "XF": Ctrl+Alt+F full-screen view
+VK_F = 0x46
+BACKDROP_CLASS = "XenonMusicBackdrop"
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_NOREPEAT = 0x0001, 0x0002, 0x0004, 0x4000
 VK_M = 0x4D
 WM_HOTKEY = 0x0312
@@ -608,6 +611,9 @@ class _LayeredSurface:
             if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
                 hits += 1
                 continue
+            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_FULL:
+                self.full_hits = getattr(self, "full_hits", 0) + 1
+                continue
             ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
             ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
         return hits
@@ -700,7 +706,8 @@ class _Pointer:
     pointer: a press and release over one of its controls, with the desktop
     — not some app window — under the pointer, counts as a click."""
 
-    DESKTOP = frozenset({"SysListView32", "SHELLDLL_DefView", "WorkerW", "Progman"})
+    # Clicks count on bare desktop, and on the full-screen view's backdrop.
+    DESKTOP = frozenset({"SysListView32", "SHELLDLL_DefView", "WorkerW", "Progman", BACKDROP_CLASS})
 
     def __init__(self) -> None:
         user = ctypes.windll.user32
@@ -840,6 +847,7 @@ class MusicWidget:
         self._suggester = Suggester()
         self._covers = CoverFinder()
         self._hires_key = None
+        self._disc_cache: dict = {}
         self._suggest_for = None
         self._dock_rows: list = []
         self._controller = None
@@ -937,6 +945,9 @@ class MusicWidget:
         hotkey_ok = bool(user.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_M))
         if not hotkey_ok:
             print("music widget: Ctrl+Alt+Shift+M is taken by another app", flush=True)
+        full_ok = bool(user.RegisterHotKey(None, HOTKEY_FULL, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F))
+        if not full_ok:
+            print("music widget: Ctrl+Alt+F is taken by another app", flush=True)
         try:
             while not self._stop.is_set():
                 if self._scene(width, height, audio_ok) != "rebuild":
@@ -945,6 +956,8 @@ class MusicWidget:
             self._ready.set()
             if hotkey_ok:
                 user.UnregisterHotKey(None, HOTKEY_ID)
+            if full_ok:
+                user.UnregisterHotKey(None, HOTKEY_FULL)
             self._surface = None
             self._player_surface = None
             self._player_rect = None
@@ -976,10 +989,11 @@ class MusicWidget:
             card = layout.card_box
             if card.x < clear:
                 layout = _replace(layout, card_box=scene.Box(clear, card.y, card.w, card.h))
-        order = ["halo", "ring", "disc", "lyrics", "card"] + (["dock"] if settings.show_dock else [])
+        order = ["halo", "ring", "disc", "lyrics", "card"] + (["dock", "vinyl"] if settings.show_dock else [])
         boxes = {
             "halo": layout.orb_box, "ring": layout.orb_box, "disc": disc_box,
             "lyrics": layout.lyric_box, "card": layout.card_box, "dock": dock_full.box,
+            "vinyl": dock.vinyl_box(dock_full),
         }
         surfaces: dict[str, _LayeredSurface] = {}
         for name in order:
@@ -1017,6 +1031,10 @@ class MusicWidget:
         last_coverage = 0.0
         covered = False
         next_ring = next_lyric = next_card = 0.0
+        last_played = time.monotonic()
+        sleeping = False
+        self._vinyl_drawn = None
+        self._disc_drawn = None
         lyric_key = card_key = object()
         orb_art = None
         orb_art_key = None
@@ -1031,10 +1049,36 @@ class MusicWidget:
             while not self._stop.is_set():
                 now = time.monotonic()
                 if surfaces["lyrics"].pump() % 2:
+                    if self.overlay and not self.fullscreen:
+                        # Back to the wallpaper with fresh windows: layers that
+                        # were floated come back blank if re-attached.
+                        self.overlay = False
+                        result = "rebuild"
+                        break
                     self._toggle_overlay(*[surfaces[n] for n in order])
                     covered = False
                     lyric_key = card_key = dock_drawn = object()
                     orb_idle_done = False
+                    halo_key = None
+                    self._vinyl_drawn = self._disc_drawn = None
+                if getattr(surfaces["lyrics"], "full_hits", 0):
+                    flips = surfaces["lyrics"].full_hits
+                    surfaces["lyrics"].full_hits = 0
+                    if flips % 2 and self.fullscreen:
+                        self._close_backdrop()
+                        self.overlay = bool(getattr(self, "_overlay_before_full", False))
+                        if not self.overlay:
+                            result = "rebuild"        # fresh windows on the wallpaper
+                            break
+                    elif flips % 2:
+                        self._toggle_fullscreen(surfaces, order, width, height)
+                        covered = False
+                        last_played = now           # waking it counts as activity
+                        # re-parenting drops each window's frame: repaint all
+                        lyric_key = card_key = dock_drawn = object()
+                        orb_idle_done = False
+                        halo_key = None
+                        self._vinyl_drawn = self._disc_drawn = None
 
                 if self._settings.poll(now):
                     fresh = self._settings.current
@@ -1064,6 +1108,24 @@ class MusicWidget:
                 track, timeline = self._now_playing.state()
                 self._refresh_assets(track, timeline)
                 playing = bool(timeline and timeline.playing)
+
+                # -- sleep: no music for a while -> only the corner record --
+                if playing:
+                    last_played = now
+                idle_after = settings.idle_minutes * 60
+                want_sleep = (idle_after > 0 and not playing and now - last_played >= idle_after
+                              and not self.fullscreen)
+                if want_sleep != sleeping:
+                    sleeping = want_sleep
+                    if sleeping:
+                        audio_ok = self._sleep_surfaces(surfaces)
+                    else:
+                        audio_ok, _ = self._audio.start()
+                        self._track_changed_at = now        # come back with the fade-in
+                        lyric_key = card_key = dock_drawn = object()
+                        orb_art_key = halo_key = None
+                        orb_idle_done = False
+                        self._disc_drawn = None
                 # Record once the art has settled (players publish it late).
                 if (track and recorded != (self._track_key, id(self._cover))
                         and now - self._track_changed_at > 2.5):
@@ -1158,13 +1220,23 @@ class MusicWidget:
                     if playing:
                         self._dock_spin = (getattr(self, "_dock_spin", 0.0) + step * 0.32 * 90.0) % 360.0
                     spin = getattr(self, "_dock_spin", 0.0)
-                    drawn = (round(openness, 3), hover, id(dock_content), round(press_glow, 2), accent,
-                             int(spin / 4.5))
+                    eased = dock.ease_out_cubic(openness)
+                    drawn = (round(openness, 3), hover, id(dock_content), accent)
                     if drawn != dock_drawn:
                         dock_drawn = drawn
                         surfaces["dock"].push(dock_renderer.render(
-                            dock_geom, dock_content, dock.ease_out_cubic(openness), hover, accent, press_glow,
-                            spin))
+                            dock_geom, dock_content, eased, hover, accent, draw_disc=False))
+                    # The record has its own small window: spinning it only
+                    # repaints the record, not the whole dock.
+                    spun = (int(spin / 4.5), round(openness, 3), round(press_glow, 2), id(dock_content.cover))
+                    if spun != getattr(self, "_vinyl_drawn", None):
+                        self._vinyl_drawn = spun
+                        surfaces["vinyl"].push(dock_renderer.render_vinyl(
+                            dock_geom, boxes["vinyl"], dock_content, eased, accent, press_glow, spin))
+
+                if sleeping:
+                    time.sleep(0.03)        # the record and its dock stay live
+                    continue
 
                 # -- lyrics: only when what is lit actually changes ------------
                 if now >= next_lyric:
@@ -1178,7 +1250,7 @@ class MusicWidget:
                                  if frame is not None else blank["lyrics"])
                         surfaces["lyrics"].push(image)
                         self._has_frame = True
-                        next_lyric = now + 1.0 / 30
+                        next_lyric = now + 1.0 / 15     # word fades still get ~3 steps
                     else:
                         next_lyric = now + 0.02
 
@@ -1246,13 +1318,25 @@ class MusicWidget:
                         box, layout, self._bars, playing, energy, accent, height, settings,
                         intro=intro if track else 0.0, diameter=int(art_d * scale),
                     ), box.w, box.h)
-                    bounce_key = round(scale, 3)
-                    if (bounce_key != getattr(self, "_disc_drawn", None) or fading or not playing
-                            or (settings.spin_speed and disc_frame % 2 == 0)):
+                    # The bounce has only ~a dozen visible sizes: quantise and
+                    # cache each one's packed bytes while the disc stays still.
+                    level = int(round((scale - 1.0) / 0.006))
+                    bounce_key = (level, id(orb_art), playing, round(self._spin, 1) if settings.spin_speed else 0)
+                    if bounce_key != getattr(self, "_disc_drawn", None) or fading:
                         self._disc_drawn = bounce_key
-                        disc = scene.render_disc(orb_art, self._spin, playing)
-                        surfaces["disc"].push(_bounced(disc, scale, disc_box.w) if disc is not None
-                                              else blank["disc"])
+                        cache = self._disc_cache
+                        if cache.get("art") is not orb_art or settings.spin_speed or fading:
+                            cache.clear()
+                            cache["art"] = orb_art
+                        packed = cache.get((level, playing))
+                        if packed is None:
+                            disc = scene.render_disc(orb_art, self._spin, playing)
+                            img = (_bounced(disc, 1.0 + level * 0.006, disc_box.w) if disc is not None
+                                   else blank["disc"])
+                            packed = img.tobytes("raw", "BGRa")
+                            if not settings.spin_speed and not fading:
+                                cache[(level, playing)] = packed
+                        surfaces["disc"].push_raw(packed, disc_box.w, disc_box.h)
                     disc_frame += 1
                     if not active:
                         orb_idle_done = True
@@ -1274,6 +1358,7 @@ class MusicWidget:
                 except Exception:
                     pass
             self._surfaces = {}
+            self._close_backdrop()
         return result
 
     def _place_all(self, surfaces: dict, order: list[str]) -> None:
@@ -1291,6 +1376,39 @@ class MusicWidget:
     def _on_orb(layout, x: int, y: int) -> bool:
         r = layout.orb_diameter / 2
         return (x - layout.orb_cx) ** 2 + (y - layout.orb_cy) ** 2 <= r * r
+
+    _SLEEP_KEEP = ("dock", "vinyl")
+
+    def _sleep_surfaces(self, surfaces) -> bool:
+        """Idle: shrink every layer but the corner record and its dock to
+        1x1 (Windows frees the window's image), drop our own frame buffers
+        and caches, stop audio capture and trim the working set. Returns
+        the new audio state (off)."""
+        import gc
+
+        for name, surface in surfaces.items():
+            if name in self._SLEEP_KEEP:
+                continue
+            surface.push_raw(bytes(4), 1, 1)
+            surface._release_push_gdi()
+        self._disc_cache.clear()
+        try:
+            from .music_scene import _RING_LAYER
+            _RING_LAYER.clear()
+        except Exception:
+            pass
+        try:
+            self._audio.stop()
+        except Exception:
+            pass
+        gc.collect()
+        if sys.platform == "win32":
+            try:
+                kernel = ctypes.windll.kernel32
+                kernel.SetProcessWorkingSetSize(kernel.GetCurrentProcess(), ctypes.c_size_t(-1), ctypes.c_size_t(-1))
+            except Exception:
+                pass
+        return False
 
     def _dock_action(self, target: str) -> bool:
         """Run a dock click off the render thread. Returns True when the dock
@@ -1363,16 +1481,71 @@ class MusicWidget:
         send_to_top_most(surface.hwnd)
         show(surface.hwnd)
 
+    def _toggle_fullscreen(self, surfaces: dict, order: list[str], width: int, height: int) -> None:
+        """Ctrl+Alt+F: a dark backdrop over every window with the whole
+        scene floated on top; again to put it back on the wallpaper. The
+        backdrop takes clicks (so the dock and orb work and nothing behind
+        gets clicked) but never focus."""
+        from .wallpaper import send_to_top_most, show
+
+        if getattr(self, "_backdrop", None) is None:
+            backdrop = _LayeredSurface(width, height, 0, 0, class_name=BACKDROP_CLASS)
+            if not backdrop.create():
+                return
+            # A fresh top-level window from this process can come up
+            # shell-cloaked (invisible); the widget's own layers never do,
+            # because they start as children of the desktop and float from
+            # there. Take the same path, then paint it (re-parenting drops
+            # whatever was pushed before).
+            from .wallpaper import detach_from_desktop
+            attach_behind_icons(backdrop.hwnd)
+            detach_from_desktop(backdrop.hwnd)
+            user = ctypes.windll.user32
+            style = user.GetWindowLongPtrW(backdrop.hwnd, GWL_EXSTYLE)
+            user.SetWindowLongPtrW(backdrop.hwnd, GWL_EXSTYLE, style & ~0x20)   # takes clicks (WS_EX_TRANSPARENT off)
+            send_to_top_most(backdrop.hwnd)
+            show(backdrop.hwnd)
+            backdrop.push_raw(Image.new("RGBA", (width, height), (0, 0, 0, 236)).tobytes("raw", "BGRa"),
+                              width, height)
+            backdrop._release_push_gdi()      # the window keeps the frame
+            self._backdrop = backdrop
+            self._overlay_before_full = self.overlay
+            if not self.overlay:
+                self._toggle_overlay(*[surfaces[n] for n in order])
+            else:
+                for name in order:                # re-float above the backdrop
+                    self._float(surfaces[name])
+        else:
+            self._close_backdrop()
+            if self.overlay and not getattr(self, "_overlay_before_full", False):
+                self._toggle_overlay(*[surfaces[n] for n in order])
+        self._needs_frame = True
+
+    def _close_backdrop(self) -> None:
+        backdrop = getattr(self, "_backdrop", None)
+        if backdrop is not None:
+            try:
+                backdrop.close()
+            except Exception:
+                pass
+        self._backdrop = None
+
+    @property
+    def fullscreen(self) -> bool:
+        return getattr(self, "_backdrop", None) is not None
+
     def _toggle_overlay(self, *surfaces) -> None:
         """Wallpaper <-> floating overlay for every layer. The overlay is
         click-through and never takes focus, so it can stay up while you work."""
         from .wallpaper import clear_top_most
         self.overlay = not self.overlay
         self._needs_frame = True
-        for surface in surfaces:
-            if self.overlay:
+        if self.overlay:
+            for surface in surfaces:            # each float goes to the top: bottom first
                 self._float(surface)
-            else:
+        else:
+            # each attach goes to the bottom: top layer first, like _place_all
+            for surface in reversed(surfaces):
                 clear_top_most(surface.hwnd)
                 attach_behind_icons(surface.hwnd)
 

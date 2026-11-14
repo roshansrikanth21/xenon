@@ -128,6 +128,7 @@ class SettingsWindow:
 
         self._check(system, "start_with_orb", "Start with the orb")
         self._check(system, "show_dock", "Corner dock (controls + recent songs)")
+        self._slider(system, "idle_minutes", "Sleep after no music (min, 0 = never)", 0.0, 60.0)
         self._check(system, "suggestions", "Suggest similar songs in the dock (asks Deezer)")
         self._slider(system, "fps", "Frame rate", 10, 60, integer=True)
         self._check(system, "pause_when_covered", "Pause when windows cover the desktop")

@@ -419,7 +419,7 @@ class DockRenderer:
 
     def render(self, geom: DockGeometry, content: DockContent, openness: float,
                hover: str | None, accent=(255, 255, 255), press: float = 0.0,
-               spin: float = 0.0) -> Image.Image:
+               spin: float = 0.0, draw_disc: bool = True) -> Image.Image:
         """``openness`` 0..1 drives the fan-out: each piece slides out from
         the disc and fades in, a few milliseconds after the one before."""
         out = Image.new("RGBA", (geom.box.w, geom.box.h), (0, 0, 0, 0))
@@ -438,14 +438,40 @@ class DockRenderer:
                     piece.putalpha(img.getchannel("A").point(lambda v, a=alpha: int(v * a)))
                 _paste(out, piece, x + dx, y + dy)
 
+        if draw_disc:
+            disc = self._scaled_disc(geom, content, accent, openness, press, spin)
+            cx, cy = geom.disc_center
+            _paste(out, disc, int(cx - geom.box.x - disc.width / 2), int(cy - geom.box.y - disc.height / 2))
+        return out
+
+    def _scaled_disc(self, geom, content, accent, openness, press, spin):
         disc = self._disc_for(geom, content.cover, accent, spin)
         scale = 1.0 + 0.06 * openness - 0.05 * press
         if abs(scale - 1.0) > 0.004:
             size = max(2, int(disc.width * scale))
             disc = disc.resize((size, size), Image.BILINEAR)
+        return disc
+
+    def render_vinyl(self, geom: DockGeometry, box: Box, content: DockContent, openness: float,
+                     accent=(255, 255, 255), press: float = 0.0, spin: float = 0.0) -> Image.Image:
+        """Just the corner record, for its own small window (``vinyl_box``),
+        so spinning it doesn't repaint the whole dock."""
+        out = Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0))
+        disc = self._scaled_disc(geom, content, accent, openness, press, spin)
         cx, cy = geom.disc_center
-        _paste(out, disc, int(cx - geom.box.x - disc.width / 2), int(cy - geom.box.y - disc.height / 2))
+        _paste(out, disc, int(cx - box.x - disc.width / 2), int(cy - box.y - disc.height / 2))
         return out
+
+
+def vinyl_box(geom: DockGeometry) -> Box:
+    """Screen box of the corner record (with its shadow and open-scale
+    room), clipped to the dock window."""
+    size = int(geom.disc * 1.5 * 1.07)
+    cx, cy = geom.disc_center
+    x0, y0 = max(geom.box.x, cx - size // 2), max(geom.box.y, cy - size // 2)
+    x1 = min(geom.box.x + geom.box.w, cx + size // 2)
+    y1 = min(geom.box.y + geom.box.h, cy + size // 2)
+    return Box(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
 
 
 def _paste(out: Image.Image, img: Image.Image, x: int, y: int) -> None:

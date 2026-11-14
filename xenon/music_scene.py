@@ -211,9 +211,11 @@ def _case(text: str, settings) -> str:
 
 def _blur_quarter(mask: Image.Image, radius: float, gain: float) -> Image.Image:
     """Gaussian blur at quarter size (16x cheaper), scaled back up."""
-    small = mask.resize((max(1, mask.width // 4), max(1, mask.height // 4)), Image.BILINEAR)
+    small = mask.reduce(4) if mask.width >= 8 and mask.height >= 8 else mask
     small = small.filter(ImageFilter.GaussianBlur(max(2, radius)))
-    return small.resize(mask.size, Image.BILINEAR).point(lambda v: min(255, int(v * gain)))
+    # gain on the small image (16x fewer pixels), then scale up once
+    small = small.point(lambda v: min(255, int(v * gain)))
+    return small.resize(mask.size, Image.BILINEAR)
 
 
 # Short function words a poster sets small ("I want THE world IN MY hands").
@@ -340,15 +342,23 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
 
     # A soft dark shadow under every word keeps white text readable on a
     # bright wallpaper; then the glow from the sung words, then the words.
-    shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    shadow.putalpha(_blur_quarter(glyphs.getchannel("A"), size / 30, 0.55))
-    image = Image.alpha_composite(image, shadow)
-    if st.glow > 0:
-        glow = Image.new("RGBA", image.size, accent + (0,))
-        # A faint, tight sheen on the sung words, not a fog round them.
-        glow.putalpha(_blur_quarter(lit, size / 48, 0.3 * st.glow))
-        image = Image.alpha_composite(image, glow)
-    image = Image.alpha_composite(image, glyphs)
+    # Work only round the words (plus room for the blur): the layer is
+    # mostly empty, and full-size composites were most of the cost.
+    bbox = glyphs.getbbox()
+    if bbox:
+        m = int(size * 0.35)
+        crop = (max(0, bbox[0] - m), max(0, bbox[1] - m), min(image.width, bbox[2] + m),
+                min(image.height, bbox[3] + m))
+        g = glyphs.crop(crop)
+        out = Image.new("RGBA", g.size, (0, 0, 0, 0))
+        out.putalpha(_blur_quarter(g.getchannel("A"), size / 30, 0.55))
+        if st.glow > 0:
+            glow = Image.new("RGBA", g.size, accent + (0,))
+            # A faint, tight sheen on the sung words, not a fog round them.
+            glow.putalpha(_blur_quarter(lit.crop(crop), size / 48, 0.3 * st.glow))
+            out.alpha_composite(glow)
+        out.alpha_composite(g)
+        image.paste(out, crop[:2])
 
     if frame.upcoming and st.show_upcoming:
         up = _case(frame.upcoming, st)
@@ -669,9 +679,19 @@ def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: 
     if intro < 0.999:
         k = max(0.0, min(1.0, intro))
         alpha = alpha.point(lambda v: int(v * k))
-    r, g, b = accent
-    bands = [alpha.point(lambda v, c=c: v * c // 255) for c in (b, g, r)]
-    return Image.merge("RGBA", (*bands, alpha)).tobytes()
+    # One solid-colour layer per size/colour, reused every frame: swap its
+    # alpha in and let PIL's "BGRa" packer premultiply in C (one pass,
+    # instead of three per-channel lookups and a merge).
+    key = (box.w, box.h, tuple(accent))
+    layer = _RING_LAYER.get(key)
+    if layer is None:
+        _RING_LAYER.clear()
+        layer = _RING_LAYER[key] = Image.new("RGBA", (box.w, box.h), tuple(accent) + (0,))
+    layer.putalpha(alpha)
+    return layer.tobytes("raw", "BGRa")
+
+
+_RING_LAYER: dict = {}
 
 
 def render_disc(art: OrbArt, spin_deg: float, playing: bool) -> Image.Image | None:

@@ -184,3 +184,24 @@ class AlbumColourTests(unittest.TestCase):
         self.assertTrue(r > 200 and g < r and b < r and r - g > 60)  # bright pink-red, not green
         grey = Image.new("RGB", (50, 50), (128, 128, 128))
         self.assertEqual(accent_from_palette(palette_from_image(grey)), (255, 255, 255))
+
+
+class VinylWindowTests(unittest.TestCase):
+    def test_vinyl_box_inside_dock_and_render_size(self):
+        geom = dock.dock_geometry(3440, 1440, 5, 1392)
+        box = dock.vinyl_box(geom)
+        self.assertTrue(geom.box.x <= box.x and box.x + box.w <= geom.box.x + geom.box.w)
+        self.assertTrue(geom.box.y <= box.y and box.y + box.h <= geom.box.y + geom.box.h)
+        content = dock.DockContent("t", "a", True, Image.new("RGB", (64, 64), "red"), [])
+        r = dock.DockRenderer()
+        img = r.render_vinyl(geom, box, content, 0.0, spin=10)
+        self.assertEqual(img.size, (box.w, box.h))
+        self.assertGreater(img.getchannel("A").getextrema()[1], 200)
+        panel = r.render(geom, content, 0.0, None, draw_disc=False)
+        self.assertEqual(panel.getchannel("A").getextrema()[1], 0)      # closed and no disc: empty
+
+    def test_idle_setting(self):
+        from xenon import music_settings as ms
+
+        self.assertEqual(ms.MusicSettings().idle_minutes, 5.0)
+        self.assertEqual(ms.coerce({"idle_minutes": 999}).idle_minutes, 120.0)

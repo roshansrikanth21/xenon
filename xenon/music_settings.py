@@ -39,6 +39,7 @@ _RANGES = {
     "glow": (0.0, 2.0),
     "spin_speed": (0.0, 60.0),
     "bounce": (0.0, 2.0),
+    "idle_minutes": (0.0, 120.0),
     "sensitivity": (0.3, 3.0),
     "fps": (10, 60),
     "bar_count": (36, 200),
@@ -63,6 +64,7 @@ _CHOICES = {
 class MusicSettings:
     # startup / behaviour
     start_with_orb: bool = True
+    idle_minutes: float = 5.0       # no music this long -> only the corner record (0 = never)
     pause_when_covered: bool = True
     show_dock: bool = True           # corner disc with controls and recent songs
     # layout
