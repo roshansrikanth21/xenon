@@ -44,6 +44,7 @@ _RANGES = {
     "lyric_fps": (20, 60),
     "spin_speed": (0.0, 60.0),
     "bounce": (0.0, 2.0),
+    "corner_glow": (0.0, 2.0),
     "idle_minutes": (0.0, 120.0),
     "sensitivity": (0.3, 3.0),
     "fps": (10, 60),
@@ -87,6 +88,7 @@ class MusicSettings:
     smoothing: float = 0.5           # 0 = twitchy, 0.95 = very slow fall
     spin_speed: float = 0.0          # degrees per second (0: the disc stays still)
     bounce: float = 1.0              # how hard the disc pulses on the beat
+    corner_glow: float = 1.0         # screen corners light up on the bass (0 = off)
     fps: int = 30
     halo: bool = False               # soft light behind the disc (off: looked cheap)
     backdrop: float = 0.0            # dark pool of shade behind the orb

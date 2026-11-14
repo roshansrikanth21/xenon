@@ -28,6 +28,8 @@ class DockGeometry:
     panel: Box                     # expanded panel, screen coordinates
     targets: dict = field(default_factory=dict)   # name -> Box (screen)
     rows: int = 0
+    open_center: tuple = (0, 0)    # where the record sits, grown, while open
+    open_disc: int = 0             # its diameter then
 
     def local(self, b: Box) -> Box:
         return Box(b.x - self.box.x, b.y - self.box.y, b.w, b.h)
@@ -35,29 +37,33 @@ class DockGeometry:
 
 def dock_geometry(width: int, height: int, rows: int, bottom: int | None = None) -> DockGeometry:
     """``bottom`` is the lowest usable row (the top of the taskbar); the
-    disc tucks into the corner just above it.
+    small record tucks into the corner just above it.
 
-    There is no panel: the controls, what is playing and the song list
-    stack up beside the record with their left edges on an arc round it,
-    so the list hugs the disc and fans out of it."""
+    Opening, the record grows into a big disc in the corner and the menu
+    wraps round its right-hand edge: the controls, what is playing and the
+    song list stack up with their left edges on a circle just outside the
+    record, so the list curves round it like a moon's halo."""
     rows = max(0, min(MAX_ROWS, rows))
     floor = height if bottom is None else max(int(height * 0.6), min(height, bottom))
     d = int(height * 0.15)
-    r = d / 2
     cx, cy = int(d * 0.42), floor - int(d * 0.42)
     pad = max(10, int(height * 0.009))
-    iw = int(max(260, min(width * 0.14, height * 0.26)))
+    iw = int(max(260, min(width * 0.14, height * 0.25)))
     icon = int(height * 0.026)
     now_h = int(height * 0.056)
     row_h = int(height * 0.044)
-    total = icon + int(pad * 1.3) + now_h + (pad + rows * row_h if rows else 0)
-    top = floor - int(height * 0.02) - total
-    rh = r + max(pad * 2, int(d * 0.16))          # clear of the record (and its open scale)
-    rv = max(1.0, (cy - top) * 1.08)
+
+    big = int(height * 0.34)                       # the record, open
+    ocx = int(big * 0.28)                          # a little of it off the left edge
+    ocy = floor - big // 2 - pad
+    radius = big / 2 + max(pad * 3, int(big * 0.09))   # the circle the menu sits on
+
+    total = icon + pad + now_h + (int(pad * 0.6) + rows * row_h if rows else 0)
+    top = max(pad, int(ocy - total / 2))
 
     def x_at(mid: float) -> int:
-        k = max(0.0, 1.0 - ((mid - cy) / rv) ** 2)
-        return int(cx + rh * math.sqrt(k))
+        dy = mid - ocy
+        return int(ocx + math.sqrt(max(0.0, radius * radius - dy * dy)))
 
     targets: dict[str, Box] = {}
     y = top
@@ -65,9 +71,9 @@ def dock_geometry(width: int, height: int, rows: int, bottom: int | None = None)
     for name in BUTTONS:
         targets[name] = Box(x, y, icon, icon)
         x += icon + int(pad * 0.7)
-    y += icon + int(pad * 1.3)
+    y += icon + pad
     targets["now"] = Box(x_at(y + now_h / 2), y, iw, now_h)
-    y += now_h + pad
+    y += now_h + int(pad * 0.6)
     for i in range(rows):
         targets[f"row{i}"] = Box(x_at(y + row_h / 2), y, iw, row_h)
         y += row_h
@@ -76,21 +82,30 @@ def dock_geometry(width: int, height: int, rows: int, bottom: int | None = None)
     panel = Box(x0, top, x1 - x0, y - top)
     targets["disc"] = Box(cx - d // 2, cy - d // 2, d, d)
 
-    glow = int(d * 0.25)
-    by = max(0, min(top - pad * 3, cy - d // 2 - glow))
-    box = Box(0, by, x1 + 40, floor - by)      # room for the text shadows
-    return DockGeometry(box, (cx, cy), d, panel, targets, rows)
+    by = max(0, min(top - pad * 3, ocy - int(big * 0.75), cy - int(d * 0.75)))
+    bw = max(x1 + 40, ocx + int(big * 0.8))     # room for the text shadows and the big record
+    box = Box(0, by, bw, floor - by)
+    return DockGeometry(box, (cx, cy), d, panel, targets, rows, (ocx, ocy), big)
+
+
+def disc_at(geom: DockGeometry, e: float) -> tuple[float, float, float]:
+    """Record centre and diameter at eased openness ``e`` (small in the
+    corner at 0, grown at 1)."""
+    if not geom.open_disc:
+        return geom.disc_center[0], geom.disc_center[1], geom.disc
+    (sx, sy), (bx, by) = geom.disc_center, geom.open_center
+    return sx + (bx - sx) * e, sy + (by - sy) * e, geom.disc + (geom.open_disc - geom.disc) * e
 
 
 def hit(geom: DockGeometry, x: int, y: int, open_: bool) -> str | None:
-    """Which control is under a screen point. Only the disc counts while the
-    dock is closed; everything counts once it is open."""
+    """Which control is under a screen point. Only the record counts while
+    the dock is closed; everything counts once it is open."""
     names = list(geom.targets) if open_ else ["disc"]
     for name in names:
         b = geom.targets[name]
         if name == "disc":
-            cx, cy = geom.disc_center
-            if (x - cx) ** 2 + (y - cy) ** 2 <= (geom.disc / 2) ** 2:
+            cx, cy, d = disc_at(geom, 1.0 if open_ else 0.0)
+            if (x - cx) ** 2 + (y - cy) ** 2 <= (d / 2) ** 2:
                 return name
             continue
         if b.x <= x < b.x + b.w and b.y <= y < b.y + b.h:
@@ -99,17 +114,16 @@ def hit(geom: DockGeometry, x: int, y: int, open_: bool) -> str | None:
 
 
 def in_dock(geom: DockGeometry, x: int, y: int, open_: bool) -> bool:
-    """Is the pointer over the dock (the disc, or the open panel with a
-    little slack so the panel does not snap shut on the way across)?"""
-    cx, cy = geom.disc_center
-    if (x - cx) ** 2 + (y - cy) ** 2 <= (geom.disc / 2 * 1.05) ** 2:
+    """Is the pointer over the dock (the record, or the open menu with a
+    little slack so it does not snap shut on the way across)?"""
+    cx, cy, d = disc_at(geom, 1.0 if open_ else 0.0)
+    if (x - cx) ** 2 + (y - cy) ** 2 <= (d / 2 * 1.05) ** 2:
         return True
     if not open_:
         return False
     p, slack = geom.panel, 24
-    if p.x - geom.disc // 2 - slack <= x < p.x + p.w + slack and p.y - slack <= y <= geom.box.y + geom.box.h:
-        return True
-    return False
+    top = min(p.y, cy - d / 2) - slack
+    return x < p.x + p.w + slack and top <= y <= geom.box.y + geom.box.h
 
 
 def ease_out_cubic(t: float) -> float:
@@ -333,23 +347,68 @@ class DockRenderer:
     """Caches the disc and the panel pieces; ``render`` only composites."""
 
     def __init__(self) -> None:
-        self._disc_key = None
-        self._disc = None
         self._parts_key = None
         self._parts: list = []
         self._pieces: dict = {}
         self._pieces_for = None
 
-    def _disc_for(self, geom: DockGeometry, cover, accent, spin: float = 0.0) -> Image.Image:
-        key = (id(cover), geom.disc)
-        if key != self._disc_key:
-            self._disc, self._label, self._over = _vinyl_parts(geom.disc, cover)
-            self._disc_key = key
-        record = self._label.rotate(-spin, resample=Image.BILINEAR) if spin else self._label
-        disc = self._disc.copy()
+    def _parts_for(self, size: int, cover):
+        cache = self.__dict__.setdefault("_records", {})
+        key = (id(cover), size)
+        parts = cache.get(key)
+        if parts is None:
+            if len(cache) >= 2 and not any(k[0] == id(cover) for k in cache):
+                cache.clear()
+            base, label, over = _vinyl_parts(size, cover)
+            # For the grow animation: label and sheen merged, premultiplied
+            # (Pillow resizes RGBA by converting to RGBa and back each time).
+            merged = Image.alpha_composite(label, over).convert("RGBa")
+            parts = cache[key] = (base, label.convert("RGBa"), over, base.reduce(4), merged)
+        return parts
+
+    def prepare(self, geom: DockGeometry, cover) -> None:
+        """Build the big record for this cover on a worker thread, so the
+        first hover does not stall on it (~0.5 s)."""
+        import threading
+
+        if not geom.open_disc:
+            return
+        cache = self.__dict__.setdefault("_records", {})
+        if (id(cover), geom.open_disc) in cache:
+            return
+        threading.Thread(target=self._parts_for, args=(geom.open_disc, cover), daemon=True,
+                         name="xenon-dock-record").start()
+
+    def _disc_for(self, size: int, cover, spin: float = 0.0, target: int | None = None) -> Image.Image:
+        """The record built at ``size`` (each size once per cover), turned
+        by ``spin`` and shown at ``target`` diameter. Growing, it scales
+        the label and over-layer first and stretches a quarter-size shadow,
+        instead of building the full-size disc and resizing it."""
+        base, label, over, base_small, merged = self._parts_for(size, cover)
+        target = target or size
+        if abs(target - size) > 1:
+            # Mid-grow (half a second): one premultiplied resize and turn
+            # of the merged label (its sheen turns along, unnoticed), and a
+            # stretched quarter-size shadow.
+            k = target / size
+            ls = max(2, int(label.width * k))
+            record = merged.resize((ls, ls), Image.BILINEAR)
+            if spin:
+                record = record.rotate(-spin, resample=Image.BILINEAR)
+            record = record.convert("RGBA")
+            bs = max(2, int(base.width * k))
+            disc = base_small.resize((bs, bs), Image.BILINEAR)
+            layers = (record,)
+        else:
+            disc = base.copy()
+            record = (label.rotate(-spin, resample=Image.BILINEAR) if spin else label).convert("RGBA")
+            layers = (record, over)
         off = ((disc.width - record.width) // 2, (disc.height - record.height) // 2)
-        disc.alpha_composite(record, off)
-        disc.alpha_composite(self._over, off)
+        rect = (off[0], off[1], off[0] + record.width, off[1] + record.height)
+        region = disc.crop(rect)
+        for layer in layers:
+            region = Image.alpha_composite(region, layer)
+        disc.paste(region, rect[:2])
         return disc
 
     def _piece(self, key, build) -> Image.Image:
@@ -458,7 +517,8 @@ class DockRenderer:
             last = max((p[2] for p in parts), default=0)
             stagger = 0.055
             span = max(0.3, 1.0 - last * stagger)
-            ox, oy = geom.disc_center[0] - geom.box.x, geom.disc_center[1] - geom.box.y
+            oc = geom.open_center if geom.open_disc else geom.disc_center
+            ox, oy = oc[0] - geom.box.x, oc[1] - geom.box.y
             for img, (x, y), order in parts:
                 t = min(1.0, (openness - order * stagger) / span)
                 if t <= 0:
@@ -481,38 +541,45 @@ class DockRenderer:
                 _paste(out, piece, int(px - piece.width / 2), int(py - piece.height / 2))
 
         if draw_disc:
-            disc = self._scaled_disc(geom, content, accent, ease_out_cubic(openness), press, spin)
-            cx, cy = geom.disc_center
+            disc, (cx, cy) = self._scaled_disc(geom, content, accent, ease_out_cubic(openness), press, spin)
             _paste(out, disc, int(cx - geom.box.x - disc.width / 2), int(cy - geom.box.y - disc.height / 2))
         return out
 
-    def _scaled_disc(self, geom, content, accent, openness, press, spin):
-        disc = self._disc_for(geom, content.cover, accent, spin)
-        scale = 1.0 + 0.06 * openness - 0.05 * press
-        if abs(scale - 1.0) > 0.004:
-            size = max(2, int(disc.width * scale))
-            disc = disc.resize((size, size), Image.BILINEAR)
-        return disc
+    def _scaled_disc(self, geom, content, accent, eased, press, spin):
+        """(image, centre): the record grown by ``eased`` openness, pressed
+        in a touch while clicked."""
+        cx, cy, d = disc_at(geom, eased)
+        d *= 1.0 - 0.05 * press
+        source = geom.open_disc if (geom.open_disc and eased > 0.01) else geom.disc
+        return self._disc_for(source, content.cover, spin, int(round(d))), (cx, cy)
 
     def render_vinyl(self, geom: DockGeometry, box: Box, content: DockContent, openness: float,
                      accent=(255, 255, 255), press: float = 0.0, spin: float = 0.0) -> Image.Image:
-        """Just the corner record, for its own small window (``vinyl_box``),
-        so spinning it doesn't repaint the whole dock."""
+        """Just the record, for its own window (``vinyl_box``), so spinning
+        it doesn't repaint the whole dock. ``openness`` is eased."""
         out = Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0))
-        disc = self._scaled_disc(geom, content, accent, openness, press, spin)
-        cx, cy = geom.disc_center
-        _paste(out, disc, int(cx - box.x - disc.width / 2), int(cy - box.y - disc.height / 2))
+        disc, (cx, cy) = self._scaled_disc(geom, content, accent, openness, press, spin)
+        x, y = int(cx - box.x - disc.width / 2), int(cy - box.y - disc.height / 2)
+        # Nothing underneath: a clipped plain paste, no blending.
+        left, top = max(0, -x), max(0, -y)
+        right, bottom = min(disc.width, box.w - x), min(disc.height, box.h - y)
+        if right > left and bottom > top:
+            out.paste(disc.crop((left, top, right, bottom)), (x + left, y + top))
         return out
 
 
 def vinyl_box(geom: DockGeometry) -> Box:
-    """Screen box of the corner record (with its shadow and open-scale
-    room), clipped to the dock window."""
-    size = int(geom.disc * 1.5 * 1.07)
-    cx, cy = geom.disc_center
-    x0, y0 = max(geom.box.x, cx - size // 2), max(geom.box.y, cy - size // 2)
-    x1 = min(geom.box.x + geom.box.w, cx + size // 2)
-    y1 = min(geom.box.y + geom.box.h, cy + size // 2)
+    """Screen box of the record (with its shadow), small or grown, clipped
+    to the dock window."""
+    spots = [(geom.disc_center, geom.disc)]
+    if geom.open_disc:
+        spots.append((geom.open_center, geom.open_disc))
+    x0 = min(c[0] - int(d * 0.8) for c, d in spots)
+    y0 = min(c[1] - int(d * 0.8) for c, d in spots)
+    x1 = max(c[0] + int(d * 0.8) for c, d in spots)
+    y1 = max(c[1] + int(d * 0.8) for c, d in spots)
+    x0, y0 = max(geom.box.x, x0), max(geom.box.y, y0)
+    x1, y1 = min(geom.box.x + geom.box.w, x1), min(geom.box.y + geom.box.h, y1)
     return Box(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
 
 

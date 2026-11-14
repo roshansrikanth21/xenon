@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -59,19 +60,55 @@ class GeometryTests(unittest.TestCase):
 
 
 class PopOutTests(unittest.TestCase):
-    def test_items_hug_the_record_on_an_arc(self):
+    def test_items_wrap_round_the_grown_record(self):
         g = dock.dock_geometry(3440, 1440, 5, 1392)
-        cx, cy = g.disc_center
-        rows = [g.targets[f"row{i}"] for i in range(5)]
-        xs = [b.x for b in rows]
-        self.assertEqual(xs, sorted(xs))                      # curves out toward the record's middle
-        self.assertGreater(xs[-1] - g.targets["previous"].x, 20)
+        ox, oy = g.open_center
+        r = g.open_disc / 2
+        self.assertGreater(g.open_disc, g.disc * 2)             # grows into a big disc
+        dists = []
         for name, b in g.targets.items():
             if name == "disc":
                 continue
-            overlaps = b.y < cy + g.disc / 2 and b.y + b.h > cy - g.disc / 2
-            if overlaps:                                     # beside the record, clear of it
-                self.assertGreater(b.x, cx + g.disc / 2 * 1.06, name)
+            d = math.hypot(b.x - ox, b.y + b.h / 2 - oy)       # left edge, mid height
+            self.assertGreater(d, r * 1.02, name)                # clear of the record
+            if name not in ("playpause", "next", "settings"):    # the button row runs on from the first
+                dists.append(d)
+        self.assertLess(max(dists) - min(dists), r * 0.25)       # all on one circle round it
+        xs = [g.targets[f"row{i}"].x for i in range(5)]
+        self.assertLess(xs[-1], max(xs))                         # curves back in at the bottom
+        self.assertLessEqual(g.box.y + g.box.h, 1392)
+        cx, cy, d = dock.disc_at(g, 0.0)
+        self.assertEqual((cx, cy, d), (*g.disc_center, g.disc))
+        self.assertEqual(dock.hit(g, ox, oy, True), "disc")
+
+    def test_corner_glow_is_brightest_in_its_corner(self):
+        img = scene.corner_glow(200, 120, "br", (255, 100, 50))
+        a = img.getchannel("A")
+        self.assertGreater(a.getpixel((199, 119)), 200)
+        self.assertEqual(a.getpixel((0, 0)), 0)
+        self.assertEqual(img.getpixel((199, 119))[:3], (255, 100, 50))
+
+    def test_spotify_progress_anchors_and_checks_the_song(self):
+        from xenon.music_sync import SpotifyProgress
+
+        t = [100.0]
+        sp = SpotifyProgress(fetch=lambda: {"item": {"name": "A Little Death"}, "progress_ms": 5000,
+                                            "is_playing": True}, clock=lambda: t[0])
+        sp._read()
+        t[0] += 2.0
+        self.assertEqual(sp.position("A Little Death"), 7000)
+        self.assertIsNone(sp.position("Sweater Weather"))
+        t[0] += 30
+        self.assertIsNone(sp.position("A Little Death"))       # stale
+
+    def test_pace_shortens_lines_before_a_pause(self):
+        lines = [(0, "one two three four"), (2000, "five six seven eight"), (4000, "nine ten eleven twelve"),
+                 (6000, "a b c d"), (20000, "end")]
+        pace = scene.singing_pace(lines)
+        self.assertIsNotNone(pace)
+        starts, ends = scene.word_spans(6000, 20000, "a b c d".split(), pace)
+        self.assertLess(ends[-1] - 6000, 4000)                 # not stretched over the 14 s gap
+        self.assertEqual(scene.syllables("beautiful"), 3)
 
     def test_pieces_start_inside_the_record(self):
         rows = [("A", "x", None), ("B", "y", None)]

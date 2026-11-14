@@ -1001,8 +1001,13 @@ class MusicWidget:
             card = layout.card_box
             if card.x < clear:
                 layout = _replace(layout, card_box=scene.Box(clear, card.y, card.w, card.h))
-        order = ["halo", "ring", "disc", "lyrics", "card"] + (["dock", "vinyl"] if settings.show_dock else [])
+        corner_names = [f"corner_{c}" for c in scene.CORNERS]
+        order = corner_names + ["halo", "ring", "disc", "lyrics", "card"] + (
+            ["dock", "vinyl"] if settings.show_dock else [])
+        cw, ch = int(width * 0.26), int(height * 0.5)
         boxes = {
+            "corner_tl": scene.Box(0, 0, cw, ch), "corner_tr": scene.Box(width - cw, 0, cw, ch),
+            "corner_bl": scene.Box(0, floor - ch, cw, ch), "corner_br": scene.Box(width - cw, floor - ch, cw, ch),
             "halo": layout.orb_box, "ring": layout.orb_box, "disc": disc_box,
             "lyrics": layout.lyric_box, "card": layout.card_box, "dock": dock_full.box,
             "vinyl": dock.vinyl_box(dock_full),
@@ -1015,7 +1020,7 @@ class MusicWidget:
                 for made in surfaces.values():
                     made.close()
                 return "stop"
-            surface.opacity = int(255 * settings.opacity)
+            surface.opacity = 0 if name in corner_names else int(255 * settings.opacity)
             surfaces[name] = surface
         self._surfaces = surfaces
         self._surface = surfaces["lyrics"]
@@ -1055,6 +1060,7 @@ class MusicWidget:
         self._vinyl_drawn = None
         self._disc_drawn = None
         lyric_key = card_key = object()
+        corner_key = None
         orb_art = None
         orb_art_key = None
         halo_key = None
@@ -1078,6 +1084,7 @@ class MusicWidget:
                     covered = False
                     lyric_key = card_key = object()
                     share.repaint += 1
+                    corner_key = None
                     orb_idle_done = False
                     halo_key = None
                     self._vinyl_drawn = self._disc_drawn = None
@@ -1097,6 +1104,7 @@ class MusicWidget:
                         # re-parenting drops each window's frame: repaint all
                         lyric_key = card_key = object()
                         share.repaint += 1
+                        corner_key = None
                         orb_idle_done = False
                         halo_key = None
                         self._vinyl_drawn = self._disc_drawn = None
@@ -1108,10 +1116,12 @@ class MusicWidget:
                         break
                     settings = fresh
                     with self._painting():
-                        for surface in surfaces.values():
-                            surface.set_opacity(255 * settings.opacity)
+                        for name, surface in surfaces.items():
+                            if name not in corner_names:      # those follow the beat
+                                surface.set_opacity(255 * settings.opacity)
                     lyric_key = card_key = object()
                     share.repaint += 1
+                    corner_key = None
                     orb_art_key = halo_key = None
                     orb_idle_done = False
                     if not settings.pause_when_covered:
@@ -1149,6 +1159,7 @@ class MusicWidget:
                         self._track_changed_at = now        # come back with the fade-in
                         lyric_key = card_key = object()
                         share.repaint += 1
+                        corner_key = None
                         orb_art_key = halo_key = None
                         orb_idle_done = False
                         self._disc_drawn = None
@@ -1169,6 +1180,7 @@ class MusicWidget:
                     self._needs_frame = False
                     lyric_key = card_key = object()
                     share.repaint += 1
+                    corner_key = None
                     orb_idle_done = False
 
                 accent = settings.accent_rgb(scene.accent_from_palette(self._palette))
@@ -1185,6 +1197,9 @@ class MusicWidget:
                     # The open menu shows what the card shows: hand over.
                     surfaces["card"].set_opacity(
                         255 * settings.opacity * (1.0 - dock.ease_out_cubic(min(1.0, share.openness * 3.0))))
+                    # ...and the lyrics step back so the menu reads clearly.
+                    surfaces["lyrics"].set_opacity(
+                        255 * settings.opacity * (1.0 - 0.75 * dock.ease_out_cubic(share.openness)))
 
                 if sleeping:
                     time.sleep(0.03)        # the record and its dock stay live
@@ -1203,6 +1218,16 @@ class MusicWidget:
                         else:
                             image = blank["card"]
                         surfaces["card"].push(image)
+
+                # -- corners: one picture per colour, the beat sets opacity --
+                look = (accent, settings.corner_glow > 0)
+                if corner_key != look:
+                    corner_key = look
+                    with self._painting():
+                        for name in corner_names:
+                            box_ = boxes[name]
+                            surfaces[name].push(scene.corner_glow(box_.w, box_.h, name[-2:], accent)
+                                                if look[1] else blank[name])
 
                 # -- orb: halo once per look, ring every frame, disc half rate --
                 art_key = (id(self._cover), art_d, accent, settings.disc, settings.halo, settings.backdrop)
@@ -1248,6 +1273,11 @@ class MusicWidget:
                     self._bass_avg = 0.92 * getattr(self, "_bass_avg", bass) + 0.08 * bass
                     kick = max(0.0, bass - self._bass_avg * 1.15) * 4.0 if playing else 0.0
                     self._pulse = max(min(1.0, kick), getattr(self, "_pulse", 0.0) * (0.82 ** (dt * 30)))
+                    # The screen corners breathe with the bass and flash on
+                    # each kick (only the windows' opacity changes).
+                    glow = settings.corner_glow * min(1.0, 0.9 * self._pulse + 0.18 * bass) if playing else 0.0
+                    for name in corner_names:
+                        surfaces[name].set_opacity(255 * settings.opacity * min(1.0, glow) * fade_in)
                     scale = 1.0 + 0.07 * settings.bounce * self._pulse
                     box = layout.orb_box
                     surfaces["ring"].push_raw(scene.render_ring_bgra(
@@ -1282,6 +1312,8 @@ class MusicWidget:
                     orb_idle_done = True
                 else:
                     last_tick = now
+                    for name in corner_names:
+                        surfaces[name].set_opacity(0)
                     time.sleep(0.03)
         finally:
             dock_stop.set()
@@ -1349,6 +1381,7 @@ class MusicWidget:
         drawn = vinyl_drawn = None
         repaint = share.repaint
         spin = 0.0
+        last_vinyl = 0.0
         last = time.monotonic()
         count_fps = os.environ.get("XENON_DOCK_FPS") == "1"
         frames, since = 0, last
@@ -1395,9 +1428,11 @@ class MusicWidget:
                                                playing, self._cover, rows)
                     key = want
                     renderer.render(geom, content, 1.0, None, accent, draw_disc=False)   # build the pieces now
+                    renderer.prepare(geom, content.cover)
                     drawn = None
                 if content.playing != playing or content.cover is not self._cover:
                     content = dock.DockContent(content.title, content.artist, playing, self._cover, content.rows)
+                    renderer.prepare(geom, content.cover)
                 x, y, on_desktop, _down = pointer.read()
                 inside = on_desktop and dock.in_dock(geom, x, y, open_)
                 if inside:
@@ -1441,8 +1476,12 @@ class MusicWidget:
                         surfaces["dock"].push(renderer.render(geom, content, openness, hover, accent,
                                                               draw_disc=False))
                     turn = (round(spin, 2), round(eased, 3), round(press, 2), id(content.cover))
-                    if turn != vinyl_drawn:
+                    # The grown record costs ~13 ms a frame (mostly the
+                    # turn itself): 40 fps while the menu is open.
+                    calm = eased > 0.99 and turn[1:] == (vinyl_drawn or (None,))[1:]
+                    if turn != vinyl_drawn and not (calm and now - last_vinyl < 1 / 40):
                         vinyl_drawn = turn
+                        last_vinyl = now
                         surfaces["vinyl"].push(renderer.render_vinyl(
                             geom, boxes["vinyl"], content, eased, accent, press, spin))
                         frames += 1
@@ -1461,8 +1500,11 @@ class MusicWidget:
         highlight stutter."""
         from . import music_scene as scene
 
+        from .music_sync import SpotifyProgress
+
         anim = scene.LyricAnimator()
         clock = scene.LyricClock()
+        progress = SpotifyProgress()
         drawn = None
         repaint = share.repaint
         while not stop.is_set():
@@ -1480,7 +1522,13 @@ class MusicWidget:
                 if track and timeline and settings.show_lyrics:
                     lines = (self._lyrics.result() or {}).get("lines") or []
                     if lines:
-                        position = clock.now(timeline.position_now(), timeline.playing, self._track_key)
+                        # Spotify's own progress (official API, when logged
+                        # in) is exact; the media session is the fallback.
+                        progress.poll(track.title, timeline.playing)
+                        reported = progress.position(track.title)
+                        if reported is None:
+                            reported = timeline.position_now()
+                        position = clock.now(reported, timeline.playing, self._track_key)
                         position += int(settings.lyric_offset * 1000)
                         key, image = anim.frame(lines, position, timeline.duration_ms, layout.lyric_box,
                                                 share.accent, height, settings)
@@ -1638,6 +1686,13 @@ class MusicWidget:
             else:
                 for name in order:                # re-float above the backdrop
                     self._float(surfaces[name])
+            # The fresh backdrop's own re-parenting can settle after the
+            # layers float (one layer ended up under it): pin it just below
+            # the lowest layer.
+            user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                          ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            user.SetWindowPos(backdrop.hwnd, surfaces[order[0]].hwnd, 0, 0, 0, 0,
+                              0x0001 | 0x0002 | 0x0010)   # NOSIZE | NOMOVE | NOACTIVATE
         else:
             self._close_backdrop()
             if self.overlay and not getattr(self, "_overlay_before_full", False):

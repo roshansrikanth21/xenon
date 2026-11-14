@@ -181,6 +181,7 @@ class SettingsWindow:
         self._slider(viz, "ray_length", "Reach", 0.3, 2.0)
         self._slider(viz, "glow", "Glow", 0.0, 2.0)
         self._slider(viz, "bounce", "Beat bounce", 0.0, 2.0)
+        self._slider(viz, "corner_glow", "Corner glow (bass)", 0.0, 2.0)
         self._slider(viz, "spin_speed", "Spin speed (deg/s, 0 = still)", 0.0, 60.0)
 
         self._preview = LyricPreview(lyr, lambda: self._settings)

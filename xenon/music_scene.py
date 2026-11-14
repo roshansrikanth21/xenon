@@ -14,6 +14,7 @@ The widget (``music_widget``) owns timing, audio and the layered windows.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
@@ -114,21 +115,69 @@ def font(text: str, size: int, weight: str = "black") -> ImageFont.FreeTypeFont:
 # ------------------------------------------------------------------ lyrics
 
 
-def word_starts(line_start: int, line_end: int, words: list[str]) -> list[int]:
-    """When each word of a line starts, in ms. LRCLIB gives line timestamps
-    only, so the line's span is shared out by word length (longer words take
-    longer to sing), leaving a short tail so the last word lands early."""
+_VOWEL_RUNS = re.compile(r"[aeiouy]+")
+
+
+def syllables(word: str) -> int:
+    """A rough syllable count (vowel groups, silent final e). Good enough to
+    share a line's singing time out between its words."""
+    w = re.sub(r"[^a-z]", "", word.lower())
+    if not w:
+        return max(1, len(word.strip()) // 3) if word.strip() else 1
+    n = len(_VOWEL_RUNS.findall(w))
+    if n > 1 and w.endswith("e") and not w.endswith(("le", "ee", "ye")):
+        n -= 1
+    return max(1, n)
+
+
+def singing_pace(lines: list[tuple[int, str]]) -> float | None:
+    """Seconds per syllable this song is sung at, measured from its own
+    lines. A line's span runs to the next line's timestamp, so a line
+    followed by a pause looks slow; the quicker lines (the 30th percentile)
+    show the real pace. None when there are too few lines to tell."""
+    rates = []
+    for (start, text), (nxt, _t) in zip(lines, lines[1:]):
+        words = text.split()
+        if not words:
+            continue
+        count = sum(syllables(w) for w in words)
+        span = (nxt - start) / 1000
+        if count >= 3 and span > 0.3:
+            rates.append(span / count)
+    if len(rates) < 3:
+        return None
+    rates.sort()
+    return max(0.10, min(0.6, rates[int(len(rates) * 0.3)]))
+
+
+def word_spans(line_start: int, line_end: int, words: list[str],
+               pace: float | None = None) -> tuple[list[int], list[int]]:
+    """(starts, ends) of each word, in ms. LRCLIB gives line timestamps
+    only, so the line's singing time is shared out by syllables. With the
+    song's ``pace`` a line is sung in about the time its syllables take,
+    not stretched over a pause before the next line (which made the
+    highlight crawl far behind the voice)."""
     if not words:
-        return []
+        return [], []
     span = max(400, min(line_end - line_start, 8000))
-    sing = span * 0.82
-    weights = [max(1, len(w)) + 1.5 for w in words]
+    counts = [syllables(w) for w in words]
+    if pace:
+        sing = min(span * 0.95, sum(counts) * pace * 1000 * 1.08 + 120)
+    else:
+        sing = span * 0.82
+    weights = [c + 0.5 for c in counts]
     total = sum(weights)
     starts, t = [], float(line_start)
     for weight in weights:
         starts.append(int(t))
         t += sing * weight / total
-    return starts
+    ends = starts[1:] + [int(line_start + sing)]
+    return starts, ends
+
+
+def word_starts(line_start: int, line_end: int, words: list[str], pace: float | None = None) -> list[int]:
+    """When each word of a line starts, in ms (see ``word_spans``)."""
+    return word_spans(line_start, line_end, words, pace)[0]
 
 
 def line_at(lines: list[tuple[int, str]], position_ms: int) -> int:
@@ -263,19 +312,16 @@ LINE_EXIT_MS = 260
 LINE_ENTRY_DELAY_MS = 80
 
 
-def word_progress(start: int, end: int, words: list[str], position_ms: int, motion: str = "wipe") -> list[float]:
+def word_progress(start: int, end: int, words: list[str], position_ms: int, motion: str = "wipe",
+                  pace: float | None = None) -> list[float]:
     """0..1 per word: how far its highlight has got. A wipe takes as long
-    as the word is sung (kept between 0.14 and 1.1 s); fade and pop take a
+    as the word is sung (kept between 0.12 and 1.1 s); fade and pop take a
     fixed short time from the word's start."""
-    starts = word_starts(start, end, words)
-    if not starts:
-        return []
-    span = max(400, min(end - start, 8000))
-    ends = starts[1:] + [int(start + span * 0.82)]
+    starts, ends = word_spans(start, end, words, pace)
     out = []
     for ws, we in zip(starts, ends):
         if motion == "wipe":
-            length = max(140, min(1100, we - ws))
+            length = max(120, min(1100, we - ws))
         else:
             length = WORD_FADE_MS if motion == "fade" else 260
         out.append(max(0.0, min(1.0, (position_ms - ws) / length)))
@@ -397,6 +443,13 @@ class LyricAnimator:
             except Exception:
                 pass
 
+    def _pace(self, lines):
+        key = (id(lines), len(lines), lines[0] if lines else None)
+        if getattr(self, "_pace_key", None) != key:
+            self._pace_key = key
+            self._pace_value = singing_pace(lines)
+        return self._pace_value
+
     @staticmethod
     def _line(lines, index):
         start, text = lines[index]
@@ -465,7 +518,7 @@ class LyricAnimator:
         if motion == "all":
             progress = [1.0] * len(words)
         else:
-            progress = word_progress(start, end, words, position_ms, motion)
+            progress = word_progress(start, end, words, position_ms, motion, self._pace(lines))
         q = tuple(round(v * self.STEPS) / self.STEPS for v in progress)
         since = position_ms - start
         entry = 1.0 if (line_motion == "cut" or style == "karaoke") else \
@@ -1039,6 +1092,32 @@ def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: 
 
 
 _RING_LAYER: dict = {}
+_CORNER_MASKS: dict = {}
+CORNERS = ("tl", "tr", "bl", "br")
+
+
+def corner_glow(w: int, h: int, corner: str, accent=(255, 255, 255)) -> Image.Image:
+    """A soft light pooled in one screen corner, in the accent colour. Drawn
+    once per colour; the beat only changes the window's opacity."""
+    key = (w, h, corner)
+    mask = _CORNER_MASKS.get(key)
+    if mask is None:
+        import numpy as np
+
+        x = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
+        y = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
+        if corner in ("tr", "br"):
+            x = x[:, ::-1]
+        if corner in ("bl", "br"):
+            y = y[::-1]
+        d = np.sqrt(x * x + y * y)
+        alpha = (np.clip(1.0 - d, 0.0, 1.0) ** 2.4) * 235.0
+        mask = Image.fromarray(alpha.astype(np.uint8), "L")
+        _CORNER_MASKS.clear() if len(_CORNER_MASKS) > 8 else None
+        _CORNER_MASKS[key] = mask
+    img = Image.new("RGBA", (w, h), tuple(accent) + (0,))
+    img.putalpha(mask)
+    return img
 RAY_SUPERSAMPLE = 2
 
 
