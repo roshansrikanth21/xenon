@@ -863,6 +863,7 @@ def _work_area_for(hwnd: int) -> tuple[int, int, int, int] | None:
 
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
 MOD_NOREPEAT = 0x4000
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -883,6 +884,8 @@ DEFAULT_HOTKEYS: dict[str, tuple[int, int]] = {
     "stop": (MOD_CONTROL | MOD_ALT, 0x1B),
     # Ctrl+Alt+G: game mode (everything Xenon runs stops; again restores).
     "game": (MOD_CONTROL | MOD_ALT, ord("G")),
+    # Ctrl+Alt+Shift+G: Xtreme mode (game mode + heavy apps, power, memory).
+    "xtreme": (MOD_CONTROL | MOD_ALT | MOD_SHIFT, ord("G")),
 }
 
 
@@ -1048,7 +1051,9 @@ class Tray:
             item("Start at sign-in", self._toggle_startup,
                  checked=lambda _i: self._startup.enabled()),
             item("Game mode   Ctrl+Alt+G", lambda: app.post(app.toggle_game_mode),
-                 checked=lambda _i: app.game_mode),
+                 checked=lambda _i: app.game_mode and not app.xtreme),
+            item("Xtreme mode   Ctrl+Alt+Shift+G", lambda: app.post(app.toggle_xtreme_mode),
+                 checked=lambda _i: app.xtreme),
             item("Music widget", lambda: app.post(app.toggle_music_widget),
                  checked=lambda _i: app.music_widget_running()),
             item("Music widget settings…", lambda: app.post(app.open_music_settings)),
@@ -1457,6 +1462,9 @@ class OrbApp:
         self._timers.listen(self._on_timer_thread)
         self.hidden = False
         self.game_mode = False
+        self.xtreme = False
+        self._xtreme_restore: dict = {}
+        self._xtreme_busy = False
         self._game_restore: dict = {}
         self._game_watch = None
         self.companion_url = ""
@@ -1578,6 +1586,8 @@ class OrbApp:
         if by_hand and self._game_watch is not None:
             self._game_watch.left_by_hand()
         restore, self._game_restore = self._game_restore, {}
+        if self.xtreme:
+            self._leave_xtreme()
         wind = getattr(self, "_game_wind_down", None)
 
         def come_back() -> None:
@@ -1601,6 +1611,106 @@ class OrbApp:
         print("game mode off", flush=True)
         if self._tray is not None:
             self._tray._icon.update_menu()
+
+    # ----- xtreme mode ---------------------------------------------------
+
+    def toggle_xtreme_mode(self) -> None:
+        if self.game_mode:
+            self.exit_game_mode(by_hand=True)      # leaving undoes Xtreme too
+        else:
+            self.enter_xtreme_mode()
+
+    def enter_xtreme_mode(self) -> None:
+        """Find the heavy apps (one-second sample, off the Tk thread), ask on
+        a card which way to go, then game mode plus the laptop tuned up (see
+        ``xtreme``). Dismissing the card cancels."""
+        if self.game_mode or self._xtreme_busy or self._closing:
+            return
+        self._xtreme_busy = True
+        self.model.set_state("thinking", "finding heavy apps")
+        from xenon import game_mode, xtreme
+
+        keep = game_mode.load().keep_apps
+
+        def scan() -> None:
+            try:
+                heavy = xtreme.find_heavy(keep)
+            except Exception as error:
+                print(f"xtreme: could not list apps: {error}", file=sys.stderr, flush=True)
+                heavy = []
+            self.post(lambda: self._ask_xtreme(heavy))
+
+        threading.Thread(target=scan, daemon=True, name="xenon-xtreme-scan").start()
+
+    def _ask_xtreme(self, heavy) -> None:
+        self.model.set_state(self._rest_state())
+        if heavy:
+            names = ", ".join(f"{a.name} ({a.memory_mb / 1024:.1f} GB)" if a.memory_mb >= 1024
+                              else f"{a.name} ({a.memory_mb} MB)" for a in heavy[:4])
+            more = f" +{len(heavy) - 4}" if len(heavy) > 4 else ""
+            title = f"Xtreme: close {names}{more}?"
+            labels = [f"Close {len(heavy)} app{'s' if len(heavy) > 1 else ''} + Xtreme", "Xtreme, keep apps open"]
+        else:
+            title = "Xtreme mode: no heavy apps open. Tune the laptop and go?"
+            labels = ["Go Xtreme"]
+
+        def picked(choice) -> None:
+            self.post(lambda: self.task_choice_closed("xtreme"))
+            self._xtreme_busy = False
+            if choice is None:
+                return                          # dismissed: nothing changes
+            close = bool(heavy) and choice == labels[0]
+            self.post(lambda: self._go_xtreme([a.exe for a in heavy] if close else []))
+
+        self.task_choice("xtreme", title, labels, picked)
+
+    def _go_xtreme(self, close_exes) -> None:
+        from xenon import game_mode, xtreme
+
+        self.enter_game_mode()
+        if not self.game_mode:
+            return
+        self.xtreme = True
+        saved = self._xtreme_restore = {}
+
+        def tune() -> None:
+            before = xtreme.free_memory_mb()
+            asked = game_mode.close_apps(close_exes) if close_exes else []
+            if asked:
+                import time as _time
+                _time.sleep(3.0)                    # let them close (or ask to save)
+            saved["power"] = xtreme.set_best_performance()
+            saved["priorities"] = xtreme.calm_background(game_mode.load().keep_apps)
+            trimmed = xtreme.trim_background()
+            purged = xtreme.purge_standby()
+            after = xtreme.free_memory_mb()
+            parts = [f"free RAM {before} -> {after} MB"]
+            if asked:
+                parts.append("asked to close " + ", ".join(asked))
+            parts.append("power: best performance" if saved["power"] else "power: unchanged")
+            parts.append(f"{len(saved['priorities'])} background apps lowered")
+            parts.append(f"{trimmed} apps trimmed" + ("; standby cache emptied" if purged else
+                                                       " (run as admin to also empty the standby cache)"))
+            print("xtreme mode on: " + "; ".join(parts), flush=True)
+
+        self._xtreme_tune = threading.Thread(target=tune, daemon=True, name="xenon-xtreme")
+        self._xtreme_tune.start()
+
+    def _leave_xtreme(self) -> None:
+        from xenon import xtreme
+
+        self.xtreme = False
+        saved, self._xtreme_restore = self._xtreme_restore, {}
+        tune = getattr(self, "_xtreme_tune", None)
+
+        def undo() -> None:
+            if tune is not None:
+                tune.join(timeout=15.0)
+            xtreme.restore_power(saved.get("power"))
+            xtreme.restore_priorities(saved.get("priorities") or {})
+            print("xtreme mode off: power and priorities restored", flush=True)
+
+        threading.Thread(target=undo, daemon=True, name="xenon-xtreme-undo").start()
 
     def _start_game_watch(self) -> None:
         """With ``auto`` on in game_mode.json, a full-screen game switches
@@ -1810,6 +1920,9 @@ class OrbApp:
         """Ctrl+Alt+X toggles the Ask pill; Ctrl+Alt+V toggles voice."""
         if key == "game":
             self.toggle_game_mode()
+            return
+        if key == "xtreme":
+            self.toggle_xtreme_mode()
             return
         if self.game_mode:
             return          # nothing pops up over a game
@@ -2569,6 +2682,14 @@ class OrbApp:
         if self._closing:
             return
         self._closing = True
+        if self.xtreme:
+            try:
+                from xenon import xtreme as _x
+
+                _x.restore_power(self._xtreme_restore.get("power"))
+                _x.restore_priorities(self._xtreme_restore.get("priorities") or {})
+            except Exception:
+                pass
         if self.music_widget is not None:
             try:
                 self.music_widget.stop()

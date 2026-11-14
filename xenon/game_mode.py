@@ -14,7 +14,10 @@ force-killed, and a few system processes are never touched at all.
 
 Settings, ``%APPDATA%/xenon/game_mode.json``::
 
-    {"close_apps": ["chrome.exe", "EpicGamesLauncher.exe"], "auto": false}
+    {"close_apps": ["chrome.exe"], "auto": false, "keep_apps": ["discord.exe"]}
+
+``keep_apps`` is for Xtreme mode (see ``xtreme``): apps it never offers
+to close.
 """
 from __future__ import annotations
 
@@ -39,6 +42,7 @@ PROTECTED = frozenset({
 class GameModeConfig:
     close_apps: list = field(default_factory=list)   # exe names, asked to close on entry
     auto: bool = False                               # enter when a full-screen game runs
+    keep_apps: list = field(default_factory=list)    # Xtreme mode never offers to close these
 
 
 def config_path() -> Path:
@@ -52,11 +56,15 @@ def load(path: Path | None = None) -> GameModeConfig:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return GameModeConfig()
-    apps = data.get("close_apps") if isinstance(data, dict) else None
-    return GameModeConfig(
-        close_apps=[str(a).strip() for a in apps if str(a).strip()] if isinstance(apps, list) else [],
-        auto=bool(data.get("auto", False)) if isinstance(data, dict) else False,
-    )
+    if not isinstance(data, dict):
+        return GameModeConfig()
+
+    def names(key):
+        value = data.get(key)
+        return [str(a).strip() for a in value if str(a).strip()] if isinstance(value, list) else []
+
+    return GameModeConfig(close_apps=names("close_apps"), auto=bool(data.get("auto", False)),
+                          keep_apps=names("keep_apps"))
 
 
 def save(config: GameModeConfig, path: Path | None = None) -> None:
