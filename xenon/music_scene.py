@@ -54,7 +54,10 @@ def scene_layout(width: int, height: int, side: str = "right", orb_size: float =
 
     lw = int(width * (0.50 if right else 0.46))
     lx = int(width * 0.05) if right else int(width * 0.96) - lw
-    lyric_box = Box(lx, int(height * 0.16), lw, int(height * 0.50))
+    # The layer reaches past the text by lyric_pad on each side (room for
+    # the shadow/glow); the words themselves stay where they were.
+    pad = lyric_pad(height)
+    lyric_box = Box(max(0, lx - pad), int(height * 0.16), lw + pad * 2, int(height * 0.50))
 
     cw, ch = int(min(width * 0.20, height * 0.42)), int(height * 0.085)
     cw, ch = max(cw, 260), max(ch, 72)
@@ -247,6 +250,10 @@ def _wrap_sized(words: list[str], fonts: list, max_width: int, draw) -> list[lis
     return lines
 
 
+def lyric_pad(screen_height: int) -> int:
+    return max(12, int(screen_height * 0.03))
+
+
 def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), screen_height: int = 1440,
                   settings=None) -> Image.Image:
     """The lyric layer: heavy words, sung ones bright with a glow, unsung
@@ -263,7 +270,10 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
     style = st.lyric_style
 
     size = int(screen_height / 8.5 * st.lyric_size)
-    max_w = int(box.w * 0.96)
+    # Breathing room inside the layer so the shadow and glow round the
+    # first letters aren't sliced off at the window edge.
+    pad = lyric_pad(screen_height)
+    max_w = int(box.w - pad * 2)
     poster = style == "poster"
 
     def fonts_at(size_):
@@ -300,13 +310,13 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
         prev = _case(frame.previous, st)
         pf = font(prev, max(20, int(size * 0.42)), "black")
         pw = draw.textlength(prev, font=pf)
-        px = (box.w - pw) / 2 if centered else 0
+        px = (box.w - pw) / 2 if centered else pad
         py = max(0, top - rise - int(pf.size * 1.5))
         gdraw.text((px, py), prev, font=pf, fill=(255, 255, 255, int(110 * entry_alpha + 40)))
 
     for r, row in enumerate(rows):
         row_w = _row_width(words, word_fonts, row, draw)
-        x = (box.w - row_w) / 2 if centered else 0.0
+        x = (box.w - row_w) / 2 if centered else float(pad)
         y = top + r * line_h
         for i in row:
             word = words[i]
@@ -344,7 +354,7 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
         up = _case(frame.upcoming, st)
         ufnt = font(up, max(22, size // 3), "bold")
         uy = min(box.h - ufnt.size - 6, top - rise + block_h + int(size * 0.28))
-        ux = (box.w - draw.textlength(up, font=ufnt)) / 2 if centered else 2
+        ux = (box.w - draw.textlength(up, font=ufnt)) / 2 if centered else pad + 2
         ImageDraw.Draw(image).text((ux, uy), up, font=ufnt, fill=(255, 255, 255, 90))
     return image
 

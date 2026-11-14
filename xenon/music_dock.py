@@ -113,46 +113,67 @@ def ease_out_back(t: float, s: float = 1.4) -> float:
 # ------------------------------------------------------------------ drawing
 
 
-def _vinyl_parts(d: int, cover: Image.Image | None) -> tuple[Image.Image, Image.Image | None]:
-    """The corner disc as a record: a static base (soft shadow + grooves)
-    and the cover label that spins on it."""
-    from .music_widget import build_vinyl
+def _vinyl_parts(d: int, cover: Image.Image | None):
+    """The corner disc: the album cover filling a record that spins, with
+    faint grooves pressed into it. Returns (base, spinning, overlay): the
+    base is the soft shadow, the overlay the still light sheen, rim and
+    spindle hole (a real record's highlights don't turn with it)."""
+    from PIL import ImageChops
 
     size = int(d * 1.5)
-    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     c = size / 2
+    base = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     shadow = Image.new("L", (size, size), 0)
     oy = d * 0.04
     ImageDraw.Draw(shadow).ellipse((c - d * 0.5, c - d * 0.5 + oy, c + d * 0.5, c + d * 0.5 + oy), fill=160)
     shadow = shadow.filter(ImageFilter.GaussianBlur(d / 14))
     dark = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     dark.putalpha(shadow)
-    out.alpha_composite(dark)
-    record, label = build_vinyl(d, cover)
-    out.alpha_composite(record, (int(c - d / 2), int(c - d / 2)))
-    # a faint diagonal sheen across the grooves sells the vinyl
-    sheen = Image.new("L", (d, d), 0)
-    sd = ImageDraw.Draw(sheen)
-    sd.pieslice((0, 0, d - 1, d - 1), 200, 250, fill=26)
-    sd.pieslice((0, 0, d - 1, d - 1), 20, 70, fill=18)
-    sheen = sheen.filter(ImageFilter.GaussianBlur(d / 30))
-    mask = Image.new("L", (d, d), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, d - 1, d - 1), fill=255)
-    from PIL import ImageChops
+    base.alpha_composite(dark)
 
-    sheen = ImageChops.multiply(sheen, mask)
-    light = Image.new("RGBA", (d, d), (255, 255, 255, 0))
+    s2 = d * 2      # supersample for clean edges and grooves
+    if cover is not None:
+        art = cover.convert("RGB")
+        w, h = art.size
+        side = min(w, h)
+        art = art.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
+        art = art.resize((s2, s2), Image.LANCZOS)
+    else:
+        art = Image.new("RGB", (s2, s2), (30, 31, 38))
+    # grooves: thin dark rings over the art, lighter toward the label area
+    grooves = Image.new("L", (s2, s2), 0)
+    gd = ImageDraw.Draw(grooves)
+    r = s2 / 2 - s2 * 0.02
+    i = 0
+    while r > s2 * 0.17:
+        gd.ellipse((s2 / 2 - r, s2 / 2 - r, s2 / 2 + r, s2 / 2 + r), outline=40 if i % 2 else 22, width=1)
+        r -= max(3.0, s2 / 150)
+        i += 1
+    art = ImageChops.subtract(art, Image.merge("RGB", (grooves, grooves, grooves)))
+    spinning = art.convert("RGBA")
+    mask = Image.new("L", (s2, s2), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, s2 - 1, s2 - 1), fill=255)
+    spinning.putalpha(mask)
+    spinning = spinning.resize((d, d), Image.LANCZOS)
+
+    over = Image.new("RGBA", (s2, s2), (0, 0, 0, 0))
+    sheen = Image.new("L", (s2, s2), 0)
+    sd = ImageDraw.Draw(sheen)
+    sd.pieslice((0, 0, s2 - 1, s2 - 1), 205, 245, fill=60)
+    sd.pieslice((0, 0, s2 - 1, s2 - 1), 25, 65, fill=40)
+    sheen = ImageChops.multiply(sheen.filter(ImageFilter.GaussianBlur(s2 / 25)), mask)
+    light = Image.new("RGBA", (s2, s2), (255, 255, 255, 0))
     light.putalpha(sheen)
-    out.alpha_composite(light, (int(c - d / 2), int(c - d / 2)))
-    if label is None:
-        # no cover: a plain dark label so it still reads as a record
-        lsize = int(d * 0.4)
-        label = Image.new("RGBA", (lsize, lsize), (0, 0, 0, 0))
-        ImageDraw.Draw(label).ellipse((0, 0, lsize - 1, lsize - 1), fill=(48, 50, 60, 255))
-    hole = max(3, d // 40)
-    ImageDraw.Draw(label).ellipse((label.width / 2 - hole, label.height / 2 - hole,
-                                   label.width / 2 + hole, label.height / 2 + hole), fill=(8, 8, 10, 255))
-    return out, label
+    over.alpha_composite(light)
+    od = ImageDraw.Draw(over)
+    od.ellipse((2, 2, s2 - 3, s2 - 3), outline=(0, 0, 0, 120), width=max(2, s2 // 90))       # pressed edge
+    od.ellipse((1, 1, s2 - 2, s2 - 2), outline=(255, 255, 255, 34), width=2)                  # rim light
+    hole = s2 * 0.035
+    ring = s2 * 0.075
+    od.ellipse((s2 / 2 - ring, s2 / 2 - ring, s2 / 2 + ring, s2 / 2 + ring), fill=(12, 12, 14, 150))
+    od.ellipse((s2 / 2 - hole, s2 / 2 - hole, s2 / 2 + hole, s2 / 2 + hole), fill=(4, 4, 6, 255))
+    over = over.resize((d, d), Image.LANCZOS)
+    return base, spinning, over
 
 
 def _disc_image(d: int, cover: Image.Image | None, accent) -> Image.Image:
@@ -320,12 +341,13 @@ class DockRenderer:
     def _disc_for(self, geom: DockGeometry, cover, accent, spin: float = 0.0) -> Image.Image:
         key = (id(cover), geom.disc)
         if key != self._disc_key:
-            self._disc, self._label = _vinyl_parts(geom.disc, cover)
+            self._disc, self._label, self._over = _vinyl_parts(geom.disc, cover)
             self._disc_key = key
-        label = self._label.rotate(-spin, resample=Image.BICUBIC) if spin else self._label
+        record = self._label.rotate(-spin, resample=Image.BICUBIC) if spin else self._label
         disc = self._disc.copy()
-        off = ((disc.width - label.width) // 2, (disc.height - label.height) // 2)
-        disc.alpha_composite(label, off)
+        off = ((disc.width - record.width) // 2, (disc.height - record.height) // 2)
+        disc.alpha_composite(record, off)
+        disc.alpha_composite(self._over, off)
         return disc
 
     def _panel_parts(self, geom: DockGeometry, content: DockContent, hover: str | None, accent):
