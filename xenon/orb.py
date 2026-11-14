@@ -881,6 +881,8 @@ DEFAULT_HOTKEYS: dict[str, tuple[int, int]] = {
     # Ctrl+Alt+Esc stops the running task and denies any open card. It does
     # nothing when idle.
     "stop": (MOD_CONTROL | MOD_ALT, 0x1B),
+    # Ctrl+Alt+G: game mode (everything Xenon runs stops; again restores).
+    "game": (MOD_CONTROL | MOD_ALT, ord("G")),
 }
 
 
@@ -1045,6 +1047,8 @@ class Tray:
                  checked=lambda _i: not app.hidden),
             item("Start at sign-in", self._toggle_startup,
                  checked=lambda _i: self._startup.enabled()),
+            item("Game mode   Ctrl+Alt+G", lambda: app.post(app.toggle_game_mode),
+                 checked=lambda _i: app.game_mode),
             item("Music widget", lambda: app.post(app.toggle_music_widget),
                  checked=lambda _i: app.music_widget_running()),
             item("Music widget settings…", lambda: app.post(app.open_music_settings)),
@@ -1452,23 +1456,13 @@ class OrbApp:
         self._timers = quick.TIMERS
         self._timers.listen(self._on_timer_thread)
         self.hidden = False
+        self.game_mode = False
+        self._game_restore: dict = {}
+        self._game_watch = None
         self.companion_url = ""
         self._companion = None
         if os.environ.get("XENON_COMPANION", "on").strip().lower() not in {"0", "off", "false", "no"}:
-            try:
-                from xenon.companion import DEFAULT_PORT, Companion
-                from xenon.lyrics import LyricsFinder
-                from xenon.webplayer import WebPlayer
-
-                port = int(os.environ.get("XENON_COMPANION_PORT", DEFAULT_PORT))
-                self._companion = Companion(
-                    self.companion_state, WebPlayer().now_playing, LyricsFinder().find, port=port
-                )
-                self._companion.always_poll = self.notch  # the notch shows the song
-                self.companion_url = self._companion.start()
-                print(f"companion screen: {self.companion_url}", flush=True)
-            except Exception as error:
-                print(f"companion screen unavailable: {error}", file=sys.stderr, flush=True)
+            self._start_companion()
         self.dimmer = ScreenDimmer(self.root)
         self._last_overlays: list = []
         try:
@@ -1494,7 +1488,145 @@ class OrbApp:
         except Exception as error:
             print(f"global hotkeys unavailable: {error}", file=sys.stderr, flush=True)
         self._last = time.perf_counter()
+        self._start_game_watch()
         self._tick()
+
+    def _start_companion(self) -> None:
+        try:
+            from xenon.companion import DEFAULT_PORT, Companion
+            from xenon.lyrics import LyricsFinder
+            from xenon.webplayer import WebPlayer
+
+            port = int(os.environ.get("XENON_COMPANION_PORT", DEFAULT_PORT))
+            self._companion = Companion(
+                self.companion_state, WebPlayer().now_playing, LyricsFinder().find, port=port
+            )
+            self._companion.always_poll = self.notch  # the notch shows the song
+            self.companion_url = self._companion.start()
+            print(f"companion screen: {self.companion_url}", flush=True)
+        except Exception as error:
+            self._companion = None
+            self.companion_url = ""
+            print(f"companion screen unavailable: {error}", file=sys.stderr, flush=True)
+
+    # ----- game mode ----------------------------------------------------
+
+    def toggle_game_mode(self) -> None:
+        if self.game_mode:
+            self.exit_game_mode(by_hand=True)
+        else:
+            self.enter_game_mode()
+
+    def enter_game_mode(self) -> None:
+        """Stop everything Xenon runs (see ``game_mode``), remembering what
+        was on so leaving brings exactly that back."""
+        if self.game_mode or self._closing:
+            return
+        from xenon import game_mode
+
+        self.game_mode = True
+        restore = self._game_restore = {
+            "hidden": self.hidden,
+            "voice": self._voice_stop is not None,
+            "widget": self.music_widget_running(),
+            "companion": self._companion is not None,
+        }
+        if self.tasks is not None and self.tasks.has_task():
+            self.stop_task()
+        if restore["voice"]:
+            self._toggle_voice()
+        for card in [*self._cards.values(), *self._choice_cards.values()]:
+            try:
+                card.close()
+            except Exception:
+                pass
+        if not self.hidden:
+            self.toggle_hidden()
+        widget = self.music_widget
+        companion = self._companion
+        self._companion, self.companion_url = None, ""
+
+        def wind_down() -> None:
+            if widget is not None:
+                try:
+                    widget.stop()          # its ring and lyric processes quit with it
+                except Exception:
+                    pass
+            if companion is not None:
+                try:
+                    companion.stop()
+                except Exception:
+                    pass
+            asked = []
+            try:
+                asked = game_mode.close_apps(game_mode.load().close_apps)
+            except Exception as error:
+                print(f"game mode: could not close apps: {error}", file=sys.stderr, flush=True)
+            game_mode.trim_memory()
+            note = f"; asked to close: {', '.join(asked)}" if asked else ""
+            print(f"game mode on (Ctrl+Alt+G to leave){note}", flush=True)
+
+        self._game_wind_down = threading.Thread(target=wind_down, daemon=True, name="xenon-game-mode")
+        self._game_wind_down.start()
+        if self._tray is not None:
+            self._tray._icon.update_menu()
+
+    def exit_game_mode(self, by_hand: bool = False) -> None:
+        if not self.game_mode:
+            return
+        self.game_mode = False
+        if by_hand and self._game_watch is not None:
+            self._game_watch.left_by_hand()
+        restore, self._game_restore = self._game_restore, {}
+        wind = getattr(self, "_game_wind_down", None)
+
+        def come_back() -> None:
+            # Left again quickly: let the old widget and server finish
+            # stopping first (one widget at a time, one server per port).
+            if wind is not None:
+                wind.join(timeout=10.0)
+            if self.game_mode:
+                return
+            if restore.get("companion") and self._companion is None:
+                self._start_companion()
+            if restore.get("widget"):
+                start_music_widget_async(self)
+
+        threading.Thread(target=come_back, daemon=True, name="xenon-game-back").start()
+        if self.hidden and not restore.get("hidden", False):
+            self.toggle_hidden()
+        if restore.get("voice") and self._voice_stop is None:
+            self._toggle_voice()
+        self._last = time.perf_counter()
+        print("game mode off", flush=True)
+        if self._tray is not None:
+            self._tray._icon.update_menu()
+
+    def _start_game_watch(self) -> None:
+        """With ``auto`` on in game_mode.json, a full-screen game switches
+        game mode on by itself (and off again when it closes)."""
+        try:
+            from xenon import game_mode
+
+            if not game_mode.load().auto:
+                return
+            watch = self._game_watch = game_mode.AutoWatch()
+        except Exception:
+            return
+
+        def run() -> None:
+            while not self._closing:
+                try:
+                    step = watch.tick(time.monotonic(), self.game_mode)
+                except Exception:
+                    step = None
+                if step == "enter":
+                    self.post(self.enter_game_mode)
+                elif step == "leave":
+                    self.post(self.exit_game_mode)
+                time.sleep(2.0)
+
+        threading.Thread(target=run, daemon=True, name="xenon-game-watch").start()
 
     # ----- timers -------------------------------------------------------
 
@@ -1676,6 +1808,11 @@ class OrbApp:
 
     def _hotkey(self, key: str) -> None:
         """Ctrl+Alt+X toggles the Ask pill; Ctrl+Alt+V toggles voice."""
+        if key == "game":
+            self.toggle_game_mode()
+            return
+        if self.game_mode:
+            return          # nothing pops up over a game
         if key == "ask":
             if self.pill.visible:
                 self.pill.hide()
@@ -1825,6 +1962,11 @@ class OrbApp:
             except Exception as error:
                 self.model.set_state("error", str(error))
                 print(f"orb callback failed: {error!r}", file=sys.stderr, flush=True)
+        if self.game_mode:
+            # Gaming: only hand over posted work (the tray, the hotkey to
+            # leave), a few times a second; no drawing, no window tracking.
+            self.root.after(400, self._tick)
+            return
 
         self._frame += 1
         if self._frame % 6 == 0:
