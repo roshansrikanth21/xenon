@@ -218,3 +218,18 @@ class PcControlTests(unittest.TestCase):
         self.assertFalse(oc.allowed(cmd, "voice-ambient"))
         self.assertTrue(oc.allowed(cmd, "remote"))
         self.assertTrue(oc.allowed(cmd, "voice"))
+
+
+class MediaKeyTests(unittest.TestCase):
+    """Gestures press media keys: works with any player, never 'already playing' errors."""
+
+    def test_parse_and_press(self):
+        from xenon import music
+        pressed = []
+        for text, code in (("media play pause", music.VK_MEDIA_PLAY_PAUSE), ("media next", music.VK_MEDIA_NEXT_TRACK),
+                           ("media previous", music.VK_MEDIA_PREV_TRACK)):
+            with self.subTest(text=text):
+                cmd = oc.parse(text)
+                reply = oc.media_key(cmd.kind, press=lambda c: pressed.append(c) or True)
+                self.assertTrue(reply)
+                self.assertEqual(pressed[-1], code)

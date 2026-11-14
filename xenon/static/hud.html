@@ -81,9 +81,7 @@ $('go').onclick=async()=>{
     runningMode:'VIDEO',numHands:1});
   $('status').textContent='Tracking';loop(hands)};
 
-async function togglePlay(){let playing=true;
-  try{const r=await fetch('/api/status',{headers:{'X-Xenon-Key':key}});if(r.ok)playing=!!(await r.json()).playing}catch(e){}
-  command(playing?'pause':'resume',playing?'Pinch · pause':'Pinch · play')}
+function togglePlay(){command('media play pause','Pinch · play / pause')}
 // ---- gesture reading -------------------------------------------------------
 const d=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 const extended=(p,tip,pip)=>d(p[tip],p[0])>d(p[pip],p[0])*1.12;
@@ -98,7 +96,7 @@ function read(p,now){
   // swipe: open hand moving fast sideways (the picture is mirrored)
   trail.push({t:now,x:p[0].x});trail=trail.filter(h=>now-h.t<350);
   if(!pinch&&ix&&mx&&rx&&trail.length>3&&now-lastSwipe>1100){const dx=trail[trail.length-1].x-trail[0].x;
-    if(Math.abs(dx)>0.22){lastSwipe=now;trail=[];dx<0?command('next song','Swipe → next'):command('previous song','Swipe ← previous')}}
+    if(Math.abs(dx)>0.22){lastSwipe=now;trail=[];dx<0?command('media next','Swipe → next'):command('media previous','Swipe ← previous')}}
   // peace sign held for 0.8 s
   const peace=ix&&mx&&!rx&&!px&&!pinch;
   if(peace){if(!peaceT)peaceT=now;if(now-peaceT>800&&now-lastPeace>4000){lastPeace=now;peaceT=0;command("what's playing",'Peace sign')}}else peaceT=0;

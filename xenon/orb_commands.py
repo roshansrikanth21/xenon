@@ -164,6 +164,10 @@ _RULES_NEGATION_OK: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
 )
 
 _RULES: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
+    # ---- media keys (what hand gestures send: they work with any player)
+    (r"media (?:play ?pause|toggle)|play ?pause", _kind("media_toggle")),
+    (r"media next", _kind("media_next")),
+    (r"media (?:previous|prev|back)", _kind("media_prev")),
     # ---- Xenon Core (the 3D presence view)
     (r"(?:(?:open|show|start|launch) )?(?:the |xenon |your )?(?:energy )?core(?: view| mode)?|show (?:me )?yourself",
      _kind("core_on")),
@@ -286,6 +290,7 @@ def parse(text: str) -> OrbCommand | None:
 
 _DIRECT_ORIGINS = frozenset({"voice", "typed", "model", "remote", ""})
 PC_KINDS = frozenset({"lock_pc", "shutdown_pc", "restart_pc", "cancel_shutdown"})
+MEDIA_KINDS = frozenset({"media_toggle", "media_next", "media_prev"})
 _SENSITIVE = MODE_KINDS | {"forget_history", "lock_pc", "shutdown_pc", "restart_pc"}
 SHUTDOWN_DELAY_S = 60
 
@@ -382,6 +387,20 @@ def set_handler(fn: Handler | None) -> None:
     _handler = fn
 
 
+def media_key(kind: str, press=None) -> str:
+    """Press the keyboard media key. Unlike the Spotify API this toggles
+    whatever player is active (desktop Spotify, the web player in a
+    browser, YouTube) and never fails on "already playing"."""
+    from xenon import music
+
+    code = {"media_toggle": music.VK_MEDIA_PLAY_PAUSE, "media_next": music.VK_MEDIA_NEXT_TRACK,
+            "media_prev": music.VK_MEDIA_PREV_TRACK}[kind]
+    ok = (press or music.press_media_key)(code)
+    if not ok:
+        return "I couldn't press the media key."
+    return {"media_toggle": "Play / pause.", "media_next": "Next.", "media_prev": "Previous."}[kind]
+
+
 def pc_action(kind: str, runner=None, lock=None) -> str:
     """Lock, shut down, restart, or cancel. Shut down and restart wait
     ``SHUTDOWN_DELAY_S`` with Windows' own warning on screen and never
@@ -424,6 +443,8 @@ def run(cmd: OrbCommand, origin: str = "") -> str:
         return apply_setting(cmd)
     if cmd.kind in PC_KINDS:
         return pc_action(cmd.kind)
+    if cmd.kind in MEDIA_KINDS:
+        return media_key(cmd.kind)
     handler = _handler
     if handler is None:
         return "That needs the orb running."
