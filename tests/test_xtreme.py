@@ -28,10 +28,30 @@ class RankTests(unittest.TestCase):
                  "busy.exe": (80, 40.0), "service.exe": (3000, 50.0)}
         windowed = {"chrome.exe": "Chrome", "discord.exe": "Discord", "tiny.exe": "x", "busy.exe": "b"}
         out = xtreme.rank_heavy(usage, windowed, skip=set())
-        self.assertEqual([a.exe for a in out], ["chrome.exe", "busy.exe", "discord.exe"])
-        self.assertEqual(out[0].name, "Chrome")
-        # no window -> cannot be closed politely -> not offered
-        self.assertNotIn("service.exe", [a.exe for a in out])
+        closable = [a.exe for a in out if a.closable]
+        self.assertEqual(closable, ["chrome.exe", "busy.exe", "discord.exe"])
+        self.assertEqual(out[0].name, "Service")       # heaviest of all...
+        # ...but no window: cannot be asked to close, so it is named, not closed
+        self.assertFalse(out[0].closable)
+
+    def test_claimed_memory_counts(self):
+        usage = {"cli.exe": (200, 0.0, 960), "small.exe": (100, 0.0, 120), "app.exe": (300, 1.0, 900)}
+        out = xtreme.rank_heavy(usage, {"app.exe": "App"}, skip=set())
+        self.assertEqual([(a.exe, a.closable) for a in out], [("cli.exe", False), ("app.exe", True)])
+        self.assertEqual(out[0].weight_mb, 960)
+
+    def test_windowless_cpu_flicker_is_ignored(self):
+        out = xtreme.rank_heavy({"peek.exe": (15, 25.0, 100)}, {}, skip=set())
+        self.assertEqual(out, [])
+        self.assertEqual(len(xtreme.rank_heavy({"miner.exe": (15, 90.0, 100)}, {}, skip=set())), 1)
+
+    def test_helpers_count_as_their_app(self):
+        tree = {1: (0, "explorer.exe"), 2: (1, "claude.exe"), 3: (2, "cmd.exe"), 4: (3, "node.exe"),
+                5: (1, "cmd.exe"), 6: (5, "node.exe")}
+        windowed = {"claude.exe": "Claude"}
+        self.assertEqual(xtreme.owner_app(4, "node.exe", tree, windowed), "claude.exe")
+        self.assertEqual(xtreme.owner_app(6, "node.exe", tree, windowed), "node.exe")   # not under an app
+        self.assertEqual(xtreme.owner_app(2, "claude.exe", tree, windowed), "claude.exe")
 
     def test_never_offers_protected_launchers_or_skipped(self):
         usage = {"explorer.exe": (900, 30.0), "steam.exe": (900, 30.0), "vgc.exe": (900, 30.0),
@@ -134,7 +154,7 @@ class OrbXtremeTests(unittest.TestCase):
         app.task_choice = lambda pid, title, *a, **k: (titles.append(title), original(pid, title, *a, **k))
         app.enter_xtreme_mode()
         pump(3.0, until=lambda: "xtreme" in app._choice_cards)
-        self.assertIn("Chrome (2.3 GB)", titles[0])      # the card names what will close
+        self.assertIn("Chrome 2.3 GB", titles[0])        # the card names what will close
         card = app._choice_cards["xtreme"]
         card._on_pick(card.choices[0])
         pump(6.0, until=lambda: calls["power"] == 1)

@@ -931,7 +931,8 @@ class ChoiceCard(_Card):
         self._injected = injected or is_injected_input
         self.picked = False
         self.timeout_s = float(timeout_s)
-        tk.Label(self.body, text=safe_text(title, 100), font=("Segoe UI Semibold", 11), fg=PANEL_FG, bg=CARD_BG,
+        # Wraps onto more lines; 200 leaves room for Xtreme's list of apps.
+        tk.Label(self.body, text=safe_text(title, 200), font=("Segoe UI Semibold", 11), fg=PANEL_FG, bg=CARD_BG,
                  wraplength=self.WIDTH - 2 * self.PAD, justify="left", anchor="w",
                  takefocus=0).pack(fill="x", pady=(0, 8))
         self.rows = []

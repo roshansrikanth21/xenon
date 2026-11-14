@@ -1642,16 +1642,28 @@ class OrbApp:
 
         threading.Thread(target=scan, daemon=True, name="xenon-xtreme-scan").start()
 
-    def _ask_xtreme(self, heavy) -> None:
+    def _ask_xtreme(self, found) -> None:
         self.model.set_state(self._rest_state())
+
+        def size(a) -> str:
+            mb = a.weight_mb
+            return f"{a.name} {mb / 1024:.1f} GB" if mb >= 1024 else f"{a.name} {mb} MB"
+
+        heavy = [a for a in found if a.closable]
+        manual = [a for a in found if not a.closable]
+        # No window to ask: Xtreme never force-quits, so name them instead.
+        by_hand = (" Quit yourself: " + ", ".join(size(a) for a in manual[:2])
+                   + (f" +{len(manual) - 2}" if len(manual) > 2 else "")) if manual else ""
+        if manual:
+            print("xtreme: quit these yourself (no window to ask): "
+                  + ", ".join(size(a) for a in manual), flush=True)
         if heavy:
-            names = ", ".join(f"{a.name} ({a.memory_mb / 1024:.1f} GB)" if a.memory_mb >= 1024
-                              else f"{a.name} ({a.memory_mb} MB)" for a in heavy[:4])
-            more = f" +{len(heavy) - 4}" if len(heavy) > 4 else ""
-            title = f"Xtreme: close {names}{more}?"
+            names = ", ".join(size(a) for a in heavy[:3])
+            more = f" +{len(heavy) - 3}" if len(heavy) > 3 else ""
+            title = f"Close {names}{more}?{by_hand}"
             labels = [f"Close {len(heavy)} app{'s' if len(heavy) > 1 else ''} + Xtreme", "Xtreme, keep apps open"]
         else:
-            title = "Xtreme mode: no heavy apps open. Tune the laptop and go?"
+            title = f"Xtreme: nothing to close.{by_hand}"
             labels = ["Go Xtreme"]
 
         def picked(choice) -> None:

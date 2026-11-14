@@ -83,6 +83,27 @@ def _launched_by_launcher(pid: int, tree: dict) -> bool:
     return False
 
 
+_SHELL_PARENTS = frozenset({"explorer.exe", "svchost.exe", "services.exe", "wininit.exe", "cmd.exe",
+                            "powershell.exe", "pwsh.exe", "conhost.exe", "windowsterminal.exe"})
+
+
+def owner_app(pid: int, exe: str, tree: dict, windowed) -> str:
+    """The app a background process belongs to: the nearest ancestor with
+    a window (Claude's helper node.exe processes count as Claude, and close
+    with it). Shells and Windows hosts in between are walked past."""
+    if exe in windowed:
+        return exe
+    seen = set()
+    parent = tree.get(pid, (None, ""))[0]
+    while parent and parent not in seen and parent in tree and len(seen) < 8:
+        seen.add(parent)
+        ppid, name = tree[parent]
+        if name in windowed and name not in _SHELL_PARENTS:
+            return name
+        parent = ppid
+    return exe
+
+
 def is_game(proc, tree: dict | None = None) -> bool:
     """A running game: installed in a game library folder, an Unreal
     "-Shipping" build, or started by a game launcher."""
@@ -101,14 +122,22 @@ def is_game(proc, tree: dict | None = None) -> bool:
 
 HEAVY_MB = 500          # an app this big (all its processes) is listed
 HEAVY_CPU = 15.0        # ...or one keeping a core this busy (% of one core)
+HEAVY_CLAIMED = 800     # ...or one that has claimed this much (private bytes, MB):
+                        # on a full machine that is what Windows pages to disk
 
 
 @dataclass
 class HeavyApp:
     exe: str
     name: str
-    memory_mb: int
+    memory_mb: int            # in RAM now (working set, all its processes)
     cpu: float
+    claimed_mb: int = 0       # private bytes: in RAM or paged out
+    closable: bool = True     # has a window to ask; otherwise quit it yourself
+
+    @property
+    def weight_mb(self) -> int:
+        return max(self.memory_mb, self.claimed_mb)
 
 
 def _foreground_exe() -> str:
@@ -210,21 +239,31 @@ def _family(pid: int) -> set[int]:
 
 
 def rank_heavy(usage: dict, windowed: dict, skip: set, mb: int = HEAVY_MB,
-               cpu: float = HEAVY_CPU) -> list[HeavyApp]:
-    """Pure part of ``find_heavy``: ``usage`` is exe -> (memory MB, cpu %)."""
+               cpu: float = HEAVY_CPU, claimed: int = HEAVY_CLAIMED) -> list[HeavyApp]:
+    """Pure part of ``find_heavy``: ``usage`` is exe -> (memory MB, cpu %,
+    claimed MB). Apps without a window are returned too, marked not
+    closable: there is no polite way to ask them, so the card names them
+    for you to quit yourself."""
     out = []
-    for exe, (memory, load) in usage.items():
-        if exe in skip or exe in NEVER or exe not in windowed:
+    for exe, numbers in usage.items():
+        memory, load = numbers[0], numbers[1]
+        private = numbers[2] if len(numbers) > 2 else 0
+        if exe in skip or exe in NEVER:
             continue
-        if memory >= mb or load >= cpu:
+        # A windowless helper flickering busy for a second is noise; it needs
+        # twice the CPU (or real memory) to be worth naming.
+        busy = load >= (cpu if exe in windowed else cpu * 2)
+        if memory >= mb or busy or private >= claimed:
             name = os.path.splitext(exe)[0]
-            out.append(HeavyApp(exe, name[:1].upper() + name[1:], int(memory), round(load, 1)))
-    out.sort(key=lambda a: (a.memory_mb + a.cpu * 20), reverse=True)
+            out.append(HeavyApp(exe, name[:1].upper() + name[1:], int(memory), round(load, 1),
+                                int(private), exe in windowed))
+    out.sort(key=lambda a: (a.weight_mb + a.cpu * 20), reverse=True)
     return out
 
 
 def find_heavy(keep=(), sample_s: float = 1.0) -> list[HeavyApp]:
-    """Your windowed apps using a lot of memory or CPU, heaviest first."""
+    """Your apps using a lot of memory (in RAM or claimed) or CPU, heaviest
+    first; ``closable`` says whether one can be asked to close."""
     import time
 
     import psutil
@@ -242,19 +281,23 @@ def find_heavy(keep=(), sample_s: float = 1.0) -> list[HeavyApp]:
         except Exception:
             pass
     time.sleep(sample_s)
+    windowed = _windowed_exes()
     usage: dict[str, list] = {}
     for p in procs:
         try:
-            exe = (p.info["name"] or "").lower()
-            mem = p.memory_info().rss / 2 ** 20
+            exe = owner_app(p.info["pid"], (p.info["name"] or "").lower(), tree, windowed)
+            info = p.memory_info()
+            mem = info.rss / 2 ** 20
+            private = getattr(info, "private", 0) / 2 ** 20
             load = p.cpu_percent(None)
         except Exception:
             continue
-        entry = usage.setdefault(exe, [0.0, 0.0])
+        entry = usage.setdefault(exe, [0.0, 0.0, 0.0])
         entry[0] += mem
         entry[1] += load
+        entry[2] += private
     skip = {str(k).strip().lower() for k in keep} | {_foreground_exe()} | games
-    return rank_heavy({k: tuple(v) for k, v in usage.items()}, _windowed_exes(), skip)
+    return rank_heavy({k: tuple(v) for k, v in usage.items()}, windowed, skip)
 
 
 # ------------------------------------------------------------------ power
