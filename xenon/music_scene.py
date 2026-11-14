@@ -180,6 +180,156 @@ def lyric_frame(lines: list[tuple[int, str]], position_ms: int, duration_ms: int
     return LyricFrame(text, tuple(reveal), entry, upcoming, previous)
 
 
+@dataclass(frozen=True)
+class LyricState:
+    """Like ``LyricFrame`` but continuous (levels and entry 0..1), for the
+    smooth animator."""
+    text: str
+    levels: tuple
+    entry: float
+    upcoming: str
+    previous: str = ""
+    index: int = -1
+
+
+def lyric_state(lines: list[tuple[int, str]], position_ms: int, duration_ms: int = 0) -> LyricState | None:
+    index = line_at(lines, position_ms)
+    if index < 0:
+        if lines and lines[0][0] - position_ms < 2500:
+            return LyricState("", (), 0.0, lines[0][1].strip(), "", -1)
+        return None
+    start, text = lines[index]
+    text = text.strip()
+    end = lines[index + 1][0] if index + 1 < len(lines) else (duration_ms or start + 5000)
+    upcoming = lines[index + 1][1].strip() if index + 1 < len(lines) else ""
+    previous = lines[index - 1][1].strip() if index > 0 else ""
+    if not text:
+        return LyricState("", (), 1.0, upcoming, previous, index)
+    words = text.split()
+    levels = tuple(max(0.0, min(1.0, (position_ms - ws) / WORD_FADE_MS))
+                   for ws in word_starts(start, end, words))
+    entry = max(0.0, min(1.0, (position_ms - start) / LINE_ENTRY_MS))
+    return LyricState(text, levels, entry, upcoming, previous, index)
+
+
+def _smooth(t: float) -> float:
+    return t * t * (3 - 2 * t)
+
+
+class LyricAnimator:
+    """Smooth lyric frames for little work per frame.
+
+    Each line is drawn twice, once with every word unsung and once with
+    every word lit (shadow, glow and the next line included), and kept.
+    A frame is the unsung image with each word's patch cross-faded toward
+    the lit one by how far that word is sung, the whole line rising and
+    fading in as it enters. The next line is drawn ahead on a background
+    thread, so a line change never stalls the render loop."""
+
+    LEVELS = 24          # visible steps per word fade (quantises redraws)
+
+    def __init__(self) -> None:
+        import threading
+
+        self._cache: dict = {}
+        self._lock = threading.Lock()
+        self._wanted = None
+        self._wake = threading.Event()
+        self._thread = None
+
+    def _build(self, key):
+        text, upcoming, previous, box, accent, screen_height, settings = key
+        n = len(text.split())
+        regions: list = []
+        base = render_lyrics(box, LyricFrame(text, (0,) * n, REVEAL_STEPS, upcoming, previous),
+                             accent, screen_height, settings, regions)
+        lit = render_lyrics(box, LyricFrame(text, (REVEAL_STEPS,) * n, REVEAL_STEPS, upcoming, previous),
+                            accent, screen_height, settings)
+        return base, lit, regions
+
+    def _get(self, key):
+        with self._lock:
+            hit = self._cache.get(key)
+        if hit is None:
+            hit = self._build(key)
+            self._store(key, hit)
+        return hit
+
+    def _store(self, key, value) -> None:
+        with self._lock:
+            self._cache[key] = value
+            while len(self._cache) > 4:
+                self._cache.pop(next(iter(self._cache)))
+
+    def _prefetch(self, key) -> None:
+        import threading
+
+        with self._lock:
+            if key in self._cache:
+                return
+        self._wanted = key
+        self._wake.set()
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._worker, daemon=True, name="xenon-lyric-prefetch")
+            self._thread.start()
+
+    def _worker(self) -> None:
+        while self._wake.wait(30):
+            self._wake.clear()
+            key = self._wanted
+            if key is None:
+                continue
+            with self._lock:
+                if key in self._cache:
+                    continue
+            try:
+                self._store(key, self._build(key))
+            except Exception:
+                pass
+
+    def frame(self, lines, position_ms: int, duration_ms: int, box: Box, accent=(255, 255, 255),
+              screen_height: int = 1440, settings=None):
+        """(key, image): ``key`` changes only when the picture would."""
+        st = _settings(settings)
+        state = lyric_state(lines, position_ms, duration_ms)
+        if state is None:
+            return None, None
+        accent = tuple(accent)
+        style = st.lyric_style
+        if 0 <= state.index + 1 < len(lines):
+            nxt = lyric_state(lines, lines[state.index + 1][0], duration_ms)
+            if nxt is not None and nxt.text:
+                self._prefetch((nxt.text, nxt.upcoming, nxt.previous, box, accent, screen_height, st))
+        if style == "fade":
+            levels = tuple(1.0 for _ in state.levels)
+        else:
+            levels = tuple(round(_smooth(v) * self.LEVELS) / self.LEVELS for v in state.levels)
+        entry = 1.0 if style == "karaoke" else round(_smooth(state.entry) * self.LEVELS) / self.LEVELS
+        key = (state.text, state.upcoming, state.previous, levels, entry, box, accent, screen_height, st)
+        base, lit, regions = self._get((state.text, state.upcoming, state.previous, box, accent,
+                                        screen_height, st))
+        if not state.text:
+            return key, base
+        out = base.copy()
+        for i, level in enumerate(levels):
+            if level <= 0.0 or i >= len(regions):
+                continue
+            r = regions[i][:4]
+            if level >= 1.0:
+                out.paste(lit.crop(r), r[:2])
+            else:
+                out.paste(Image.blend(base.crop(r), lit.crop(r), level), r[:2])
+        if entry < 1.0:
+            size = regions[0][4] if regions else int(screen_height / 8.5)
+            rise = int((1 - entry) * size * 0.35)
+            if rise:
+                moved = Image.new("RGBA", out.size, (0, 0, 0, 0))
+                moved.paste(out.crop((0, 0, out.width, out.height - rise)), (0, rise))
+                out = moved
+            out.putalpha(out.getchannel("A").point(lambda v, e=entry: int(v * e)))
+        return key, out
+
+
 def _wrap(words: list[str], fnt, max_width: int, draw) -> list[list[int]]:
     """Greedy wrap; returns lines as lists of word indices."""
     lines: list[list[int]] = []
@@ -257,7 +407,7 @@ def lyric_pad(screen_height: int) -> int:
 
 
 def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), screen_height: int = 1440,
-                  settings=None) -> Image.Image:
+                  settings=None, regions: list | None = None) -> Image.Image:
     """The lyric layer: heavy words, sung ones bright with a glow, unsung
     ones faint, the next line small and dim beneath. ``settings`` picks the
     style (reveal / karaoke / stack / fade), size, case, alignment, glow."""
@@ -324,6 +474,14 @@ def render_lyrics(box: Box, frame: LyricFrame | None, accent=(255, 255, 255), sc
             word = words[i]
             wf = word_fonts[i]
             wy = y + (small_dy if wf is not fnt else 0)
+            if regions is not None:
+                # Where this word (with a little of its glow) lives, for
+                # LyricAnimator to cross-fade it on its own.
+                gap = draw.textlength(" ", font=wf) / 2
+                ww = draw.textlength(word, font=wf)
+                m = int(size * 0.12)
+                regions.append((max(0, int(x - gap)), max(0, int(y - m)),
+                                min(box.w, int(x + ww + gap + 1)), min(box.h, int(y + line_h + m)), size))
             level = frame.reveal[i] / REVEAL_STEPS if i < len(frame.reveal) else 0.0
             if style == "fade":
                 level = 1.0
@@ -515,9 +673,14 @@ def _draw_visualizer(draw: ImageDraw.ImageDraw, style: str, values: list[float],
                 draw.line((cx + ca * t, cy + sa * t, cx + ca * (t + seg * 0.6), cy + sa * (t + seg * 0.6)),
                           fill=level, width=bar_w + 1)
                 t += seg
-        else:  # rays
-            draw.line((cx + ca * inner, cy + sa * inner, cx + ca * length, cy + sa * length),
-                      fill=level, width=bar_w)
+        else:  # rays: a thin bar with a rounded tip (drawn supersampled)
+            hw = max(1.0, math.pi * d / count * 0.30) / 2
+            x0, y0 = cx + ca * inner, cy + sa * inner
+            x1, y1 = cx + ca * length, cy + sa * length
+            px, py = -sa * hw, ca * hw
+            draw.polygon([(x0 + px, y0 + py), (x1 + px, y1 + py), (x1 - px, y1 - py), (x0 - px, y0 - py)],
+                         fill=level)
+            draw.ellipse((x1 - hw, y1 - hw, x1 + hw, y1 + hw), fill=level)
 
 
 def render_orb(box: Box, layout: SceneLayout, art: OrbArt, bars: list[float], spin_deg: float,
@@ -664,17 +827,23 @@ def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: 
     st = _settings(settings)
     d = diameter or layout.orb_diameter
     cx, cy = layout.orb_cx - box.x, layout.orb_cy - box.y
-    shapes = Image.new("L", (box.w, box.h), 0)
     if st.visualizer != "none":
         values = ring_values(bars, st.bar_count)
         inner = d / 2 + d * 0.05
         reach = (screen_height * 0.15 * st.ray_length * (1.0 if playing else 0.35)
                  * (1.0 + 0.15 * min(1.0, energy)) * max(0.0, intro))
-        _draw_visualizer(ImageDraw.Draw(shapes), st.visualizer, values, cx, cy, inner, reach, d)
+        # Drawn at twice the size and averaged down: PIL draws no
+        # antialiasing, so 1x rays had stair-stepped edges.
+        k = RAY_SUPERSAMPLE
+        big = Image.new("L", (box.w * k, box.h * k), 0)
+        _draw_visualizer(ImageDraw.Draw(big), st.visualizer, values, cx * k, cy * k, inner * k, reach * k, d * k)
+        shapes = big.reduce(k) if k > 1 else big
+    else:
+        shapes = Image.new("L", (box.w, box.h), 0)
     alpha = shapes
     if st.glow > 0:
-        # A tight sheen right on the rays, not a wash of light round them.
-        bleed = _blur_quarter(shapes, d / 160, 0.55 * st.glow)
+        # A faint, tight sheen right on the rays; the rays stay crisp.
+        bleed = _blur_quarter(shapes, d / 200, 0.4 * st.glow)
         alpha = ImageChops.lighter(bleed, shapes)
     if intro < 0.999:
         k = max(0.0, min(1.0, intro))
@@ -692,6 +861,7 @@ def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: 
 
 
 _RING_LAYER: dict = {}
+RAY_SUPERSAMPLE = 2
 
 
 def render_disc(art: OrbArt, spin_deg: float, playing: bool) -> Image.Image | None:

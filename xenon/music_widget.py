@@ -1039,6 +1039,7 @@ class MusicWidget:
         self._vinyl_drawn = None
         self._disc_drawn = None
         lyric_key = card_key = object()
+        lyric_anim = scene.LyricAnimator()
         orb_art = None
         orb_art_key = None
         halo_key = None
@@ -1174,19 +1175,22 @@ class MusicWidget:
 
                 # -- lyrics: only when what is lit actually changes ------------
                 if now >= next_lyric:
-                    frame = None
+                    # Each line is drawn once (ahead of time); a frame only
+                    # cross-fades word patches, so word fades and the line's
+                    # entrance can run at 30 fps.
+                    key, image = None, None
                     if track and settings.show_lyrics:
                         lines = (self._lyrics.result() or {}).get("lines") or []
-                        frame = scene.lyric_frame(lines, position, duration) if lines else None
-                    if frame != lyric_key:
-                        lyric_key = frame
-                        image = (scene.render_lyrics(layout.lyric_box, frame, accent, height, settings)
-                                 if frame is not None else blank["lyrics"])
-                        surfaces["lyrics"].push(image)
+                        if lines:
+                            key, image = lyric_anim.frame(lines, position, duration, layout.lyric_box,
+                                                          accent, height, settings)
+                    if key != lyric_key:
+                        lyric_key = key
+                        surfaces["lyrics"].push(image if image is not None else blank["lyrics"])
                         self._has_frame = True
-                        next_lyric = now + 1.0 / 15     # word fades still get ~3 steps
+                        next_lyric = now + 1.0 / 30
                     else:
-                        next_lyric = now + 0.02
+                        next_lyric = now + 0.015
 
                 # -- card: title, art, progress --------------------------------
                 if now >= next_card:

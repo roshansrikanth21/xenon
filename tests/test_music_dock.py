@@ -87,6 +87,40 @@ class PopOutTests(unittest.TestCase):
         self.assertGreater(full[2], bbox[2])                 # flown out to its place
 
 
+class SmoothLyricTests(unittest.TestCase):
+    LINES = [(0, "I could have died for you"), (3000, "And I don't know why"), (6000, "Aeroplane")]
+
+    def test_state_is_continuous(self):
+        a = scene.lyric_state(self.LINES, 3050, 9000)
+        b = scene.lyric_state(self.LINES, 3080, 9000)
+        self.assertEqual(a.text, "And I don't know why")
+        self.assertGreater(b.levels[0], a.levels[0])
+        self.assertTrue(0 < a.levels[0] < 1 and 0 < a.entry < 1)
+
+    def test_animator_fades_words_in_steps(self):
+        box = scene.Box(0, 0, 900, 300)
+        st = ms.MusicSettings()
+        anim = scene.LyricAnimator()
+        keys, images = [], []
+        for pos in range(3000, 3400, 20):
+            key, img = anim.frame(self.LINES, pos, 9000, box, (255, 200, 80), 1080, st)
+            self.assertEqual(img.size, (box.w, box.h))
+            keys.append(key)
+            images.append(img)
+        self.assertGreater(len(set(keys)), 8)              # many in-between pictures, not ~5
+        first_word = images[0].crop((0, 0, 200, 300)).getchannel("A").getextrema()[1]
+        later = images[-1].crop((0, 0, 200, 300)).getchannel("A").getextrema()[1]
+        self.assertGreater(later, first_word)              # rose and lit up
+
+    def test_rays_are_antialiased(self):
+        lay = scene.scene_layout(1920, 1080)
+        bars = [0.6] * 64
+        data = scene.render_ring_bgra(lay.orb_box, lay, bars, True, 0.5, (255, 255, 255), 1080,
+                                      ms.coerce({"glow": 0.0}))
+        alpha = set(data[3::4])
+        self.assertGreater(len(alpha), 40)                 # soft edges, not just on/off
+
+
 class HistoryTests(unittest.TestCase):
     def test_record_dedupes_caps_and_persists(self):
         with tempfile.TemporaryDirectory() as tmp:
