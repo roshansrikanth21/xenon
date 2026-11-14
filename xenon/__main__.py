@@ -1678,7 +1678,17 @@ def _phone_status(app) -> dict:
         "artist": strip_invisible(now["artist"])[:60] if now else "",
         "playing": bool(now and now["playing"]),
         "time": _time.strftime("%H:%M"),
+        # For Xenon Core: what the orb is doing and how loud the music is.
+        "orb": str(getattr(getattr(app, "model", None), "state", "") or ""),
+        "energy": _music_energy(app),
     }
+
+
+def _music_energy(app) -> float:
+    """0..1 loudness of the music right now (the widget's bass bars)."""
+    widget = getattr(app, "music_widget", None)
+    bars = list(getattr(widget, "_bars", []) or [])[:12] if widget is not None else []
+    return round(min(1.0, sum(bars) / len(bars) * 1.4), 3) if bars else 0.0
 
 
 def _start_phone_access(app, config) -> None:
@@ -1699,6 +1709,7 @@ def _start_phone_access(app, config) -> None:
         if not server.start():
             return
         app.hud_url = remote.hud_url(settings["key"])
+        app.core_url = remote.core_url(settings["key"])
         vm = settings.get("vm") or remote.VM
         if not vm:
             print('phone access: set "vm" (user@host) in %APPDATA%/xenon/remote.json', file=sys.stderr, flush=True)

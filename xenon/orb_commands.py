@@ -164,6 +164,9 @@ _RULES_NEGATION_OK: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
 )
 
 _RULES: tuple[tuple[str, Callable[[str], OrbCommand]], ...] = (
+    # ---- Xenon Core (the 3D presence view)
+    (r"(?:(?:open|show|start|launch) )?(?:the |xenon |your )?(?:energy )?core(?: view| mode)?|show (?:me )?yourself",
+     _kind("core_on")),
     # ---- hand control (the webcam gesture HUD)
     (r"(?:(?:open|start|show|launch|turn on|enable) )?(?:the )?(?:hand control|hand tracking|gesture control|hud|holograms?)",
      _kind("hud_on")),

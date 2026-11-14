@@ -1074,6 +1074,8 @@ class Tray:
             item("Music widget", lambda: app.post(app.toggle_music_widget),
                  checked=lambda _i: app.music_widget_running()),
             item("Music widget settings…", lambda: app.post(app.open_music_settings)),
+            item("Xenon Core (3D)", lambda: app.post(app.open_core),
+                 enabled=lambda _i: bool(getattr(app, "core_url", None))),
             item("Hand control (webcam)", lambda: app.post(app.open_hand_control),
                  enabled=lambda _i: bool(getattr(app, "hud_url", None))),
             item("Copy phone link", lambda: app.post(app.copy_phone_link),
@@ -1574,6 +1576,10 @@ class OrbApp:
         if kind == "widget_settings":
             self.post(self.open_music_settings)
             return "Opening the music widget settings."
+        if kind == "core_on":
+            if origin == "remote":
+                return "The core opens on the laptop screen; start it there."
+            return self.open_core()
         if kind == "hud_on":
             if origin == "remote":
                 return "Hand control uses the laptop's webcam, so start it at the laptop."
@@ -1593,6 +1599,16 @@ class OrbApp:
         return None
 
     # ----- hand control ------------------------------------------------------
+
+    def open_core(self) -> str:
+        """Open Xenon Core (static/core.html): Xenon as a 3D energy core."""
+        url = getattr(self, "core_url", None)
+        if not url:
+            return "The core needs phone access switched on (it shares its little local server)."
+        import webbrowser
+
+        threading.Thread(target=webbrowser.open, args=(url,), daemon=True, name="xenon-core").start()
+        return "Here I am."
 
     def open_hand_control(self) -> str:
         """Open the webcam gesture HUD (static/hud.html) in the browser."""

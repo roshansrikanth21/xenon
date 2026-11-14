@@ -1,0 +1,128 @@
+<!doctype html>
+<!--
+  Xenon Core: Xenon's presence as a 3D energy core that reacts to what it is
+  doing (listening, thinking, speaking) and to your music.
+  The core and ring models are from "Futurist Lantern" by Augma Imaginarium
+  (https://github.com/htongyai/futurist-lantern, CC BY-NC 4.0; see
+  static/models/CREDITS.md). The scene, lighting and behaviour here are
+  Xenon's own. three.js (MIT) loads from jsDelivr.
+-->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xenon · Core</title>
+<style>
+:root{--holo:#6ff3ff;--fg:#e9f3f6;--dim:#7a8b93;--mono:ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace}
+html,body{margin:0;height:100%;background:#020406;color:var(--fg);overflow:hidden;font:12px var(--mono)}
+canvas{display:block}
+.hud{position:fixed;inset:24px;pointer-events:none;display:flex;flex-direction:column;justify-content:space-between}
+.row{display:flex;justify-content:space-between;align-items:flex-start}
+.k{color:var(--dim);letter-spacing:.26em;font-size:10px;text-transform:uppercase}
+.v{margin-top:6px;letter-spacing:.08em;font-size:13px}
+.brand{letter-spacing:.46em;color:var(--holo);font-weight:600;font-size:12px}
+#state{font-size:15px;letter-spacing:.42em;color:var(--holo);text-shadow:0 0 14px rgba(111,243,255,.5)}
+.center{position:fixed;left:0;right:0;bottom:12%;text-align:center;pointer-events:none}
+#load{position:fixed;inset:0;display:grid;place-items:center;color:var(--dim);letter-spacing:.3em;font-size:11px}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head><body>
+<div id="load">CHARGING CORE</div>
+<div class="hud">
+  <div class="row"><div><div class="brand">XENON</div><div class="k" style="margin-top:7px">Core · 02</div></div>
+    <div style="text-align:right"><div class="k">Laptop</div><div class="v" id="clock">--:--</div></div></div>
+  <div class="row"><div><div class="k">Now playing</div><div class="v" id="np">Nothing</div></div>
+    <div style="text-align:right"><div class="k">Mode</div><div class="v" id="mode">Normal</div><div class="k" style="margin-top:12px">Esc to close · F for full screen</div></div></div>
+</div>
+<div class="center"><div id="state">STANDING BY</div></div>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
+import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
+import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
+import {OutputPass} from 'three/addons/postprocessing/OutputPass.js';
+import {MeshoptDecoder} from 'three/addons/libs/meshopt_decoder.module.js';
+
+const key=(location.hash.match(/k=([^&]+)/)||[])[1]||(()=>{try{return sessionStorage.getItem('xk')||''}catch(e){return ''}})();
+if(location.hash){try{sessionStorage.setItem('xk',key)}catch(e){} history.replaceState(null,'',location.pathname)}
+addEventListener('keydown',e=>{if(e.key==='Escape')window.close();if(e.key==='f'||e.key==='F'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}});
+
+// ---- scene ------------------------------------------------------------------
+const r=new THREE.WebGLRenderer({antialias:true});r.setPixelRatio(Math.min(2,devicePixelRatio));r.setSize(innerWidth,innerHeight);
+r.toneMapping=THREE.ACESFilmicToneMapping;r.toneMappingExposure=.8;document.body.prepend(r.domElement);
+const scene=new THREE.Scene();scene.fog=new THREE.FogExp2(0x020406,.06);
+const cam=new THREE.PerspectiveCamera(35,innerWidth/innerHeight,.01,100);cam.position.set(0,1.6,8.2);cam.lookAt(0,1.1,0);
+scene.add(new THREE.HemisphereLight(0x6fdcff,0x050608,.35));
+const key1=new THREE.DirectionalLight(0xffffff,.8);key1.position.set(3,5,4);scene.add(key1);
+const coreLight=new THREE.PointLight(0x6ff3ff,4,9,1.6);coreLight.position.set(0,1.15,0);scene.add(coreLight);
+const comp=new EffectComposer(r);comp.addPass(new RenderPass(scene,cam));
+const bloom=new UnrealBloomPass(new THREE.Vector2(innerWidth/2,innerHeight/2),.4,.3,.88);comp.addPass(bloom);comp.addPass(new OutputPass());
+addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();r.setSize(innerWidth,innerHeight);comp.setSize(innerWidth,innerHeight)});
+
+// The energy inside: a soft fresnel sphere whose brightness is Xenon's "charge".
+const energyU={uCharge:{value:.25},uTime:{value:0}};
+const energy=new THREE.Mesh(new THREE.SphereGeometry(.34,48,32),new THREE.ShaderMaterial({uniforms:energyU,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+  vertexShader:`varying vec3 n;varying vec3 v;void main(){n=normalize(normalMatrix*normal);vec4 p=modelViewMatrix*vec4(position,1.);v=normalize(-p.xyz);gl_Position=projectionMatrix*p;}`,
+  fragmentShader:`uniform float uCharge;uniform float uTime;varying vec3 n;varying vec3 v;
+    void main(){float f=pow(1.-max(dot(n,v),0.),1.6);float core=pow(max(dot(n,v),0.),3.);
+      float flicker=.92+.08*sin(uTime*13.)*sin(uTime*7.3);vec3 c=mix(vec3(.25,.85,1.),vec3(1.),core*.7);
+      gl_FragColor=vec4(c*(f*.55+core*.7)*uCharge*flicker,1.);}`}));
+energy.position.set(0,1.05,0);scene.add(energy);
+
+// Dust that orbits the core.
+const N=420,dust=new THREE.BufferGeometry(),pos=new Float32Array(N*3),seed=[];
+for(let i=0;i<N;i++){const a=Math.random()*Math.PI*2,rr=1.2+Math.random()*2.6,y=Math.random()*2.6-.2;seed.push([a,rr,y,.1+Math.random()*.4]);pos.set([Math.cos(a)*rr,y,Math.sin(a)*rr],i*3)}
+dust.setAttribute('position',new THREE.BufferAttribute(pos,3));
+const dustMat=new THREE.PointsMaterial({color:0x6ff3ff,size:.025,transparent:true,opacity:.55,blending:THREE.AdditiveBlending,depthWrite:false});
+scene.add(new THREE.Points(dust,dustMat));
+
+// ---- the two Futurist Lantern models -----------------------------------------
+let shell=null,ring=null,shellMats=[],ringMats=[];
+const loader=new GLTFLoader();loader.setMeshoptDecoder(MeshoptDecoder);   // the models are meshopt-compressed
+function fit(obj,height,y){const box=new THREE.Box3().setFromObject(obj),size=box.getSize(new THREE.Vector3()),c=box.getCenter(new THREE.Vector3());
+  const k=height/Math.max(size.y,size.x,size.z);obj.scale.setScalar(k);obj.position.set(-c.x*k,y-c.y*k,-c.z*k)}
+function relight(obj,list,glow,glass){const extra=[];obj.traverse(o=>{if(!o.isMesh)return;const m=o.material;
+  const mat=new THREE.MeshPhysicalMaterial({map:m.map,normalMap:m.normalMap,roughnessMap:m.roughnessMap,metalnessMap:m.metalnessMap,
+    roughness:glass?.18:(m.roughness??.4),metalness:glass?.6:(m.metalness??.8),clearcoat:.6,emissive:new THREE.Color(0x2fb8ff),emissiveIntensity:glow,
+    transparent:!!glass,opacity:glass?.38:1,depthWrite:!glass,side:glass?THREE.DoubleSide:THREE.FrontSide});
+  o.material=mat;list.push(mat);
+  // A faint wireframe over the glass shell, so its shape reads in the dark.
+  if(glass){const w=new THREE.Mesh(o.geometry,new THREE.MeshBasicMaterial({color:0x6ff3ff,wireframe:true,transparent:true,opacity:.05,depthWrite:false}));extra.push([o,w])}});
+  extra.forEach(([o,w])=>o.add(w))}
+Promise.all([loader.loadAsync('/models/core.glb'),loader.loadAsync('/models/ring.glb')]).then(([a,b])=>{
+  shell=new THREE.Group();shell.add(a.scene);fit(a.scene,2.6,1.15);relight(a.scene,shellMats,.05,true);scene.add(shell);
+  // The ring lies on the floor and orbits under the core.
+  // A small power ring standing on the floor, orbiting the core.
+  ring=new THREE.Group();ring.add(b.scene);fit(b.scene,.55,0);relight(b.scene,ringMats,.08,false);scene.add(ring);
+  document.getElementById('load').remove()}).catch(e=>{document.getElementById('load').textContent='COULD NOT LOAD THE CORE: '+e})
+
+// ---- Xenon's live state ----------------------------------------------------------
+const LABEL={idle:'STANDING BY',standby:'SAY XENON',listening:'LISTENING',heard:'GOT IT',thinking:'THINKING',searching:'SEARCHING',
+  speaking:'SPEAKING',working:'WORKING',confirm:'CONFIRM ON SCREEN',error:'ERROR'};
+let st={orb:'idle',energy:0,playing:false},target=.25;
+async function poll(){try{const res=await fetch('/api/status',{headers:{'X-Xenon-Key':key}});if(res.ok){st=await res.json();
+  document.getElementById('state').textContent=st.xtreme?'XTREME MODE':st.game?'GAME MODE':(LABEL[st.orb]||String(st.orb||'').toUpperCase()||'STANDING BY');
+  document.getElementById('np').textContent=st.track?`${st.track}${st.artist?' · '+st.artist:''}`:'Nothing';
+  document.getElementById('mode').textContent=st.xtreme?'Xtreme':st.game?'Game':'Normal';document.getElementById('clock').textContent=st.time||'--:--'}}
+  catch(e){document.getElementById('state').textContent='OFFLINE'}}
+poll();setInterval(poll,160);
+
+// ---- animate ---------------------------------------------------------------------
+const clock=new THREE.Clock();let charge=.25,spin=0,music=0;
+function frame(){const dt=Math.min(.05,clock.getDelta()),t=clock.elapsedTime;
+  const s=st.orb||'idle';music+=((st.energy||0)-music)*Math.min(1,dt*(st.energy>music?14:4));
+  const want={listening:.95,heard:1.1,thinking:.75,searching:.75,speaking:.8,working:.7,confirm:.9,error:.5}[s]??(st.playing?.35:.22);
+  const speakPulse=s==='speaking'?.25*(.5+.5*Math.sin(t*9.5)):0;
+  charge+=(want+music*.9+speakPulse-charge)*Math.min(1,dt*4);
+  const fast={thinking:3.2,searching:3.2,working:2.4,listening:1.4,heard:1.8}[s]??.35;spin+=dt*(fast+music*1.5);
+  energyU.uCharge.value=charge;energyU.uTime.value=t;energy.scale.setScalar(1+music*.18+speakPulse*.3);
+  coreLight.intensity=1.5+charge*4;coreLight.color.setHSL(s==='error'?.0:.52,1,.62);
+  bloom.strength=.25+charge*.45;r.toneMappingExposure=.7+charge*.12;
+  shellMats.forEach(m=>m.emissiveIntensity=.02+charge*.12);ringMats.forEach(m=>m.emissiveIntensity=.04+charge*.35+music*.6);
+  if(shell){shell.rotation.y=spin*.15;shell.position.y=Math.sin(t*.8)*.05}
+  if(ring){const a=spin*.35;ring.position.set(Math.cos(a)*1.75,-.05+Math.sin(t*1.4)*.04,Math.sin(a)*1.75);ring.rotation.y=-a*2.2}
+  const p=dust.attributes.position.array;for(let i=0;i<N;i++){const [a,rr,y,sp]=seed[i],aa=a+t*sp*(.3+charge*.8);p[i*3]=Math.cos(aa)*rr;p[i*3+1]=y+Math.sin(t*sp+i)*.05;p[i*3+2]=Math.sin(aa)*rr}
+  dust.attributes.position.needsUpdate=true;dustMat.opacity=.3+charge*.5;
+  cam.position.x=Math.sin(t*.12)*.6;cam.lookAt(0,1.05,0);
+  comp.render();requestAnimationFrame(frame)}
+frame();
+</script></body></html>

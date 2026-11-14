@@ -159,6 +159,21 @@ class RemoteServer:
             def do_GET(self) -> None:  # noqa: N802
                 if self.path.split("?")[0] in ("/", "/index.html"):
                     self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                elif self.path.split("?")[0] in ("/core", "/models/core.glb", "/models/ring.glb"):
+                    # Xenon Core (3D, the Futurist Lantern models): laptop only.
+                    if self._via_tunnel():
+                        self._send(404, b'{"error":"not found"}')
+                        return
+                    path = self.path.split("?")[0]
+                    if path == "/core":
+                        self._send(200, _static("core.html").encode("utf-8"), "text/html; charset=utf-8", CORE_CSP)
+                    else:
+                        try:
+                            data = (_STATIC / "models" / path.rsplit("/", 1)[1]).read_bytes()
+                        except OSError:
+                            self._send(404, b'{"error":"not found"}')
+                            return
+                        self._send(200, data, "model/gltf-binary", PAGE_CSP)
                 elif self.path.split("?")[0] == "/hud":
                     # Hand control uses the laptop's webcam: only from the
                     # laptop itself, never through the phone tunnel.
@@ -299,6 +314,26 @@ HUD_CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-e
            "connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com; style-src 'unsafe-inline'; "
            "media-src 'self' blob: mediastream:; worker-src blob: https://cdn.jsdelivr.net; img-src 'self' data: blob:; "
            "base-uri 'none'; form-action 'none'")
+
+
+_STATIC = Path(__file__).with_name("static")
+
+
+def _static(name: str) -> str:
+    try:
+        return (_STATIC / name).read_text(encoding="utf-8")
+    except OSError:
+        return "<!doctype html><title>Xenon</title><p>Page missing.</p>"
+
+
+# Xenon Core: three.js from its CDN, the models from here.
+CORE_CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; "
+            "connect-src 'self' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data: blob:; "
+            "worker-src blob:; base-uri 'none'; form-action 'none'")
+
+
+def core_url(key: str, port: int = PORT) -> str:
+    return f"http://127.0.0.1:{port}/core#k={key}"
 
 
 def hud_url(key: str, port: int = PORT) -> str:

@@ -113,3 +113,34 @@ class HudTests(unittest.TestCase):
         self.assertFalse(remote.allowed_from_phone("open hand control"))
         from xenon import orb_commands
         self.assertEqual(orb_commands.parse("open hand control").kind, "hud_on")
+
+
+class CoreTests(unittest.TestCase):
+    def setUp(self):
+        self.server = remote.RemoteServer(lambda t: "ok", "k" * 43, port=0)
+        self.assertTrue(self.server.start())
+        self.port = self.server._server.server_address[1]
+        self.addCleanup(self.server.stop)
+
+    def get(self, path, headers=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.headers.get("Content-Type", ""), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, "", b""
+
+    def test_core_page_and_models_on_the_laptop(self):
+        code, kind, page = self.get("/core")
+        self.assertEqual(code, 200)
+        self.assertIn(b"futurist-lantern", page)                 # credit kept in the page
+        for name in ("core.glb", "ring.glb"):
+            code, kind, data = self.get(f"/models/{name}")
+            self.assertEqual((code, kind, data[:4]), (200, "model/gltf-binary", b"glTF"))
+
+    def test_core_never_through_the_phone_tunnel(self):
+        for path in ("/core", "/models/core.glb"):
+            self.assertEqual(self.get(path, {"Cf-Ray": "x"})[0], 404)
+
+    def test_no_path_tricks(self):
+        self.assertEqual(self.get("/models/../remote.py")[0], 404)

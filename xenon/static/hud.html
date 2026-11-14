@@ -59,8 +59,8 @@ canvas{position:fixed;inset:0;width:100%;height:100%}
 <button id="go">START HAND CONTROL</button>
 <p>Uses your webcam. Hand tracking runs in this tab; the picture never leaves your laptop.</p></div></div>
 <script type="module">
-const key=(location.hash.match(/k=([^&]+)/)||[])[1]||'';
-if(location.hash)history.replaceState(null,'',location.pathname);
+const key=(location.hash.match(/k=([^&]+)/)||[])[1]||(()=>{try{return sessionStorage.getItem('xk')||''}catch(e){return ''}})();
+if(location.hash){try{sessionStorage.setItem('xk',key)}catch(e){} history.replaceState(null,'',location.pathname)}
 const $=id=>document.getElementById(id),video=$('cam'),cv=$('fx'),g=cv.getContext('2d');
 let W=0,H=0;function size(){W=cv.width=innerWidth*devicePixelRatio;H=cv.height=innerHeight*devicePixelRatio}size();addEventListener('resize',size);
 addEventListener('keydown',e=>{if(e.key==='Escape')window.close()});
