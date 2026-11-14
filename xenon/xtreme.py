@@ -59,16 +59,42 @@ GAME_DIRS = ("\\steamapps\\", "\\epic games\\", "\\riot games\\", "\\xboxgames\\
              "\\rockstar games\\", "\\games\\", "\\windowsapps\\microsoft.minecraft")
 
 
-def is_game(proc) -> bool:
+def process_tree() -> dict:
+    """pid -> (parent pid, exe name), read once. Asking each process for
+    its parents takes a full system snapshot per process (a test run took
+    over 20 s for all of them); this map makes it one."""
+    import psutil
+
+    tree = {}
+    for p in psutil.process_iter(["pid", "ppid", "name"]):
+        tree[p.info["pid"]] = (p.info["ppid"], (p.info["name"] or "").lower())
+    return tree
+
+
+def _launched_by_launcher(pid: int, tree: dict) -> bool:
+    seen = set()
+    parent = tree.get(pid, (None, ""))[0]
+    while parent and parent not in seen and parent in tree:
+        seen.add(parent)
+        ppid, name = tree[parent]
+        if name in LAUNCHERS:
+            return True
+        parent = ppid
+    return False
+
+
+def is_game(proc, tree: dict | None = None) -> bool:
     """A running game: installed in a game library folder, an Unreal
     "-Shipping" build, or started by a game launcher."""
     try:
         name = (proc.name() or "").lower()
-        if name.endswith("-shipping.exe"):
+        if name.endswith(".exe") and "-shipping" in name:
             return True
         path = (proc.exe() or "").lower()
         if any(d in path for d in GAME_DIRS):
             return True
+        if tree is not None:
+            return _launched_by_launcher(proc.pid, tree)
         return any((p.name() or "").lower() in LAUNCHERS for p in proc.parents())
     except Exception:
         return False
@@ -94,6 +120,47 @@ def _foreground_exe() -> str:
         return _exe_of_window(ctypes.windll.user32.GetForegroundWindow())
     except Exception:
         return ""
+
+
+def fullscreen_exes() -> set[str]:
+    """Apps with a window covering a whole monitor: borderless and
+    full-screen games installed anywhere count as games."""
+    if sys.platform != "win32":
+        return set()
+    from .game_mode import _exe_of_window
+
+    user = ctypes.windll.user32
+    user.MonitorFromWindow.restype = wintypes.HANDLE
+    user.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD)]
+
+    shell = {"explorer.exe", "searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe",
+             "lockapp.exe", "textinputhost.exe"}
+    out: set[str] = set()
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def visit(hwnd, _lp):
+        if not user.IsWindowVisible(hwnd) or user.IsIconic(hwnd) or user.GetWindow(hwnd, 4):
+            return True
+        rect = wintypes.RECT()
+        if not user.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return True
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not user.GetMonitorInfoW(user.MonitorFromWindow(hwnd, 2), ctypes.byref(info)):
+            return True
+        m = info.rcMonitor
+        if rect.left <= m.left and rect.top <= m.top and rect.right >= m.right and rect.bottom >= m.bottom:
+            exe = _exe_of_window(hwnd)
+            if exe and exe not in shell:
+                out.add(exe)
+        return True
+
+    user.EnumWindows(proto(visit), 0)
+    return out
 
 
 def _windowed_exes() -> dict[str, str]:
@@ -165,7 +232,10 @@ def find_heavy(keep=(), sample_s: float = 1.0) -> list[HeavyApp]:
     me = psutil.Process().username()
     own = _family(os.getpid())
     procs = [p for p in psutil.process_iter(["name", "pid"]) if p.info["pid"] not in own and _mine(p, me)]
-    games = {(p.info["name"] or "").lower() for p in procs if is_game(p)}
+    # Games already running when Xtreme starts are kept, whatever window is
+    # in front: by install folder / launcher, or a window covering a screen.
+    tree = process_tree()
+    games = {(p.info["name"] or "").lower() for p in procs if is_game(p, tree)} | fullscreen_exes()
     for p in procs:
         try:
             p.cpu_percent(None)
@@ -263,6 +333,7 @@ def calm_background(skip=(), min_cpu: float = 2.0) -> dict[int, int]:
     own = _family(os.getpid())
     skip = {str(s).lower() for s in skip} | {_foreground_exe()}
     procs = [p for p in psutil.process_iter(["name", "pid"]) if p.info["pid"] not in own and _mine(p, me)]
+    tree = process_tree()
     for p in procs:
         try:
             p.cpu_percent(None)
@@ -274,7 +345,7 @@ def calm_background(skip=(), min_cpu: float = 2.0) -> dict[int, int]:
     for p in procs:
         try:
             exe = (p.info["name"] or "").lower()
-            if exe in skip or exe in NEVER or p.cpu_percent(None) < min_cpu or is_game(p):
+            if exe in skip or exe in NEVER or p.cpu_percent(None) < min_cpu or is_game(p, tree):
                 continue
             before = p.nice()
             if before == psutil.NORMAL_PRIORITY_CLASS:
@@ -310,11 +381,12 @@ def trim_background(skip=()) -> int:
     psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     me = psutil.Process().username()
-    skip = {str(s).lower() for s in skip} | {_foreground_exe()}
+    skip = {str(s).lower() for s in skip} | {_foreground_exe()} | fullscreen_exes()
+    tree = process_tree()
     count = 0
     for p in psutil.process_iter(["name", "pid"]):
         exe = (p.info["name"] or "").lower()
-        if exe in skip or exe in LAUNCHERS or exe in ANTICHEAT or not _mine(p, me) or is_game(p):
+        if exe in skip or exe in LAUNCHERS or exe in ANTICHEAT or not _mine(p, me) or is_game(p, tree):
             continue
         handle = kernel.OpenProcess(0x0100 | 0x1000, False, p.info["pid"])   # SET_QUOTA | QUERY_LIMITED
         if not handle:

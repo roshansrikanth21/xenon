@@ -48,6 +48,20 @@ class RankTests(unittest.TestCase):
         self.assertFalse(xtreme.is_game(_Proc("chrome.exe", r"C:\Program Files\Google\chrome.exe",
                                               parents=("explorer.exe",))))
 
+    def test_launcher_children_found_through_one_tree(self):
+        tree = {10: (1, "explorer.exe"), 20: (10, "epicgameslauncher.exe"), 30: (20, "bootstrap.exe"),
+                40: (30, "game.exe"), 50: (10, "chrome.exe"), 60: (60, "loop.exe")}
+
+        class P(_Proc):
+            def __init__(self, pid, name):
+                super().__init__(name, r"C:\x\%s" % name)
+                self.pid = pid
+
+        self.assertTrue(xtreme.is_game(P(40, "game.exe"), tree))       # grandchild of a launcher
+        self.assertFalse(xtreme.is_game(P(50, "chrome.exe"), tree))
+        self.assertFalse(xtreme.is_game(P(60, "loop.exe"), tree))      # a pid that is its own parent
+        self.assertTrue(xtreme.is_game(P(70, "FortniteClient-Win64-Shipping_EAC_EOS.exe"), tree))
+
     def test_guid_round_trip(self):
         g = xtreme._GUID.of("ded574b5-45a0-4f42-8737-46345c09c238")
         self.assertEqual(g.text(), "ded574b5-45a0-4f42-8737-46345c09c238")
