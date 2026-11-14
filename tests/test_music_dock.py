@@ -268,7 +268,13 @@ class MigrationTests(unittest.TestCase):
             with open(path, "w") as f:
                 json.dump({"lyric_style": "reveal", "fps": 20, "disc": "vinyl"}, f)
             s = ms.load(path)
-            self.assertEqual((s.lyric_style, s.fps, s.disc), ("poster", 30, "vinyl"))
+            self.assertEqual((s.lyric_style, s.fps, s.disc), ("poster", 60, "vinyl"))
+            with open(path, "w") as f:
+                json.dump({"version": 4, "fps": 30}, f)
+            self.assertEqual(ms.load(path).fps, 60)          # v5: the old 30 default moves
+            with open(path, "w") as f:
+                json.dump({"version": 4, "fps": 45}, f)
+            self.assertEqual(ms.load(path).fps, 45)          # a choice stays
             ms.save(ms.coerce({"lyric_style": "reveal", "fps": 20}), path)
             s = ms.load(path)                       # saved as version 2: kept
             self.assertEqual((s.lyric_style, s.fps), ("reveal", 20))

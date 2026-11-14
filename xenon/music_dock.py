@@ -357,7 +357,9 @@ class DockRenderer:
         key = (id(cover), size)
         parts = cache.get(key)
         if parts is None:
-            if len(cache) >= 2 and not any(k[0] == id(cover) for k in cache):
+            # Room for two covers (the swap on a new song draws the old one
+            # for a moment), each small and grown.
+            if len(cache) >= 4 and not any(k[0] == id(cover) for k in cache):
                 cache.clear()
             base, label, over = _vinyl_parts(size, cover)
             # For the grow animation: label and sheen merged, premultiplied
@@ -554,12 +556,14 @@ class DockRenderer:
         return self._disc_for(source, content.cover, spin, int(round(d))), (cx, cy)
 
     def render_vinyl(self, geom: DockGeometry, box: Box, content: DockContent, openness: float,
-                     accent=(255, 255, 255), press: float = 0.0, spin: float = 0.0) -> Image.Image:
+                     accent=(255, 255, 255), press: float = 0.0, spin: float = 0.0,
+                     drop: int = 0) -> Image.Image:
         """Just the record, for its own window (``vinyl_box``), so spinning
-        it doesn't repaint the whole dock. ``openness`` is eased."""
+        it doesn't repaint the whole dock. ``openness`` is eased; ``drop``
+        (px) lowers it out of the corner, for the swap on a new song."""
         out = Image.new("RGBA", (box.w, box.h), (0, 0, 0, 0))
         disc, (cx, cy) = self._scaled_disc(geom, content, accent, openness, press, spin)
-        x, y = int(cx - box.x - disc.width / 2), int(cy - box.y - disc.height / 2)
+        x, y = int(cx - box.x - disc.width / 2), int(cy - box.y - disc.height / 2) + int(drop)
         # Nothing underneath: a clipped plain paste, no blending.
         left, top = max(0, -x), max(0, -y)
         right, bottom = min(disc.width, box.w - x), min(disc.height, box.h - y)

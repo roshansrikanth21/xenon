@@ -359,42 +359,55 @@ def font_for(text: str, size: int, bold: bool = False) -> ImageFont.FreeTypeFont
 _registered_classes: dict = {}
 
 
+from .music_onsets import EDGE_BAND as _EDGE_BAND  # noqa: E402
+
 _EDGE_WEIGHT = {"edge_bottom": 1.0, "edge_top": 0.6, "edge_left": 0.8, "edge_right": 0.75}
 
 
 class _LyricProcess:
-    """Stand-in for the lyric layer's window, which lives in a child process
-    (``lyric_layer``) so its animation gets a core of its own. Offers the
-    few surface calls the scene makes; everything else is a message."""
+    """Stand-in for a layer's window that lives in a child process (the
+    lyrics in ``lyric_layer``, the ring in ``ring_layer``) so its drawing
+    gets a core of its own. Offers the few surface calls the scene makes;
+    everything else is a message."""
 
-    def __init__(self, box, screen_height: int) -> None:
+    NAME = "xenon-lyrics"
+    LAYER = "lyric_layer"
+
+    def __init__(self, box, screen_height: int, *extra) -> None:
         self.box = box
         self.screen_height = screen_height
+        self.extra = extra
         self.hwnd = 0
         self.opacity = 255
         self._sent_opacity = None
         self._conn = None
         self._proc = None
 
-    def create(self) -> bool:
-        import multiprocessing
-
-        from . import lyric_layer
+    def begin(self) -> bool:
+        """Hand a (pre-started, see ``layer_host``) child its layer, without
+        waiting for its window."""
+        from . import layer_host
 
         try:
-            ctx = multiprocessing.get_context("spawn")
-            self._conn, child = ctx.Pipe()
-            self._proc = ctx.Process(target=lyric_layer.run, args=(child, self.box, self.screen_height),
-                                     daemon=True, name="xenon-lyrics")
-            self._proc.start()
-            child.close()
+            self._conn, self._proc = layer_host.take()
+            self._conn.send(("init", self.LAYER, (self.box, self.screen_height) + self.extra))
+            return True
+        except Exception as error:
+            print(f"music widget: {self.NAME} process failed ({error}); drawing it in-process", flush=True)
+            self.close()
+            return False
+
+    def create(self) -> bool:
+        if self._proc is None and not self.begin():
+            return False
+        try:
             if self._conn.poll(25):
                 msg = self._conn.recv()
                 if msg[0] == "ready":
                     self.hwnd = msg[1]
                     return True
         except Exception as error:
-            print(f"music widget: lyric process failed ({error}); drawing lyrics in-process", flush=True)
+            print(f"music widget: {self.NAME} process failed ({error}); drawing it in-process", flush=True)
         self.close()
         return False
 
@@ -456,6 +469,13 @@ class _LyricProcess:
                 pass
         self._conn = self._proc = None
         self.hwnd = 0
+
+
+class _RingProcess(_LyricProcess):
+    """The visualizer ring's window in ``ring_layer``'s child process."""
+
+    NAME = "xenon-ring"
+    LAYER = "ring_layer"
 
 
 class _LayeredSurface:
@@ -1106,8 +1126,16 @@ class MusicWidget:
         if not self.full_screen:
             width, height = width // 3, height // 3
 
-        self._now_playing.start()
+        # The layer processes warm up while the media session and the audio
+        # tap start; those two start side by side (each waits on its own
+        # thread, ~0.6 s apiece warm, far longer just after boot).
+        if os.environ.get("XENON_RING_INPROCESS") != "1" or os.environ.get("XENON_LYRICS_INPROCESS") != "1":
+            from . import layer_host
+            layer_host.prespawn(2)
+        media = threading.Thread(target=self._now_playing.start, name="xenon-media-start", daemon=True)
+        media.start()
         audio_ok, _ = self._audio.start()
+        media.join(timeout=10.0)
 
         user.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
         user.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -1182,17 +1210,24 @@ class MusicWidget:
             "vinyl": dock.vinyl_box(dock_full),
         }
         surfaces: dict[str, _LayeredSurface] = {}
+        remotes = {}
+        if os.environ.get("XENON_RING_INPROCESS") != "1":
+            remotes["ring"] = _RingProcess(boxes["ring"], height, layout)
+        if os.environ.get("XENON_LYRICS_INPROCESS") != "1":
+            remotes["lyrics"] = _LyricProcess(boxes["lyrics"], height)
+        for remote in remotes.values():
+            remote.begin()                  # both children import side by side
         for name in order:
             box = boxes[name]
-            if name == "lyrics" and os.environ.get("XENON_LYRICS_INPROCESS") != "1":
-                remote = _LyricProcess(box, height)
+            if name in remotes:
+                remote = remotes[name]
                 if remote.create():
                     remote.set_opacity(255 * settings.opacity)
                     surfaces[name] = remote
                     continue
             surface = _LayeredSurface(box.w, box.h, x=box.x, y=box.y)
             if not surface.create():
-                for made in surfaces.values():
+                for made in list(surfaces.values()) + [r for r in remotes.values() if r not in surfaces.values()]:
                     made.close()
                 return "stop"
             surface.opacity = 0 if name in corner_names else int(255 * settings.opacity)
@@ -1222,6 +1257,11 @@ class MusicWidget:
                 args=(share, dock_stop, surfaces, boxes, pointer, dock_full, width, height, floor))
             dock_thread.start()
         lyric_proc = surfaces["lyrics"] if isinstance(surfaces["lyrics"], _LyricProcess) else None
+        ring_proc = surfaces["ring"] if isinstance(surfaces["ring"], _RingProcess) else None
+        ring_sent: dict = {}
+        from .music_onsets import BANDS, OnsetDetector, BeatBand
+        self._onsets = OnsetDetector()
+        self._bands = {name: BeatBand(*spec) for name, spec in BANDS.items() if name != "bass"}
         lyric_sent: dict = {}
         lyric_thread = threading.Thread(
             target=self._lyric_loop, daemon=True, name="xenon-music-lyrics",
@@ -1247,10 +1287,16 @@ class MusicWidget:
         orb_idle_done = False
         recorded = None
         result = "stop"
+        loop_stats = os.environ.get("XENON_DOCK_FPS") == "1"
+        ring_ticks, loop_busy, loop_n, loop_since, loop_mark, loop_slept = 0, 0.0, 0, time.monotonic(), time.monotonic(), 0.0
 
         try:
             while not self._stop.is_set():
                 now = time.monotonic()
+                if loop_stats:
+                    loop_busy += max(0.0, now - loop_mark - loop_slept)
+                    loop_n += 1
+                    loop_mark, loop_slept = now, 0.0
                 if surfaces["card"].pump() % 2:
                     if self.overlay and not self.fullscreen:
                         # Back to the wallpaper with fresh windows: layers that
@@ -1347,7 +1393,7 @@ class MusicWidget:
                     want = (self._track_key, len(lines), lines[0] if lines else None)
                     if lyric_sent.get("lines") != want:
                         lyric_sent["lines"] = want
-                        lyric_proc.send("lines", want, lines)
+                        lyric_proc.send("lines", want, lines, res.get("words") or {})
                     if lyric_sent.get("settings") is not settings:
                         lyric_sent["settings"] = settings
                         from dataclasses import asdict as _asdict
@@ -1420,15 +1466,24 @@ class MusicWidget:
                         surfaces["card"].push(image)
 
                 # -- corners: one picture per colour, the beat sets opacity --
-                look = (accent, settings.corner_glow > 0)
+                tones = (scene.glow_colors(self._palette, accent) if settings.accent == "album"
+                         else [accent] * 3)
+                look = (tuple(tones), settings.corner_glow > 0)
                 if corner_key != look:
                     corner_key = look
                     with self._painting():
-                        for name in corner_names:
+                        for i, name in enumerate(corner_names):
                             box_ = boxes[name]
                             kind, where = name.split("_", 1)
-                            draw = scene.corner_glow if kind == "corner" else scene.edge_glow
-                            surfaces[name].push(draw(box_.w, box_.h, where, accent) if look[1] else blank[name])
+                            if not look[1]:
+                                surfaces[name].push(blank[name])
+                            elif kind == "corner":
+                                surfaces[name].push(scene.corner_glow(box_.w, box_.h, where, tones[i % 3]))
+                            else:
+                                # The tone drifts between two of the cover's
+                                # colours along each edge.
+                                surfaces[name].push(scene.edge_glow(box_.w, box_.h, where, tones[i % 3],
+                                                                    tones[(i + 1) % 3]))
 
                 # -- orb: halo once per look, ring every frame, disc half rate --
                 art_key = (id(self._cover), art_d, accent, settings.disc, settings.halo, settings.backdrop)
@@ -1448,30 +1503,56 @@ class MusicWidget:
                 active = playing or fading or max(map(abs, self._bars), default=0.0) >= 0.004
                 if track and (active or not orb_idle_done):
                     if now < next_ring:
-                        time.sleep(min(0.008, max(0.002, next_ring - now)))
+                        time.sleep(min(0.008, max(0.001, next_ring - now)))
                         continue
-                    next_ring = now + 1.0 / settings.fps
+                    # Drawn here (no child process), 60 fps would starve the
+                    # rest of the widget: cap it at 30. Keep to the schedule
+                    # (a frame due every period) rather than "period after
+                    # whenever the loop came round", which lost a frame in two.
+                    period = 1.0 / (settings.fps if ring_proc is not None else min(settings.fps, 30))
+                    next_ring = next_ring + period if now - next_ring < period else now + period
+                    if loop_stats:
+                        ring_ticks += 1
+                        if now - loop_since >= 5.0:
+                            print(f"music widget: ring frames sent {ring_ticks / (now - loop_since):.0f}/s, "
+                                  f"loop busy {loop_busy / max(1, loop_n) * 1000:.1f} ms x {loop_n}", flush=True)
+                            ring_ticks, loop_busy, loop_n, loop_since = 0, 0.0, 0, now
                     if audio_ok and playing:
                         samples = self._audio.read_latest(2048)
                         rate = self._audio.format.sample_rate if self._audio.format else 48000
-                        target = [min(1.2, v * settings.sensitivity) for v in spectrum_bars(samples, rate, 64)]
+                        raw = spectrum_bars(samples, rate, 64)
+                        target = [min(1.2, v * settings.sensitivity) for v in raw]
+                        # Voice bursts, for the lyric timing (the lyric layer
+                        # turns the moment into a song position).
+                        if (lyric_proc is not None and settings.follow_voice
+                                and self._onsets.feed(raw, now)):
+                            lyric_proc.send("onset", now)
                     else:
                         target = [0.0] * 64
                     keep = settings.smoothing
-                    self._bars = smooth_bars(
-                        self._bars, target,
-                        attack=0.8 - 0.55 * keep,
-                        decay=(0.4 - 0.36 * keep) if playing else 0.35,
-                    )
                     dt = min(now - last_tick, 0.25)
                     last_tick = now
-                    if playing:
-                        self._spin = (self._spin - dt * settings.spin_speed) % 360.0
+                    # The easing rates were tuned per frame at 30 fps; scale
+                    # them by the real frame time so 60 fps feels the same.
+                    per = dt * 30
+                    self._bars = smooth_bars(
+                        self._bars, target,
+                        attack=1 - (1 - (0.8 - 0.55 * keep)) ** per,
+                        decay=1 - (1 - ((0.4 - 0.36 * keep) if playing else 0.35)) ** per,
+                    )
+                    # The record winds down when paused and back up on play,
+                    # rather than stopping dead.
+                    want_v = settings.spin_speed if playing else 0.0
+                    self._spin_v = getattr(self, "_spin_v", want_v)
+                    self._spin_v += (want_v - self._spin_v) * min(1.0, dt * 2.2)
+                    if abs(self._spin_v) > 0.05:
+                        self._spin = (self._spin - dt * self._spin_v) % 360.0
                     energy = sum(self._bars[:12]) / 12 if self._bars else 0.0
                     # Beat bounce: a kick is bass well above its recent
                     # average; the pulse jumps on it and eases back down.
                     bass = sum(self._bars[:6]) / 6 if self._bars else 0.0
-                    self._bass_avg = 0.92 * getattr(self, "_bass_avg", bass) + 0.08 * bass
+                    mix = 0.92 ** per
+                    self._bass_avg = mix * getattr(self, "_bass_avg", bass) + (1 - mix) * bass
                     # The bass level depends on the song and the volume (it
                     # can sit near 0.02): judge it against its own recent
                     # peak, so every track pulses about as hard.
@@ -1483,14 +1564,20 @@ class MusicWidget:
                     # each kick (only the windows' opacity changes).
                     glow = (settings.corner_glow * min(1.0, 0.85 * self._pulse + 0.35 * level ** 2)
                             if playing else 0.0)
+                    # The floor follows the bass, the walls the mids and the
+                    # ceiling the highs (or all of it the bass), each judged
+                    # against its own recent peak.
+                    drive = {name: self._bands[name].update(self._bars, dt, playing) for name in self._bands}
                     # Each edge answers a little differently (the bottom
                     # hardest) and sways on its own, so it never reads as
                     # one even frame.
                     for i, name in enumerate(corner_names):
+                        band = _EDGE_BAND.get(name, "bass") if settings.glow_bands else "bass"
+                        strength = settings.corner_glow * drive[band] if band != "bass" else glow
                         weight = _EDGE_WEIGHT.get(name, 0.85)
                         sway = 0.75 + 0.25 * math.sin(now * (0.7 + 0.37 * i) + i * 1.9)
                         surfaces[name].set_opacity(
-                            255 * settings.opacity * min(1.0, glow * weight * sway) * fade_in)
+                            255 * settings.opacity * min(1.0, strength * weight * sway) * fade_in)
                     if os.environ.get("XENON_DOCK_FPS") == "1":
                         self._glow_max = max(getattr(self, "_glow_max", 0.0), glow)
                         if now - getattr(self, "_glow_logged", 0.0) > 5:
@@ -1501,10 +1588,19 @@ class MusicWidget:
                             self._glow_max = 0.0
                     scale = 1.0 + 0.07 * settings.bounce * self._pulse
                     box = layout.orb_box
-                    surfaces["ring"].push_raw(scene.render_ring_bgra(
-                        box, layout, self._bars, playing, energy, accent, height, settings,
-                        intro=intro if track else 0.0, diameter=int(art_d * scale),
-                    ), box.w, box.h)
+                    if ring_proc is not None:
+                        # Drawn in its own process: send the numbers only.
+                        if ring_sent.get("settings") is not settings:
+                            ring_sent["settings"] = settings
+                            from dataclasses import asdict as _asdict
+                            ring_proc.send("settings", _asdict(settings))
+                        ring_proc.send("frame", [round(v, 4) for v in self._bars], playing, energy,
+                                       tuple(accent), intro if track else 0.0, int(art_d * scale))
+                    else:
+                        surfaces["ring"].push_raw(scene.render_ring_bgra(
+                            box, layout, self._bars, playing, energy, accent, height, settings,
+                            intro=intro if track else 0.0, diameter=int(art_d * scale),
+                        ), box.w, box.h)
                     # The bounce has only ~a dozen visible sizes: quantise and
                     # cache each one's packed bytes while the disc stays still.
                     level = int(round((scale - 1.0) / 0.006))
@@ -1603,7 +1699,10 @@ class MusicWidget:
         press = 0.0
         drawn = vinyl_drawn = None
         repaint = share.repaint
-        spin = 0.0
+        spin = spin_v = 0.0
+        shown_cover = shown_content = swap_from = None
+        swap_at = 0.0
+        SWAP_S = 0.8
         last_vinyl = 0.0
         last = time.monotonic()
         count_fps = os.environ.get("XENON_DOCK_FPS") == "1"
@@ -1689,16 +1788,35 @@ class MusicWidget:
                 openness = min(1.0, openness + step) if open_ else max(0.0, openness - step * 1.4)
                 press = max(0.0, press - dt / 0.16)
                 share.openness = openness
-                if playing:
-                    spin = (spin + dt * 90.0) % 360.0
+                # The record winds down on pause and back up on play.
+                spin_v += ((90.0 if playing else 0.0) - spin_v) * min(1.0, dt * 2.5)
+                if spin_v > 0.5:
+                    spin = (spin + dt * spin_v) % 360.0
                 eased = dock.ease_out_cubic(openness)
+                # A new song: the old record drops out of the corner and the
+                # new one rises in with its cover (only while closed).
+                cover_id = id(content.cover) if content.cover is not None else None
+                if cover_id != shown_cover:
+                    if shown_cover is not None and shown_content is not None and eased < 0.01:
+                        swap_from, swap_at = shown_content, now
+                    shown_cover = cover_id
+                show, drop = content, 0.0
+                if swap_from is not None:
+                    t = (now - swap_at) / SWAP_S
+                    if t >= 1.0:
+                        swap_from = None
+                    elif t < 0.42:
+                        show, drop = swap_from, (t / 0.42) ** 2          # falls away
+                    else:
+                        drop = 1.0 - dock.ease_out_back((t - 0.42) / 0.58)    # rises, settles
+                shown_content = content
                 with self._painting():
                     frame = (round(openness, 3), hover, id(content), accent)
                     if frame != drawn:
                         drawn = frame
                         surfaces["dock"].push(renderer.render(geom, content, openness, hover, accent,
                                                               draw_disc=False))
-                    turn = (round(spin, 2), round(eased, 3), round(press, 2), id(content.cover))
+                    turn = (round(spin, 2), round(eased, 3), round(press, 2), id(show.cover), round(drop, 3))
                     # The grown record costs ~13 ms a frame (mostly the
                     # turn itself): 40 fps while the menu is open.
                     calm = eased > 0.99 and turn[1:] == (vinyl_drawn or (None,))[1:]
@@ -1706,9 +1824,11 @@ class MusicWidget:
                         vinyl_drawn = turn
                         last_vinyl = now
                         surfaces["vinyl"].push(renderer.render_vinyl(
-                            geom, boxes["vinyl"], content, eased, accent, press, spin))
+                            geom, boxes["vinyl"], show, eased, accent, press, spin,
+                            drop=int(drop * geom.disc * 1.15)))
                         frames += 1
-                busy = playing or 0.0 < openness < 1.0 or press > 0.0 or inside
+                busy = (playing or spin_v > 0.5 or swap_from is not None
+                        or 0.0 < openness < 1.0 or press > 0.0 or inside)
             except Exception as error:
                 print(f"music widget: dock frame failed: {error}", flush=True)
                 time.sleep(0.5)

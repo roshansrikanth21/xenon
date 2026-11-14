@@ -92,7 +92,8 @@ class MusicSettings:
     bounce: float = 1.0              # how hard the disc pulses on the beat
     corner_glow: float = 1.0         # the screen edges light up on the bass (0 = off)
     glow_shape: str = "edges"        # edges (all four, full length) | corners
-    fps: int = 30
+    glow_bands: bool = True          # bottom: bass, sides: mids, top: highs (off: all bass)
+    fps: int = 60                    # the ring draws in its own process, so 60 is affordable
     halo: bool = False               # soft light behind the disc (off: looked cheap)
     backdrop: float = 0.0            # dark pool of shade behind the orb
     # lyrics
@@ -109,6 +110,7 @@ class MusicSettings:
     lyric_lift: float = 1.0          # how far a sung word rises
     lyric_offset: float = 0.0        # seconds; + shows the lyrics sooner
     lyric_fps: int = 60              # lyric animation frame rate
+    follow_voice: bool = True        # nudge guessed word timing onto the singing it hears
     # card
     show_card: bool = True
     suggestions: bool = True         # dock suggests similar songs (asks Deezer)
@@ -138,7 +140,7 @@ def parse_color(text: str) -> tuple[int, int, int] | None:
         return None
 
 
-SETTINGS_VERSION = 4
+SETTINGS_VERSION = 5
 
 # The look from the reference clip: a big lit album globe, a dense ring of
 # long white rays, no halo, poster lyrics. Applied over the current settings
@@ -146,7 +148,7 @@ SETTINGS_VERSION = 4
 VIDEO_LOOK = {
     "disc": "glow", "visualizer": "rays", "bar_count": 120, "ray_length": 1.0,
     "orb_size": 1.0, "opacity": 1.0, "accent": "album", "halo": False,
-    "backdrop": 0.0, "glow": 0.6, "fps": 30, "spin_speed": 0.0, "bounce": 1.0,
+    "backdrop": 0.0, "glow": 0.6, "fps": 60, "spin_speed": 0.0, "bounce": 1.0,
     "sensitivity": 1.0, "smoothing": 0.5,
     "show_lyrics": True, "lyric_style": "poster", "lyric_case": "upper",
     "lyric_align": "left", "lyric_size": 1.0, "show_upcoming": True,
@@ -176,6 +178,10 @@ def _migrate(data: dict) -> dict:
         data = dict(data)
         if data.get("spin_speed") == 9.0:     # v4: the disc stays still and bounces
             data.pop("spin_speed")
+    if version < 5:
+        data = dict(data)
+        if data.get("fps") == 30:             # v5: the ring has its own process; 60 fps
+            data.pop("fps")
     return data
 
 

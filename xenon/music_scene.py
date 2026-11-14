@@ -151,16 +151,28 @@ def singing_pace(lines: list[tuple[int, str]]) -> float | None:
 
 
 def word_spans(line_start: int, line_end: int, words: list[str],
-               pace: float | None = None) -> tuple[list[int], list[int]]:
-    """(starts, ends) of each word, in ms. LRCLIB gives line timestamps
-    only, so the line's singing time is shared out by syllables. With the
-    song's ``pace`` a line is sung in about the time its syllables take,
-    not stretched over a pause before the next line (which made the
-    highlight crawl far behind the voice)."""
+               pace: float | None = None, known=None, onsets=None) -> tuple[list[int], list[int]]:
+    """(starts, ends) of each word, in ms.
+
+    ``known`` is the line's real word timing, (starts, end or None), from
+    an enhanced LRC; it is used as is. Otherwise LRCLIB gives line
+    timestamps only, so the line's singing time is shared out by
+    syllables. With the song's ``pace`` a line is sung in about the time
+    its syllables take, not stretched over a pause before the next line
+    (which made the highlight crawl far behind the voice). ``onsets``
+    (song ms where the voice started something) then pull those guesses
+    onto the real word starts nearby."""
     if not words:
         return [], []
     span = max(400, min(line_end - line_start, 8000))
     counts = [syllables(w) for w in words]
+    if known and len(known[0]) == len(words):
+        starts = [int(s) for s in known[0]]
+        last = known[1]
+        if last is None or last <= starts[-1]:
+            per = (pace or 0.25) * 1000
+            last = min(line_end, starts[-1] + int(max(180, counts[-1] * per * 1.3)))
+        return starts, starts[1:] + [int(last)]
     if pace:
         sing = min(span * 0.95, sum(counts) * pace * 1000 * 1.08 + 120)
     else:
@@ -171,7 +183,14 @@ def word_spans(line_start: int, line_end: int, words: list[str],
     for weight in weights:
         starts.append(int(t))
         t += sing * weight / total
-    ends = starts[1:] + [int(line_start + sing)]
+    finish = int(line_start + sing)
+    if onsets:
+        from .music_onsets import snap_starts
+
+        moved = snap_starts(starts, onsets, line_end)
+        finish += moved[-1] - starts[-1]
+        starts = moved
+    ends = starts[1:] + [max(finish, starts[-1] + 120)]
     return starts, ends
 
 
@@ -313,11 +332,11 @@ LINE_ENTRY_DELAY_MS = 80
 
 
 def word_progress(start: int, end: int, words: list[str], position_ms: int, motion: str = "wipe",
-                  pace: float | None = None) -> list[float]:
+                  pace: float | None = None, known=None, onsets=None) -> list[float]:
     """0..1 per word: how far its highlight has got. A wipe takes as long
     as the word is sung (kept between 0.12 and 1.1 s); fade and pop take a
     fixed short time from the word's start."""
-    starts, ends = word_spans(start, end, words, pace)
+    starts, ends = word_spans(start, end, words, pace, known, onsets)
     out = []
     for ws, we in zip(starts, ends):
         if motion == "wipe":
@@ -495,10 +514,14 @@ class LyricAnimator:
         return key, out
 
     def frame_region(self, lines, position_ms: int, duration_ms: int, box: Box, accent=(255, 255, 255),
-                     screen_height: int = 1440, settings=None):
+                     screen_height: int = 1440, settings=None, word_times=None, onsets=None):
         """(key, image, (x, y)): just the part of the layer that holds
         anything, and where it goes. Everything else is transparent; the
-        widget writes only this block, never a full-size frame."""
+        widget writes only this block, never a full-size frame.
+
+        ``word_times`` maps a line's start to its real word timing (enhanced
+        LRC); ``onsets`` are song-ms voice bursts heard so far, which the
+        guessed timing of other lines is pulled onto."""
         st = _settings(settings)
         accent = tuple(accent)
         motion = getattr(st, "lyric_motion", "wipe")
@@ -528,7 +551,16 @@ class LyricAnimator:
         if motion == "all":
             progress = [1.0] * len(words)
         else:
-            progress = word_progress(start, end, words, position_ms, motion, self._pace(lines))
+            known = word_times.get(start) if word_times else None
+            near = [o for o in onsets if start - 200 <= o <= end] if (onsets and not known) else None
+            progress = word_progress(start, end, text.split(), position_ms, motion, self._pace(lines),
+                                     known, near)
+            # A burst heard a moment after a word's guessed start moves the
+            # word later; never let its highlight slide back for that.
+            held = self._held if getattr(self, "_held_line", None) == (index, text) else None
+            if held is not None and len(held) == len(progress) and position_ms >= self._held_at:
+                progress = [max(a, b) for a, b in zip(progress, held)]
+            self._held_line, self._held, self._held_at = (index, text), progress, position_ms
         q = tuple(round(v * self.STEPS) / self.STEPS for v in progress)
         since = position_ms - start
         entry = 1.0 if (line_motion == "cut" or style == "karaoke") else \
@@ -1062,6 +1094,19 @@ def accent_from_palette(palette: list[tuple[int, int, int]]) -> tuple[int, int, 
     return (int(r * 255), int(g * 255), int(b * 255))
 
 
+def glow_colors(palette, accent) -> list[tuple[int, int, int]]:
+    """Two or three bright tones from the cover for the edge glow, the
+    accent first. Grey or black entries give way to the accent, so a
+    black-and-white cover still glows in one clean colour."""
+    out = [tuple(accent)]
+    for colour in (palette or [])[1:3]:
+        lit = accent_from_palette([colour])
+        out.append(lit if lit != (255, 255, 255) else tuple(accent))
+    while len(out) < 3:
+        out.append(out[-1])
+    return out
+
+
 # ------------------------------------------------------------------ split orb
 # The live widget draws the orb as three windows so each frame only redraws
 # what moves: the halo (static per track), the ring (every frame, built
@@ -1082,10 +1127,18 @@ def render_halo(box: Box, layout: SceneLayout, art: OrbArt) -> Image.Image:
     return image
 
 
-def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: bool, energy: float,
-                     accent=(255, 255, 255), screen_height: int = 1440, settings=None,
-                     intro: float = 1.0, diameter: int | None = None) -> bytes:
-    """The visualizer ring as premultiplied BGRA bytes for ``box``."""
+def ring_alpha(box: Box, layout: SceneLayout, bars: list[float], playing: bool, energy: float,
+               screen_height: int = 1440, settings=None, intro: float = 1.0,
+               diameter: int | None = None) -> Image.Image:
+    """The visualizer ring's coverage ("L") for ``box``: rays plus sheen."""
+    shapes = ring_shapes(box, layout, bars, playing, energy, screen_height, settings, intro, diameter)
+    return ring_sheen(shapes, diameter or layout.orb_diameter, settings, intro)
+
+
+def ring_shapes(box: Box, layout: SceneLayout, bars: list[float], playing: bool, energy: float,
+                screen_height: int = 1440, settings=None, intro: float = 1.0,
+                diameter: int | None = None) -> Image.Image:
+    """Just the rays (antialiased), no sheen."""
     st = _settings(settings)
     d = diameter or layout.orb_diameter
     cx, cy = layout.orb_cx - box.x, layout.orb_cy - box.y
@@ -1102,6 +1155,12 @@ def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: 
         shapes = big.reduce(k) if k > 1 else big
     else:
         shapes = Image.new("L", (box.w, box.h), 0)
+    return shapes
+
+
+def ring_sheen(shapes: Image.Image, d: int, settings=None, intro: float = 1.0) -> Image.Image:
+    """The rays with their faint sheen, faded in by ``intro``."""
+    st = _settings(settings)
     alpha = shapes
     if st.glow > 0:
         # A faint, tight sheen right on the rays; the rays stay crisp.
@@ -1110,6 +1169,20 @@ def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: 
     if intro < 0.999:
         k = max(0.0, min(1.0, intro))
         alpha = alpha.point(lambda v: int(v * k))
+    return alpha
+
+
+def render_ring_bgra(box: Box, layout: SceneLayout, bars: list[float], playing: bool, energy: float,
+                     accent=(255, 255, 255), screen_height: int = 1440, settings=None,
+                     intro: float = 1.0, diameter: int | None = None) -> bytes:
+    """The visualizer ring as premultiplied BGRA bytes for ``box``."""
+    alpha = ring_alpha(box, layout, bars, playing, energy, screen_height, settings, intro, diameter)
+    return pack_ring(box, alpha, accent)
+
+
+def pack_ring(box: Box, alpha: Image.Image, accent=(255, 255, 255)) -> bytes:
+    """The ring's alpha in the accent colour, as premultiplied BGRA. Only
+    ever called from one thread at a time (it reuses one layer)."""
     # One solid-colour layer per size/colour, reused every frame: swap its
     # alpha in and let PIL's "BGRa" packer premultiply in C (one pass,
     # instead of three per-channel lookups and a merge).
@@ -1146,11 +1219,25 @@ def _wobble(n: int, seed: int, waves: int = 4):
 _EDGE_SEEDS = {"top": 11, "bottom": 23, "left": 37, "right": 51}
 
 
-def edge_glow(w: int, h: int, side: str, accent=(255, 255, 255)) -> Image.Image:
+def edge_glow(w: int, h: int, side: str, accent=(255, 255, 255), second=None) -> Image.Image:
     """Soft light along one screen edge, in the accent colour. Kept close to
     the edge and deliberately uneven: thicker, brighter patches drift along
     it and others fade almost out, so it reads as light spilling in, not a
-    neon frame."""
+    neon frame. With a ``second`` colour the tone drifts between the two
+    along the edge."""
+    if second is not None and tuple(second) != tuple(accent):
+        import numpy as np
+
+        img = edge_glow(w, h, side, accent)
+        along_n = w if side in ("top", "bottom") else h
+        mix = _wobble(along_n, _EDGE_SEEDS.get(side, 7) + 200, 2)[:, None]
+        tone = (np.asarray(accent, np.float32)[None, :] * (1 - mix)
+                + np.asarray(second, np.float32)[None, :] * mix).astype(np.uint8)     # (along, 3)
+        rgb = np.broadcast_to(tone[None, :, :], (h, w, 3)) if side in ("top", "bottom") else \
+            np.broadcast_to(tone[:, None, :], (h, w, 3))
+        out = Image.fromarray(np.ascontiguousarray(rgb), "RGB").convert("RGBA")
+        out.putalpha(img.getchannel("A"))
+        return out
     key = ("edge", w, h, side)
     mask = _CORNER_MASKS.get(key)
     if mask is None:

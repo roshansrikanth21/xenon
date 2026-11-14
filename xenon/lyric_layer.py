@@ -52,6 +52,18 @@ def position_now(state: dict, now: float | None = None) -> int:
     return int(pos)
 
 
+def song_times(onsets, position_ms: int, now: float, keep_ms: int = 9000) -> list[int]:
+    """Voice bursts (monotonic seconds, shared by both processes on
+    Windows) as song positions, judged from where the song is now. Only
+    the last few seconds matter."""
+    out = []
+    for t in onsets:
+        ago = (now - t) * 1000
+        if 0 <= ago <= keep_ms:
+            out.append(int(position_ms - ago))
+    return out
+
+
 def run(conn, box, screen_height: int) -> None:
     from PIL import Image
 
@@ -71,6 +83,9 @@ def run(conn, box, screen_height: int) -> None:
     settings = MusicSettings()
     state: dict = {}
     lines: list = []
+    word_times: dict = {}
+    from collections import deque
+    onsets: deque = deque(maxlen=48)       # monotonic times of voice bursts
     anim = scene.LyricAnimator()
     clock = scene.LyricClock()
     progress = SpotifyProgress()
@@ -99,7 +114,11 @@ def run(conn, box, screen_height: int) -> None:
                         drawn = object()
                 elif kind == "lines":
                     lines = msg[2]
+                    word_times = msg[3] if len(msg) > 3 else {}
+                    onsets.clear()
                     drawn = object()
+                elif kind == "onset":
+                    onsets.append(msg[1])
                 elif kind == "settings":
                     settings = coerce(msg[1])
                     drawn = object()
@@ -133,9 +152,11 @@ def run(conn, box, screen_height: int) -> None:
                     reported = position_now(state)
                 position = clock.now(reported, playing, state.get("key"))
                 position += int(settings.lyric_offset * 1000)
+                heard = (song_times(onsets, position, time.monotonic())
+                         if playing and getattr(settings, "follow_voice", True) else None)
                 key, image, at = anim.frame_region(lines, position, state.get("duration", 0), box,
                                                    tuple(state.get("accent", (255, 255, 255))), screen_height,
-                                                   settings)
+                                                   settings, word_times, heard)
             if key != drawn:
                 drawn = key
                 surface.push_region(image, at)

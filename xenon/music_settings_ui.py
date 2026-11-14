@@ -181,7 +181,8 @@ class SettingsWindow:
         self._slider(viz, "ray_length", "Reach", 0.3, 2.0)
         self._slider(viz, "glow", "Glow", 0.0, 2.0)
         self._slider(viz, "bounce", "Beat bounce", 0.0, 2.0)
-        self._slider(viz, "corner_glow", "Edge glow (bass)", 0.0, 2.0)
+        self._slider(viz, "corner_glow", "Edge glow (beat)", 0.0, 2.0)
+        self._check(viz, "glow_bands", "Edges follow bass, mids and highs")
         self._choice(viz, "glow_shape", "Glow along", ms.GLOW_SHAPES,
                      {"edges": "All four edges", "corners": "Corners only"})
         self._slider(viz, "spin_speed", "Spin speed (deg/s, 0 = still)", 0.0, 60.0)
@@ -200,6 +201,7 @@ class SettingsWindow:
         self._slider(lyr, "lyric_lift", "Word lift", 0.0, 2.0)
         self._slider(lyr, "lyric_fps", "Smoothness (fps)", 20, 60, integer=True)
         self._slider(lyr, "lyric_offset", "Sync (s, + = sooner)", -2.0, 2.0)
+        self._check(lyr, "follow_voice", "Follow the singing (time words by the voice)")
 
         self._slider(audio, "sensitivity", "Sensitivity", 0.3, 3.0)
         self._slider(audio, "smoothing", "Smoothing", 0.0, 0.95)

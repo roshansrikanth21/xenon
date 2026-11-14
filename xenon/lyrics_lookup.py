@@ -199,6 +199,82 @@ def parse_lrc(source: str) -> list[tuple[int, str]]:
     return lines
 
 
+def _stamp_ms(minutes: str, seconds: str) -> int:
+    return int(minutes) * 60000 + round(float(seconds.replace(":", ".")) * 1000)
+
+
+_WORD_STAMP_PARTS = re.compile(r"<(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)>")
+
+
+def _word_times_in(rest: str, line_ms: int, offset: int):
+    """(starts, end) for one enhanced line's words, or None when it carries
+    too few word stamps to trust. A stamp inside a word (per syllable)
+    belongs to that word; a stamp after the last word is when it ends."""
+    text, marks, at = "", [], 0
+    for match in _WORD_STAMP_PARTS.finditer(rest):
+        text += rest[at:match.start()]
+        marks.append((len(text), max(0, _stamp_ms(match.group(1), match.group(2)) - offset)))
+        at = match.end()
+    text += rest[at:]
+    words = list(re.finditer(r"\S+", text))
+    if not words or not marks:
+        return None
+    starts: list = []
+    i = 0
+    for word in words:
+        found = None
+        while i < len(marks) and marks[i][0] < word.end():
+            if found is None:
+                found = marks[i][1]
+            i += 1
+        starts.append(found)
+    end = marks[i][1] if i < len(marks) else None
+    if sum(s is None for s in starts) * 2 > len(starts):
+        return None
+    # Fill the odd unstamped word between its neighbours.
+    for k, value in enumerate(starts):
+        if value is None:
+            before = next((starts[j] for j in range(k - 1, -1, -1) if starts[j] is not None), line_ms)
+            after = next((starts[j] for j in range(k + 1, len(starts)) if starts[j] is not None),
+                         end if end is not None else before + 300)
+            starts[k] = (before + after) // 2 if k else min(line_ms, after)
+    for k in range(1, len(starts)):
+        starts[k] = max(starts[k], starts[k - 1])
+    return starts, end
+
+
+def parse_word_times(source: str) -> dict:
+    """Enhanced LRC ("[00:12.00]<00:12.00>Hello <00:12.48>world <00:13.10>"):
+    each line's start (ms, as ``parse_lrc`` gives it) -> (word starts, end
+    or None). Lines without word stamps are left out, so an ordinary LRC
+    gives {}."""
+    out: dict = {}
+    offset = 0
+    for raw in str(source or "").splitlines():
+        header = _OFFSET.match(raw)
+        if header:
+            offset = int(header.group(1)) or 0
+            continue
+        stamps: list[int] = []
+        rest = raw
+        while True:
+            match = _STAMP.match(rest)
+            if not match:
+                break
+            stamps.append(_stamp_ms(match.group(1), match.group(2)))
+            rest = rest[match.end():]
+        if not stamps or "<" not in rest:
+            continue
+        for time_ms in stamps:
+            line_ms = max(0, time_ms - offset)
+            found = _word_times_in(rest, line_ms, offset)
+            # Word stamps are absolute: a line sung twice ("[01:00][02:00]")
+            # only matches the stamp its words sit near.
+            if found and abs(found[0][0] - line_ms) <= 1500:
+                out[line_ms] = found
+    return out
+
+
 # ------------------------------------------------------------------ ranking
 
 def rank(wanted: dict, duration_ms: int, candidate: dict) -> float:
@@ -238,7 +314,11 @@ def to_result(candidate: dict) -> dict | None:
     if candidate.get("syncedLyrics"):
         lines = parse_lrc(candidate["syncedLyrics"])
         if lines:
-            return {"lines": lines, "synced": True, "instrumental": False}
+            result = {"lines": lines, "synced": True, "instrumental": False}
+            words = parse_word_times(candidate["syncedLyrics"])
+            if words:                           # only enhanced LRC has word stamps
+                result["words"] = words
+            return result
     plain = candidate.get("plainLyrics")
     if plain and plain.strip():
         return {"lines": [], "synced": False, "instrumental": False, "untimed": True}
