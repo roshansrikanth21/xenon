@@ -369,7 +369,7 @@ function drawOcclusion(k) {
 // and a small readout: grip, openness, rough distance.
 const MONO_FONT = '"JetBrains Mono", ui-monospace, monospace';
 function openness(h) {
-  const L = h.lm, c = {x: (L[0].x + L[5].x + L[9].x + L[13].x + L[17].x) / 5, y: (L[0].y + L[5].y + L[9].y + L[13].y + L[17].y) / 5};
+  const L = h.iso || h.lm, c = {x: (L[0].x + L[5].x + L[9].x + L[13].x + L[17].x) / 5, y: (L[0].y + L[5].y + L[9].y + L[13].y + L[17].y) / 5};
   const d = [8, 12, 16, 20].reduce((s, i) => s + Math.hypot(L[i].x - c.x, L[i].y - c.y), 0) / 4 / h.size;
   return Math.min(1, Math.max(0, (d - .6) / .9));
 }

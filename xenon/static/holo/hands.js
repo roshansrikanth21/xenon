@@ -51,7 +51,12 @@ export class Hands {
     return { x: (w - vw * s) / 2 + x * vw * s, y: (h - vh * s) / 2 + p.y * vh * s };
   }
 
-  pose(lm, handed, was = {}) {
+  pose(raw, handed, was = {}) {
+    // Landmarks are normalised to the camera's width and height, so on a 16:9
+    // camera a horizontal distance reads 1.78x too short. Measure in true
+    // proportions (as the original does) by scaling x and z to the height.
+    const k = this.view && this.view.vw && this.view.vh ? this.view.vw / this.view.vh : 1;
+    const lm = k === 1 ? raw : raw.map(p => ({ x: p.x * k, y: p.y, z: (p.z || 0) * k }));
     const size = D(lm[0], lm[9]) || 1e-3;
     const pinchD = D(lm[4], lm[8]) / size;
     const ext = (tip, pip) => D(lm[tip], lm[0]) > D(lm[pip], lm[0]) * 1.12;
@@ -78,8 +83,8 @@ export class Hands {
     const up = -ny * flip / (Math.hypot(nx, ny, nz) || 1);
     const palmUp = palm && up > 0.6;                  // same bar as the original
     const angle = Math.atan2(lm[9].y - lm[0].y, lm[9].x - lm[0].x);
-    const center = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
-    return { lm, size, pinch, pinchD, point, fist, palm, palmUp, up, handed, angle, tip: lm[8], center };
+    const center = { x: (raw[0].x + raw[9].x) / 2, y: (raw[0].y + raw[9].y) / 2 };
+    return { lm: raw, iso: lm, size, pinch, pinchD, point, fist, palm, palmUp, up, handed, angle, tip: raw[8], center };
   }
 
   // Feed one MediaPipe result. now = ms.
