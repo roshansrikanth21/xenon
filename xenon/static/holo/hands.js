@@ -51,24 +51,32 @@ export class Hands {
     return { x: (w - vw * s) / 2 + x * vw * s, y: (h - vh * s) / 2 + p.y * vh * s };
   }
 
-  pose(lm, handed) {
+  pose(lm, handed, was = {}) {
     const size = D(lm[0], lm[9]) || 1e-3;
     const pinchD = D(lm[4], lm[8]) / size;
     const ext = (tip, pip) => D(lm[tip], lm[0]) > D(lm[pip], lm[0]) * 1.12;
     const ix = ext(8, 6), mx = ext(12, 10), rx = ext(16, 14), px = ext(20, 18);
-    const pinch = pinchD < 0.32;
+    // In a real fist the thumb wraps over the index, so thumb and index tips
+    // touch too; a pinch keeps the index tip clear of its own knuckle
+    // (fist ~0.2, pinch ~0.5, measured on real photos through MediaPipe).
+    // Hysteresis like the original: start below 0.30, let go above 0.42, so a
+    // jittery real hand doesn't flicker into accidental double pinches.
+    const fold = D(lm[8], lm[5]) / size;
+    const pinch = was.pinch ? pinchD < 0.42 && fold > 0.28 : pinchD < 0.30 && fold > 0.35;
     const fist = !ix && !mx && !rx && !px && !pinch;
     const point = ix && !mx && !rx && !px && !pinch;
     const palm = ix && mx && rx && px && !pinch && D(lm[8], lm[20]) / size > 0.55;   // fingers spread (real hands: ~0.6-1.2)
     // Palm up/down: the palm normal from (index base - wrist) x (pinky base - wrist).
-    // With z pointing into the screen, a right hand facing the camera has a
-    // negative normal z; handedness flips it. Palm up = fingers away + normal up.
     const ax = lm[5].x - lm[0].x, ay = lm[5].y - lm[0].y, az = (lm[5].z || 0) - (lm[0].z || 0);
     const bx = lm[17].x - lm[0].x, by = lm[17].y - lm[0].y, bz = (lm[17].z || 0) - (lm[0].z || 0);
-    const ny = az * bx - ax * bz;          // y component of the normal
+    const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
     const flip = handed === 'Left' ? -1 : 1;
-    // relative to hand size, so it works near or far from the camera
-    const palmUp = palm && ny * flip / (size * size) > 0.2;
+    // With the handedness flip this normal points OUT of the palm (checked on
+    // real photos: palm toward the camera gives z < 0, the back of the hand
+    // z > 0). Image y grows downward, so a palm facing the ceiling has a
+    // negative y. Unit length, so distance to the camera doesn't matter.
+    const up = -ny * flip / (Math.hypot(nx, ny, nz) || 1);
+    const palmUp = palm && up > 0.6;                  // same bar as the original
     const angle = Math.atan2(lm[9].y - lm[0].y, lm[9].x - lm[0].x);
     const center = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
     return { lm, size, pinch, pinchD, point, fist, palm, palmUp, angle, tip: lm[8], center };
@@ -79,7 +87,7 @@ export class Hands {
     const lms = (result && result.landmarks) || [];
     const handed = (result && (result.handedness || result.handednesses)) || [];
     const hands = lms.map((lm, i) => {
-      const h = this.pose(lm, handed[i] && handed[i][0] && handed[i][0].categoryName);
+      const h = this.pose(lm, handed[i] && handed[i][0] && handed[i][0].categoryName, this.prev[i] || {});
       h.i = i;
       h.screen = this.toScreen(h.tip);
       h.centerScreen = this.toScreen(h.center);
