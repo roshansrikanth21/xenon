@@ -348,14 +348,14 @@ def _static(name: str) -> str:
 
 # Xenon Core: three.js from its CDN, the models from here.
 CORE_CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; "
-            "connect-src 'self' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data: blob:; "
+            "connect-src 'self' blob: data: https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data: blob:; "
             "worker-src blob:; base-uri 'none'; form-action 'none'")
 
 
 # Xenon Holo: three.js + MediaPipe from jsDelivr, the hand model from
 # Google's model host, WASM for both decoders, the camera in-tab.
 HOLO_CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; "
-            "connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com; style-src 'unsafe-inline'; "
+            "connect-src 'self' blob: data: https://cdn.jsdelivr.net https://storage.googleapis.com; style-src 'unsafe-inline'; "
             "img-src 'self' data: blob:; media-src 'self' blob: mediastream:; worker-src blob: https://cdn.jsdelivr.net; "
             "base-uri 'none'; form-action 'none'")
 

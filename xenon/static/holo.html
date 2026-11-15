@@ -32,6 +32,8 @@ video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:s
 .top{position:fixed;top:24px;left:28px;right:28px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none}
 .settings{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;pointer-events:auto;max-width:640px}
 .settings button,.gbtn{background:var(--glass);border:1px solid var(--holo-3);color:var(--dim);font:10px var(--mono);letter-spacing:.18em;padding:7px 10px;cursor:pointer;backdrop-filter:blur(6px)}
+.stoggle{display:none}
+@media (max-width:720px){.settings button{display:none}.settings .stoggle,.settings.open button{display:inline-block}}
 .settings button.on{color:var(--holo);border-color:var(--holo-2)}
 .settings button:hover,.gbtn:hover{color:var(--fg);border-color:var(--holo-2)}
 #modeName{font-size:15px;letter-spacing:.42em;color:var(--holo);text-shadow:0 0 14px rgba(111,243,255,.45);text-align:right}
@@ -83,10 +85,10 @@ video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:s
 <div class="top">
   <div><div class="brand">XENON HOLO</div>
     <div class="settings">
-      <button data-act="setting" data-s="quality">QUALITY · AUTO</button><button data-act="setting" data-s="mirror">MIRROR</button>
+      <button class="stoggle" data-act="settings-toggle">SETTINGS</button><button data-act="setting" data-s="quality">QUALITY · AUTO</button><button data-act="setting" data-s="mirror">MIRROR</button>
       <button data-act="setting" data-s="invert">DEPTH INVERT</button><button data-act="setting" data-s="bw">B&amp;W</button>
       <button data-act="setting" data-s="dim">DIM</button><button data-act="setting" data-s="camera">CAMERA 1</button>
-      <button data-act="setting" data-s="labels">LABELS</button><button data-act="setting" data-s="skeleton">HANDS</button>
+      <button data-act="setting" data-s="labels">LABELS</button><button data-act="setting" data-s="skeleton">HANDS</button><button data-act="setting" data-s="occlusion">OCCLUSION</button>
       <button data-act="guide">? GUIDE</button>
     </div></div>
   <div><div class="k" style="text-align:right">Mode</div><div id="modeName">XENON</div></div>
@@ -116,13 +118,14 @@ video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:s
     <div class="grow"><b>PERIODIC LAB</b><span>Point to browse the elements; a quick pinch adds an atom to the mix (up to 12). Pinch a chip to remove it. Clap or pinch MIX: real molecules (H₂O, CO₂, CH₄, NaCl…) show their structure, anything else becomes a new element. Clap with an empty tray to bring the table back.</span></div>
     <div class="grow"><b>SHARDS</b><span>Six shards of Xenon: Music, Memory, Voice, Vision, Time, Power. Pinch one to take it out and read its file (live Xenon data). Flip an open hand palm-up for its artifact, palm-down for the shard. Clap to pull all six into the Xenon core; clap again to release them.</span></div></div>
   <div class="gsec"><h3>04 · SETTINGS &amp; KEYS</h3>
-    <div class="grow"><b>QUALITY</b><span>AUTO picks for this laptop. HIGH sharpest, MEDIUM most laptops, LOW lighter, SAFE runs tracking on the CPU. Or add ?quality=low to the link.</span></div>
+    <div class="grow"><b>QUALITY</b><span>AUTO picks for this laptop. HIGH sharpest, MEDIUM most laptops, LOW lighter, SAFE runs tracking on the CPU. Or add ?quality=low to the link. If it runs slowly, Holo offers a lower setting.</span></div>
+    <div class="grow"><b>OCCLUSION</b><span>Your real hand is drawn over the holograms, so it passes in front of them. HANDS shows the tracked skeleton.</span></div>
     <div class="grow"><b>VIEW</b><span>MIRROR flips the view, DEPTH INVERT swaps push/pull, B&amp;W the holographic grey look, DIM darkens a bright room, CAMERA switches cameras.</span></div>
-    <div class="grow"><b>KEYS</b><span>M menu · E explode/assemble · F mirror · I depth invert · B black &amp; white · C next camera · L labels · O hands overlay · D debug · Q quality · H guide · Esc close</span></div></div>
+    <div class="grow"><b>KEYS</b><span>M menu · E explode/assemble · F mirror · I depth invert · B black &amp; white · C next camera · L labels · O hand occlusion · K hand skeleton · D debug · Q quality · H guide · Esc close</span></div></div>
   <div class="gsec"><h3>05 · CREDITS</h3><div class="grow"><b>INSPIRED BY</b><span>Holo-Explorer by Augma Imaginarium (CC BY-NC 4.0). Core and ring models from their Futurist Lantern. Built for Xenon.</span></div></div>
   <button class="gbtn" data-act="guide" style="margin-top:28px">CLOSE GUIDE</button>
 </div></div>
 <div id="gate"><div><div class="brand" style="font-size:16px;margin-bottom:10px">XENON HOLO</div><div class="k" style="margin-bottom:26px">Hologram lab · hands only</div>
-<button id="go">START</button><p>Uses your webcam. Tracking runs in this tab; the picture never leaves your laptop. Press H any time for the guide.</p></div></div>
+<button id="go">START</button><p id="gatemsg">Uses your webcam. Tracking runs in this tab; the picture never leaves your laptop. Press H any time for the guide.</p></div></div>
 <script type="module" src="/holo/js/main.js"></script>
 </body></html>

@@ -168,6 +168,11 @@ class HoloTests(unittest.TestCase):
         self.assertIn(b"INSPIRED BY", page)                     # ours, credited as inspiration only
         self.assertIn(b"/holo/js/main.js", page)
 
+    def test_holo_csp_lets_models_load_their_textures(self):
+        from xenon import remote
+        connect = [d for d in remote.HOLO_CSP.split(";") if d.strip().startswith("connect-src")][0]
+        self.assertIn("blob:", connect)            # GLB textures arrive as blob: URLs
+
     def test_holo_modules(self):
         for name in ("main", "hands", "xenon", "reactor", "table", "elements", "shards"):
             code, body = self.get(f"/holo/js/{name}.js")

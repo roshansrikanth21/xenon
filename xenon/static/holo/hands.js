@@ -41,9 +41,14 @@ export class Hands {
   emit(name, data) { (this.listeners[name] || []).forEach(fn => { try { fn(data || {}); } catch (e) { console.error(e); } }); }
 
   // Map a landmark to view pixels (mirrored like a mirror when this.mirror).
+  // The video is shown with object-fit: cover, so when the window's shape
+  // differs from the camera's, part of the picture is cropped; map through it.
   toScreen(p) {
+    const { w, h, vw, vh } = this.view;
     const x = this.mirror ? 1 - p.x : p.x;
-    return { x: x * this.view.w, y: p.y * this.view.h };
+    if (!vw || !vh) return { x: x * w, y: p.y * h };
+    const s = Math.max(w / vw, h / vh);
+    return { x: (w - vw * s) / 2 + x * vw * s, y: (h - vh * s) / 2 + p.y * vh * s };
   }
 
   pose(lm, handed) {

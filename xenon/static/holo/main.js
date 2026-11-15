@@ -43,13 +43,14 @@ const QUALITY = {
 };
 const S = {
   quality: params.get('quality') || 'auto', mirror: true, depthInvert: false, bw: true, dim: false,
-  labels: true, skeleton: true, debug: false, camIndex: 0,
+  labels: true, skeleton: true, occlusion: true, debug: false, camIndex: 0,
 };
-function pickQuality() {
-  if (S.quality !== 'auto') return QUALITY[S.quality] || QUALITY.medium;
+function qualityName() {
+  if (QUALITY[S.quality]) return S.quality;
   const cores = navigator.hardwareConcurrency || 4;
-  return cores >= 12 ? QUALITY.high : cores >= 6 ? QUALITY.medium : QUALITY.low;
+  return cores >= 12 ? 'high' : cores >= 6 ? 'medium' : 'low';
 }
+function pickQuality() { return QUALITY[qualityName()]; }
 
 // ---- renderer + scene (transparent over the camera) -------------------------------------
 const canvas = $('gl');
@@ -88,11 +89,15 @@ poll(); setInterval(poll, 1500);
 // ---- HUD pieces: toast, card, tray, menu ----------------------------------------------------
 let toastT = 0;
 function toast(text) { const el = $('toast'); el.textContent = text; el.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('on'), 3200); }
-function card({title, kicker = '', rows = [], body = ''}) {
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+// Card text comes from modes and live status (track names), so it is always escaped.
+function card({title, kicker = '', rows = [], body = '', actions = []}) {
   const el = $('card');
-  el.innerHTML = `<div class="ck">${kicker}</div><div class="ct">${title}</div>` +
-    rows.map(([k, v]) => `<div class="cr"><span>${k}</span><b>${v}</b></div>`).join('') +
-    (body ? `<p>${body}</p>` : '') + `<button class="cx" data-act="close-card">CLOSE</button>`;
+  el.innerHTML = `<div class="ck">${esc(kicker)}</div><div class="ct">${esc(title)}</div>` +
+    rows.map(([k, v]) => `<div class="cr"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('') +
+    (body ? `<p>${esc(body)}</p>` : '') +
+    actions.map(a => `<button class="cx" data-act="${esc(a.act)}" data-s="${esc(a.s || '')}">${esc(a.label)}</button>`).join('') +
+    `<button class="cx" data-act="close-card">CLOSE</button>`;
   el.classList.add('on');
 }
 function closeCard() { $('card').classList.remove('on'); }
@@ -168,6 +173,7 @@ function act(el) {
   if (a === 'mix') { trayMix && trayMix(); return true; }
   if (a === 'setting') { setting(el.dataset.s); return true; }
   if (a === 'guide') { $('guide').classList.toggle('on'); return true; }
+  if (a === 'settings-toggle') { document.querySelector('.settings').classList.toggle('open'); return true; }
   return false;
 }
 document.addEventListener('click', e => { const el = e.target.closest('[data-act]'); if (el) act(el); });
@@ -182,20 +188,23 @@ function setting(s) {
   if (s === 'dim') S.dim = !S.dim;
   if (s === 'labels') S.labels = !S.labels;
   if (s === 'skeleton') S.skeleton = !S.skeleton;
+  if (s === 'occlusion') S.occlusion = !S.occlusion;
   if (s === 'debug') S.debug = !S.debug;
   if (s === 'camera') nextCamera();
+  if (s === 'lower') { const order = ['high', 'medium', 'low', 'safe']; S.quality = order[Math.min(3, order.indexOf(qualityName()) + 1)]; applyRatio(); restartTracking(); closeCard(); toast('QUALITY · ' + S.quality.toUpperCase()); }
   if (s === 'quality') { const order = ['auto', 'high', 'medium', 'low', 'safe']; S.quality = order[(order.indexOf(S.quality) + 1) % order.length]; applyRatio(); restartTracking(); }
   paintSettings();
 }
+const videoFilter = () => (S.bw ? 'grayscale(1) contrast(1.15) sepia(.35) hue-rotate(150deg) ' : '') + `brightness(${S.dim ? 0.18 : 0.42})`;
 function paintSettings() {
   const v = $('cam'); v.style.transform = S.mirror ? 'scaleX(-1)' : 'none';
-  v.style.filter = (S.bw ? 'grayscale(1) contrast(1.15) sepia(.35) hue-rotate(150deg) ' : '') + `brightness(${S.dim ? 0.18 : 0.42})`;
-  const label = {mirror: 'MIRROR', invert: 'DEPTH INVERT', bw: 'B&W', dim: 'DIM', labels: 'LABELS', skeleton: 'HANDS', debug: 'DEBUG'};
+  v.style.filter = videoFilter();
+  const label = {mirror: 'MIRROR', invert: 'DEPTH INVERT', bw: 'B&W', dim: 'DIM', labels: 'LABELS', skeleton: 'HANDS', occlusion: 'OCCLUSION', debug: 'DEBUG'};
   document.querySelectorAll('[data-s]').forEach(b => {
     const s = b.dataset.s;
     if (s === 'quality') b.textContent = 'QUALITY · ' + S.quality.toUpperCase();
     else if (s === 'camera') b.textContent = 'CAMERA ' + (S.camIndex + 1);
-    else { const on = {mirror: S.mirror, invert: S.depthInvert, bw: S.bw, dim: S.dim, labels: S.labels, skeleton: S.skeleton, debug: S.debug}[s]; b.textContent = label[s]; b.classList.toggle('on', !!on); }
+    else { const on = {mirror: S.mirror, invert: S.depthInvert, bw: S.bw, dim: S.dim, labels: S.labels, skeleton: S.skeleton, occlusion: S.occlusion, debug: S.debug}[s]; b.textContent = label[s]; b.classList.toggle('on', !!on); }
   });
   $('debug').style.display = S.debug ? 'block' : 'none';
 }
@@ -204,7 +213,7 @@ addEventListener('keydown', e => {
   if (k === 'escape') { if (menuOpen) closeMenu(); else if ($('guide').classList.contains('on')) $('guide').classList.remove('on'); else closeCard(); return; }
   if (mode && mode.key && mode.key(k)) return;
   ({m: () => menuOpen ? closeMenu() : openMenu(), f: () => setting('mirror'), i: () => setting('invert'), b: () => setting('bw'),
-    c: () => setting('camera'), l: () => setting('labels'), o: () => setting('skeleton'), d: () => setting('debug'),
+    c: () => setting('camera'), l: () => setting('labels'), o: () => setting('occlusion'), k: () => setting('skeleton'), d: () => setting('debug'),
     h: () => $('guide').classList.toggle('on'), q: () => setting('quality')}[k] || (() => {}))();
 });
 
@@ -216,8 +225,11 @@ async function startCamera() {
   const q = pickQuality();
   if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
   const device = cams[S.camIndex];
-  video.srcObject = await navigator.mediaDevices.getUserMedia({video: {...q.cam, ...(device ? {deviceId: {exact: device.deviceId}} : {facingMode: 'user'})}, audio: false});
+  const want = {...q.cam, ...(device ? {deviceId: {exact: device.deviceId}} : {facingMode: 'user'})};
+  try { video.srcObject = await navigator.mediaDevices.getUserMedia({video: want, audio: false}); }
+  catch (e) { if (e.name !== 'OverconstrainedError') throw e; video.srcObject = await navigator.mediaDevices.getUserMedia({video: true, audio: false}); }
   await video.play();
+  syncVideoSize();
   cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
 }
 async function nextCamera() { if (cams.length < 2) { toast('Only one camera found.'); return; } S.camIndex = (S.camIndex + 1) % cams.length; await startCamera(); paintSettings(); }
@@ -309,12 +321,38 @@ hands.on('resizeEnd', () => { if (manip) delete manip.userData._base; });
 
 // ---- overlay: hands, cursor, menu-hold ring ---------------------------------------------------
 const ov = $('ov'), og = ov.getContext('2d');
-function sizeOv() { ov.width = innerWidth * devicePixelRatio; ov.height = innerHeight * devicePixelRatio; hands.view = {w: innerWidth, h: innerHeight}; }
+function syncVideoSize() { hands.view = {w: innerWidth, h: innerHeight, vw: video.videoWidth || 0, vh: video.videoHeight || 0}; }
+function sizeOv() { ov.width = innerWidth * devicePixelRatio; ov.height = innerHeight * devicePixelRatio; syncVideoSize(); }
+video.addEventListener('resize', syncVideoSize);
 sizeOv();
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); applyRatio(); sizeOv(); });
 const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+// Hand occlusion: a soft mask of each hand (bones + palm) filled with the live
+// video, drawn over the holograms so your real hand passes in front of them.
+const oc = document.createElement('canvas'), ocg = oc.getContext('2d');
+function drawOcclusion(k) {
+  if (!S.occlusion || video.readyState < 2 || !hands.hands.length || !video.videoWidth) return;
+  const W = ov.width, H = ov.height;
+  if (oc.width !== W || oc.height !== H) { oc.width = W; oc.height = H; }
+  ocg.globalCompositeOperation = 'source-over'; ocg.filter = 'blur(' + (3 * k) + 'px)'; ocg.clearRect(0, 0, W, H);
+  ocg.lineCap = ocg.lineJoin = 'round'; ocg.strokeStyle = ocg.fillStyle = '#fff';
+  hands.hands.forEach(h => {
+    const P = i => { const p = hands.toScreen(h.lm[i]); return [p.x * k, p.y * k]; };
+    const [ax, ay] = P(0), [bx, by] = P(9), palm = Math.hypot(ax - bx, ay - by);
+    ocg.lineWidth = palm * 0.34;
+    BONES.forEach(([a, b]) => { ocg.beginPath(); ocg.moveTo(...P(a)); ocg.lineTo(...P(b)); ocg.stroke(); });
+    ocg.beginPath(); [0, 1, 2, 5, 9, 13, 17].forEach((i, n) => n ? ocg.lineTo(...P(i)) : ocg.moveTo(...P(i))); ocg.closePath(); ocg.fill();
+  });
+  ocg.globalCompositeOperation = 'source-in'; ocg.filter = videoFilter();
+  const vw = video.videoWidth, vh = video.videoHeight, s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s;
+  ocg.save(); if (S.mirror) { ocg.translate(W, 0); ocg.scale(-1, 1); }
+  ocg.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh); ocg.restore();
+  ocg.filter = 'none'; ocg.globalCompositeOperation = 'source-over';
+  og.drawImage(oc, 0, 0);
+}
 function drawHands(now) {
   const k = devicePixelRatio; og.clearRect(0, 0, ov.width, ov.height);
+  drawOcclusion(k);
   hands.hands.forEach(h => {
     if (S.skeleton) {
       og.strokeStyle = 'rgba(111,243,255,.45)'; og.lineWidth = 1.4 * k; og.shadowColor = '#6ff3ff'; og.shadowBlur = 6 * k;
@@ -333,16 +371,36 @@ function drawHands(now) {
   og.shadowBlur = 0;
 }
 
+function cameraFailed(e) {
+  const why = !window.isSecureContext ? 'The camera only works over https or on localhost. Open Holo from the Xenon tray.'
+    : e && e.name === 'NotAllowedError' ? 'Camera access was blocked. Click the camera icon in the address bar, allow it, then press RETRY.'
+    : e && e.name === 'NotFoundError' ? 'No camera was found. Plug one in, then press RETRY.'
+    : e && e.name === 'NotReadableError' ? 'The camera is busy in another app (Camera, Teams, Zoom, Discord). Close it, then press RETRY.'
+    : 'The camera could not start (' + ((e && e.name) || e) + '). Press RETRY.';
+  $('state').textContent = 'NO CAMERA ACCESS';
+  $('go').textContent = 'RETRY'; $('gatemsg').textContent = why; $('gate').classList.remove('off');
+}
 // ---- start + loop ----------------------------------------------------------------------------
 $('go').addEventListener('click', async () => {
   $('gate').classList.add('off'); $('state').textContent = 'STARTING CAMERA';
-  try { await startCamera(); } catch (e) { $('state').textContent = 'NO CAMERA ACCESS'; toast('Allow the camera for this page, then reload.'); return; }
+  try { await startCamera(); } catch (e) { cameraFailed(e); return; }
+  if (tracker) { $('state').textContent = 'READY · PINCH & HOLD FOR THE MENU'; return; }       // a retry after tracking already loaded
   $('state').textContent = 'LOADING HAND TRACKING';
   try { await startTracking(); } catch (e) { S.quality = 'safe'; paintSettings(); try { await startTracking(); } catch (e2) { $('state').textContent = 'TRACKING FAILED'; toast('Hand tracking could not start: ' + e2); return; } }
   $('state').textContent = 'READY · PINCH & HOLD FOR THE MENU';
 });
 
-const clock = new THREE.Clock(); let frames = 0, fpsAt = performance.now(), fps = 0;
+const clock = new THREE.Clock(); let frames = 0, fpsAt = performance.now(), fps = 0, slowFor = 0, slowOffered = false;
+// Slow for 5 seconds straight: offer a lower quality, once.
+function checkSpeed() {
+  if (!tracker || slowOffered || document.hidden || qualityName() === 'safe') { slowFor = 0; return; }
+  slowFor = fps < 22 ? slowFor + 1 : 0;
+  if (slowFor >= 5) {
+    slowOffered = true;
+    card({kicker: 'PERFORMANCE', title: 'Running slow', rows: [['FPS', fps], ['QUALITY', qualityName().toUpperCase()]],
+      body: 'A lower quality setting keeps tracking smooth.', actions: [{label: 'LOWER QUALITY', act: 'setting', s: 'lower'}]});
+  }
+}
 function loop() {
   const dt = Math.min(0.05, clock.getDelta()), t = clock.elapsedTime, now = performance.now();
   if (tracker && video.readyState >= 2) {
@@ -355,7 +413,7 @@ function loop() {
   if (mode && mode.update) mode.update(dt, t);
   drawHands(now);
   renderer.render(scene, camera);
-  frames++; if (now - fpsAt > 1000) { fps = frames; frames = 0; fpsAt = now; if (S.debug) $('debug').textContent = `${fps} fps · ${hands.hands.length} hands · quality ${S.quality} · mode ${mode && mode.id}`; }
+  frames++; if (now - fpsAt > 1000) { fps = frames; frames = 0; fpsAt = now; checkSpeed(); if (S.debug) $('debug').textContent = `${fps} fps · ${hands.hands.length} hands · quality ${S.quality} · mode ${mode && mode.id}`; }
   requestAnimationFrame(loop);
 }
 
