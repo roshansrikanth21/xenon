@@ -262,7 +262,7 @@ const spinVel = new THREE.Vector2();
 // Throw: a fist released while moving fast sends the object flying; it slows,
 // bounces off the edges of the view and settles where it stops.
 const fistVel = new THREE.Vector2(), throwVel = new THREE.Vector2();
-let fistAt = 0, throwing = null, holding = false, resizing = false;
+let fistAt = 0, throwing = null, holding = false, resizing = false, holdIdx = -1;
 let menuHold = null;
 
 hands.on('pinchStart', ({hand}) => {
@@ -294,13 +294,14 @@ hands.on('pinchHold', ({hand}) => {
 });
 hands.on('doublePinch', ({hand}) => { if (!pick(hand.screen.x, hand.screen.y) && !hudAt(hand.screen.x, hand.screen.y)) openMenu(hand.screen); });
 hands.on('fistStart', ({hand}) => {
+  if (holding && holdIdx !== hand.i) return;        // one hand holds; a second (or ghost) fist doesn't steal it
   const hit = pick(hand.centerScreen.x, hand.centerScreen.y);
   manip = (mode && mode.manipulable && mode.manipulable(hit && hit.obj)) || (mode && mode.group);
   manip && (manip.userData._fistSize = hand.size);
-  fistVel.set(0, 0); fistAt = 0; holding = !!manip; if (manip && manip === throwing) throwing = null;
+  fistVel.set(0, 0); fistAt = 0; holding = !!manip; holdIdx = hand.i; if (manip && manip === throwing) throwing = null;
 });
 hands.on('fistMove', ({hand, dx, dy, dAngle, now: tNow}) => {
-  if (!manip) return;
+  if (!manip || (holding && hand.i !== holdIdx)) return;
   const depth = manip.getWorldPosition(new THREE.Vector3());
   const a = ctx.planePoint(hand.centerScreen.x - dx, hand.centerScreen.y - dy, depth.z), b = ctx.planePoint(hand.centerScreen.x, hand.centerScreen.y, depth.z);
   manip.position.x += b.x - a.x; manip.position.y += b.y - a.y;
@@ -311,7 +312,8 @@ hands.on('fistMove', ({hand, dx, dy, dAngle, now: tNow}) => {
   manip.position.z += grow * 18 * (S.depthInvert ? -1 : 1);
   manip.rotation.z += dAngle * 0.9;
 });
-hands.on('fistEnd', () => {
+hands.on('fistEnd', ({hand} = {}) => {
+  if (holding && hand && hand.i !== undefined && hand.i !== holdIdx) return;
   if (manip && holding && fistVel.length() > 3.2) { throwing = manip; delete manip.userData._flyAt; throwVel.copy(fistVel).clampLength(0, 14); }
   holding = false;
 });

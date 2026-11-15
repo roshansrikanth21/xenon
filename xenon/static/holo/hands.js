@@ -98,6 +98,9 @@ export class Hands {
     hands.forEach((h, i) => this.single(h, this.prev[i] || (this.prev[i] = {}), now));
     for (let i = hands.length; i < 2; i++) {          // a hand left the picture
       const p = this.prev[i];
+      // A real tracker drops a fast-moving hand for a frame or two; keep a
+      // pinch or fist alive through 3 missing frames before ending it.
+      if (p && (p.pinch || p.fist) && (p.lost = (p.lost || 0) + 1) <= 3) continue;
       if (p && p.pinch) this.emit('pinchEnd', { hand: p.last });
       if (p && p.fist) this.emit('fistEnd', { hand: p.last });
       this.prev[i] = {};
@@ -107,6 +110,7 @@ export class Hands {
   }
 
   single(h, p, now) {
+    p.lost = 0;
     const sx = h.screen.x, sy = h.screen.y;
     // ---- pinch: start / move / hold / end, and double pinch
     if (h.pinch && !p.pinch) {
@@ -123,7 +127,13 @@ export class Hands {
       this.emit('pinchEnd', { hand: h, quick: now - p.pinchAt < 450 });
     }
     // ---- fist: move + twist (wrist rotation)
-    if (h.fist) {
+    // A fist moving fast can blur into an unclear pose for a frame or two on a
+    // real camera; hold the fist through up to 3 such frames instead of
+    // dropping (and un-throwing) the object. A clear open hand still releases.
+    if (h.fist) p.fistMiss = 0;
+    const fistHeld = !h.fist && p.fist && !h.palm && !h.point && !h.pinch && (p.fistMiss = (p.fistMiss || 0) + 1) <= 3;
+    if (fistHeld) { /* keep holding; no movement this frame */ }
+    else if (h.fist) {
       const c = h.centerScreen;
       if (!p.fist) { p.fistFrom = c; p.twistAnchor = c; p.fistAngle = h.angle; p.twistAcc = 0; this.emit('fistStart', { hand: h }); }
       else {
@@ -157,18 +167,29 @@ export class Hands {
       else p.flipCount = 0;
     }
     p.angleLast = h.angle;
-    p.pinch = h.pinch; p.fist = h.fist; p.palm = h.palm; p.last = h;
+    p.pinch = h.pinch; p.fist = h.fist || fistHeld; p.palm = h.palm; p.last = h;
   }
 
   pairs(hands, now) {
-    if (hands.length < 2) { this.twoFist = null; this.resizeStart = null; return; }
+    if (hands.length < 2) {
+      // Real hands overlap as they clap and the tracker merges them into one:
+      // two open hands closing fast that collapse to one count as a clap
+      // (the original Holo-Explorer does the same).
+      const q = this.lastPair;
+      if (hands.length === 1 && q && now - q.at < 150 && q.open && q.closing > 0.9 && q.d < q.scale * 2.2 && now > this.clapCool) { this.clapCool = now + 900; this.emit('clap'); }
+      this.lastPair = null; this.pairD = undefined; this.twoFist = null; if (this.resizeStart) { this.resizeStart = null; this.emit('resizeEnd'); }
+      return;
+    }
     const [a, b] = hands;
     const d = Math.hypot(a.centerScreen.x - b.centerScreen.x, a.centerScreen.y - b.centerScreen.y);
     const scale = (a.size + b.size) / 2 * this.view.h;      // hand size in px
-    // clap: two open palms meeting fast
+    // clap: two open hands meeting fast (one may read as half-open as it's hidden by the other)
     const prevD = this.pairD; this.pairD = d; const dt = now - (this.pairAt || now); this.pairAt = now;
-    if (a.palm && b.palm && prevD !== undefined && dt > 0) {
-      const closing = (prevD - d) / dt;                      // px per ms
+    const openish = h => h.palm || (!h.fist && !h.pinch && !h.point);
+    const open = (a.palm || b.palm) && openish(a) && openish(b);
+    const closing = prevD !== undefined && dt > 0 ? (prevD - d) / dt : 0;     // px per ms
+    this.lastPair = {d, scale, closing, open, at: now};
+    if (open && prevD !== undefined && dt > 0) {
       if (d < scale * 1.3 && closing > 0.9 && now > this.clapCool) { this.clapCool = now + 900; this.emit('clap'); }
       if (d < scale * 1.2) this.palmsTogetherAt = now;
       if (d > scale * 3 && now - this.palmsTogetherAt < 450 && now > this.clapCool) { this.clapCool = now + 900; this.palmsTogetherAt = 0; this.emit('palmsApart'); }
