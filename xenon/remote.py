@@ -174,6 +174,19 @@ class RemoteServer:
                             self._send(404, b'{"error":"not found"}')
                             return
                         self._send(200, data, "model/gltf-binary", PAGE_CSP)
+                elif self.path.startswith("/holo/js/"):
+                    # Xenon Holo's modules (static/holo/*.js): plain names only.
+                    if self._via_tunnel():
+                        self._send(404, b'{"error":"not found"}')
+                        return
+                    import re as _re
+
+                    name = self.path.split("?")[0][len("/holo/js/"):]
+                    target = _STATIC / "holo" / name
+                    if not _re.fullmatch(r"[a-z0-9_-]+\.js", name) or not target.is_file():
+                        self._send(404, b'{"error":"not found"}')
+                        return
+                    self._send(200, target.read_bytes(), "text/javascript; charset=utf-8", HOLO_CSP)
                 elif self.path.split("?")[0] in ("/holo", "/holo/"):
                     # Xenon Holo (hand-controlled panels round the core).
                     # Uses the webcam: laptop only.

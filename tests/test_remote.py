@@ -165,8 +165,18 @@ class HoloTests(unittest.TestCase):
         code, page = self.get("/holo")
         self.assertEqual(code, 200)
         self.assertIn(b"XENON HOLO", page)
-        self.assertIn(b"Inspired by Augma", page)               # ours, credited as inspiration only
+        self.assertIn(b"INSPIRED BY", page)                     # ours, credited as inspiration only
+        self.assertIn(b"/holo/js/main.js", page)
+
+    def test_holo_modules(self):
+        for name in ("main", "hands", "xenon", "reactor", "table", "elements", "shards"):
+            code, body = self.get(f"/holo/js/{name}.js")
+            self.assertEqual(code, 200, name)
+            self.assertTrue(body.strip(), name)
 
     def test_laptop_only_and_no_path_tricks(self):
         self.assertEqual(self.get("/holo", {"Cf-Ray": "x"})[0], 404)
         self.assertEqual(self.get("/holo/assets/index.js")[0], 404)     # the copied app is gone
+        self.assertEqual(self.get("/holo/js/main.js", {"Cf-Ray": "x"})[0], 404)
+        for bad in ("../remote.js", "..%2Fphone.html", "Main.js", "nope.js", "main.py", "%2e%2e/x.js"):
+            self.assertEqual(self.get("/holo/js/" + bad)[0], 404, bad)
