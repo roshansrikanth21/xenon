@@ -324,7 +324,7 @@ export default function create(ctx) {
   function release() { gathered = false; coreFlash = .6; ctx.toast('RELEASED'); }
   function resetAll() {
     out = -1; gathered = false; gp = 0; orbit = 0; hovered = null; coreFlash = 0; coreHoverK = 0;
-    group.position.set(0, 0, 0); group.rotation.set(0, 0, 0); group.scale.set(1, 1, 1);
+    group.position.set(0, 0, 0); group.rotation.set(0, 0, 0); group.scale.setScalar(1.25);           // a touch larger: shards read small next to real hands
     shards.forEach(s => {
       s.morph = s.morphT = 0; s.dim = 1; s.hoverK = 0; s.flash = 0; s.scaleNow = 1;
       s.root.position.set(s.slot.x, s.slot.y, s.slot.z); s.root.scale.set(1, 1, 1);
