@@ -113,7 +113,9 @@ function setTray(chips, onMix) {
 
 const MODES = {};
 let mode = null;
+let cueState = null;
 const ctx = {THREE, scene, camera, toast, card, closeCard, xenon, status: () => status, loadModel, setTray, hands: () => hands.hands,
+  cue: c => { cueState = c || null; },
   labels: () => S.labels, colors: {holo: 0x6ff3ff, gold: 0xffd27a, warn: 0xff7b8a}, debug: () => S.debug,
   planePoint(sx, sy, z = 0) {
     const ndc = new THREE.Vector2(sx / innerWidth * 2 - 1, -(sy / innerHeight * 2 - 1));
@@ -137,7 +139,7 @@ function setMode(id) {
   closeCard(); setTray(null);
   mode = next; scene.add(mode.group); mode.enter && mode.enter();
   $('modeName').textContent = mode.label; $('hint').textContent = mode.hint || '';
-  manip = null; spinVel.set(0, 0); closeMenu();
+  manip = null; spinVel.set(0, 0); closeMenu(); cueState = null; throwing = null; holding = false; resizing = false;
   try { localStorage.setItem('xholo-mode', id); } catch (e) {}
 }
 
@@ -148,6 +150,7 @@ function openMenu(at) {
   const items = [
     ...Object.values(MODES).map(m => ({label: m.label, run: () => setMode(m.id), on: m === mode})),
     ...((mode && mode.menu && mode.menu()) || []),
+    {label: 'CLOSE', run: () => {}},                 // hands-only: a way out without the keyboard
   ];
   const cx = Math.min(innerWidth - 170, Math.max(170, at ? at.x : innerWidth / 2));
   const cy = Math.min(innerHeight - 170, Math.max(170, at ? at.y : innerHeight / 2));
@@ -214,7 +217,7 @@ addEventListener('keydown', e => {
   if (mode && mode.key && mode.key(k)) return;
   ({m: () => menuOpen ? closeMenu() : openMenu(), f: () => setting('mirror'), i: () => setting('invert'), b: () => setting('bw'),
     c: () => setting('camera'), l: () => setting('labels'), o: () => setting('occlusion'), k: () => setting('skeleton'), d: () => setting('debug'),
-    h: () => $('guide').classList.toggle('on'), q: () => setting('quality')}[k] || (() => {}))();
+    h: () => $('guide').classList.toggle('on'), q: () => setting('quality'), r: () => { if (S.debug) saveRecording(); }}[k] || (() => {}))();
 });
 
 // ---- camera + tracking ----------------------------------------------------------------------
@@ -256,6 +259,10 @@ function pick(sx, sy) {
 }
 let hovered = null, pinchTarget = null, dragging = false, manip = null, manipBase = 1;
 const spinVel = new THREE.Vector2();
+// Throw: a fist released while moving fast sends the object flying; it slows,
+// bounces off the edges of the view and settles where it stops.
+const fistVel = new THREE.Vector2(), throwVel = new THREE.Vector2();
+let fistAt = 0, throwing = null, holding = false, resizing = false;
 let menuHold = null;
 
 hands.on('pinchStart', ({hand}) => {
@@ -290,18 +297,24 @@ hands.on('fistStart', ({hand}) => {
   const hit = pick(hand.centerScreen.x, hand.centerScreen.y);
   manip = (mode && mode.manipulable && mode.manipulable(hit && hit.obj)) || (mode && mode.group);
   manip && (manip.userData._fistSize = hand.size);
+  fistVel.set(0, 0); fistAt = 0; holding = !!manip; if (manip && manip === throwing) throwing = null;
 });
-hands.on('fistMove', ({hand, dx, dy, dAngle}) => {
+hands.on('fistMove', ({hand, dx, dy, dAngle, now: tNow}) => {
   if (!manip) return;
   const depth = manip.getWorldPosition(new THREE.Vector3());
   const a = ctx.planePoint(hand.centerScreen.x - dx, hand.centerScreen.y - dy, depth.z), b = ctx.planePoint(hand.centerScreen.x, hand.centerScreen.y, depth.z);
   manip.position.x += b.x - a.x; manip.position.y += b.y - a.y;
+  const now = tNow || performance.now(), dts = (now - fistAt) / 1000; fistAt = now;
+  if (dts > 0 && dts < .2) fistVel.lerp(new THREE.Vector2((b.x - a.x) / dts, (b.y - a.y) / dts), .5);
   // pushing the fist toward the camera (hand grows) pulls the object nearer
   const grow = hand.size - (manip.userData._fistSize || hand.size); manip.userData._fistSize = hand.size;
   manip.position.z += grow * 18 * (S.depthInvert ? -1 : 1);
   manip.rotation.z += dAngle * 0.9;
 });
-hands.on('fistEnd', () => {});
+hands.on('fistEnd', () => {
+  if (manip && holding && fistVel.length() > 3.2) { throwing = manip; delete manip.userData._flyAt; throwVel.copy(fistVel).clampLength(0, 14); }
+  holding = false;
+});
 hands.on('flick', ({hand, vx, vy}) => {
   const hit = pick(hand.screen.x, hand.screen.y);
   manip = (mode && mode.manipulable && mode.manipulable(hit && hit.obj)) || manip || (mode && mode.group);
@@ -311,9 +324,9 @@ hands.on('resize', ({ratio}) => {
   if (!manip) { const h = hands.hands[0]; const hit = h && pick(h.screen.x, h.screen.y); manip = (mode && mode.manipulable && mode.manipulable(hit && hit.obj)) || (mode && mode.group); }
   if (!manip) return;
   if (manip.userData._base === undefined) manip.userData._base = manip.scale.x;
-  const s = THREE.MathUtils.clamp(manip.userData._base * ratio, 0.25, 4); manip.scale.setScalar(s);
+  const s = THREE.MathUtils.clamp(manip.userData._base * ratio, 0.25, 4); manip.scale.setScalar(s); resizing = true;
 });
-hands.on('resizeEnd', () => { if (manip) delete manip.userData._base; });
+hands.on('resizeEnd', () => { if (manip) delete manip.userData._base; resizing = false; });
 ['clap', 'twist', 'fistsApart', 'palmsApart', 'palmFlip'].forEach(ev => hands.on(ev, d => {
   if (!mode || !mode[ev]) return;
   if (ev === 'twist') mode.twist(d.dir); else if (ev === 'palmFlip') mode.palmFlip(d.up); else mode[ev]();
@@ -350,9 +363,60 @@ function drawOcclusion(k) {
   ocg.filter = 'none'; ocg.globalCompositeOperation = 'source-over';
   og.drawImage(oc, 0, 0);
 }
+// Holographic rings on each palm and wrist (the palm ring opens with the hand)
+// and a small readout: grip, openness, rough distance.
+const MONO_FONT = '"JetBrains Mono", ui-monospace, monospace';
+function openness(h) {
+  const L = h.lm, c = {x: (L[0].x + L[5].x + L[9].x + L[13].x + L[17].x) / 5, y: (L[0].y + L[5].y + L[9].y + L[13].y + L[17].y) / 5};
+  const d = [8, 12, 16, 20].reduce((s, i) => s + Math.hypot(L[i].x - c.x, L[i].y - c.y), 0) / 4 / h.size;
+  return Math.min(1, Math.max(0, (d - .6) / .9));
+}
+function drawHandHud(h, k, now) {
+  const L = h.lm, P = i => hands.toScreen(L[i]);
+  const c = [0, 5, 9, 13, 17].map(P).reduce((a, p) => ({x: a.x + p.x / 5, y: a.y + p.y / 5}), {x: 0, y: 0});
+  const w = P(0), size = Math.hypot(P(9).x - w.x, P(9).y - w.y), open = openness(h), t = now / 1000;
+  og.save(); og.shadowColor = '#6ff3ff'; og.shadowBlur = 8 * k; og.lineCap = 'round';
+  // palm: an outer dashed ring that turns, an inner arc whose length is the openness
+  og.strokeStyle = 'rgba(111,243,255,.55)'; og.lineWidth = 1.2 * k; og.setLineDash([6 * k, 9 * k]); og.lineDashOffset = -t * 30 * k;
+  og.beginPath(); og.arc(c.x * k, c.y * k, size * .62 * k, 0, Math.PI * 2); og.stroke(); og.setLineDash([]);
+  og.strokeStyle = h.pinch ? '#ffffff' : h.fist ? '#ffd27a' : '#6ff3ff'; og.lineWidth = 2.2 * k;
+  og.beginPath(); og.arc(c.x * k, c.y * k, size * .46 * k, -Math.PI / 2 + t, -Math.PI / 2 + t + Math.PI * 2 * (.15 + .85 * open)); og.stroke();
+  // wrist: a flat ring across the forearm
+  const ang = Math.atan2(P(9).y - w.y, P(9).x - w.x);
+  og.strokeStyle = 'rgba(111,243,255,.4)'; og.lineWidth = 1.4 * k;
+  og.beginPath(); og.ellipse(w.x * k, w.y * k, size * .36 * k, size * .12 * k, ang + Math.PI / 2, 0, Math.PI * 2); og.stroke();
+  if (S.labels) {
+    const side = h.handed === 'Left' ? 'RIGHT' : h.handed === 'Right' ? 'LEFT' : '';     // MediaPipe labels assume a mirrored picture
+    const grip = h.pinch ? 'PINCH' : h.fist ? 'FIST' : open > .7 ? 'OPEN' : 'RELAXED';
+    const vh = hands.view.vh || innerHeight, f = (hands.view.vw || innerWidth) / 2 / Math.tan(Math.PI / 6);
+    const dist = .09 * f / Math.max(1, h.size * vh);
+    const x = (c.x + size * .8) * k, y = (c.y - size * .5) * k;
+    og.shadowBlur = 0; og.font = `600 ${10 * k}px ${MONO_FONT}`; og.fillStyle = '#6ff3ff';
+    og.fillText(`${side} HAND`.trim(), x, y);
+    og.font = `400 ${10 * k}px ${MONO_FONT}`; og.fillStyle = 'rgba(233,243,246,.8)';
+    og.fillText(`GRIP ${grip} ${Math.round(open * 100)}%`, x, y + 14 * k);
+    og.fillText(`DIST ${dist.toFixed(2)} m`, x, y + 28 * k);
+    og.strokeStyle = 'rgba(111,243,255,.4)'; og.lineWidth = 1 * k; og.beginPath(); og.moveTo(x - 6 * k, y - 10 * k); og.lineTo(x - 6 * k, y + 32 * k); og.stroke();
+  }
+  og.restore();
+}
+function drawCue(k) {
+  if (!cueState || !hands.hands.length) return;
+  const pts = hands.hands.map(h => h.centerScreen), x = pts.reduce((s, p) => s + p.x, 0) / pts.length, y = Math.min(...pts.map(p => p.y)) - 120;
+  const lines = cueState.lines || [], W = 190 * k, H = (26 + lines.length * 15) * k, X = x * k - W / 2, Y = y * k - H;
+  og.save(); og.fillStyle = 'rgba(4,14,20,.62)'; og.strokeStyle = 'rgba(255,210,122,.7)'; og.lineWidth = 1 * k;
+  og.fillRect(X, Y, W, H); og.strokeRect(X, Y, W, H);
+  og.textAlign = 'center'; og.font = `600 ${11 * k}px ${MONO_FONT}`; og.fillStyle = '#ffd27a'; og.shadowColor = '#ffd27a'; og.shadowBlur = 8 * k;
+  og.fillText(cueState.title, x * k, Y + 17 * k); og.shadowBlur = 0;
+  og.font = `400 ${10 * k}px ${MONO_FONT}`; og.fillStyle = 'rgba(233,243,246,.85)';
+  lines.forEach((l, i) => og.fillText(l, x * k, Y + (33 + i * 15) * k));
+  og.restore();
+}
 function drawHands(now) {
   const k = devicePixelRatio; og.clearRect(0, 0, ov.width, ov.height);
   drawOcclusion(k);
+  if (S.skeleton) hands.hands.forEach(h => drawHandHud(h, k, now));
+  drawCue(k);
   hands.hands.forEach(h => {
     if (S.skeleton) {
       og.strokeStyle = 'rgba(111,243,255,.45)'; og.lineWidth = 1.4 * k; og.shadowColor = '#6ff3ff'; og.shadowBlur = 6 * k;
@@ -390,6 +454,14 @@ $('go').addEventListener('click', async () => {
   $('state').textContent = 'READY · PINCH & HOLD FOR THE MENU';
 });
 
+let lastObjState = '', rec = [];
+// D (debug) then R saves the last 120 frames of hand landmarks, for tuning gestures.
+function saveRecording() {
+  if (!rec.length) { toast('Nothing recorded yet · show your hands with DEBUG on'); return; }
+  const url = URL.createObjectURL(new Blob([JSON.stringify(rec)], {type: 'application/json'}));
+  Object.assign(document.createElement('a'), {href: url, download: 'xenon-holo-hands.json'}).click();
+  setTimeout(() => URL.revokeObjectURL(url), 4000); toast(`Saved ${rec.length} frames`);
+}
 const clock = new THREE.Clock(); let frames = 0, fpsAt = performance.now(), fps = 0, slowFor = 0, slowOffered = false;
 // Slow for 5 seconds straight: offer a lower quality, once.
 function checkSpeed() {
@@ -410,6 +482,19 @@ function loop() {
     $('state').textContent = hs.length ? (hs.map(h => h.pinch ? 'PINCH' : h.fist ? 'FIST' : h.point ? 'POINT' : h.palm ? (h.palmUp ? 'PALM UP' : 'PALM') : 'HAND').join(' · ')) : 'SHOW YOUR HANDS';
   }
   if (manip && spinVel.lengthSq() > 1e-6) { manip.rotation.y += spinVel.x * dt; manip.rotation.x += spinVel.y * dt; spinVel.multiplyScalar(Math.pow(0.18, dt)); }
+  // something else moved it (RESET, a mode action): the throw is over
+  if (throwing && throwing.userData._flyAt && throwing.position.distanceTo(throwing.userData._flyAt) > 1e-4) throwing = null;
+  if (throwing) {
+    const p = throwing.position; p.x += throwVel.x * dt; p.y += throwVel.y * dt;
+    const dist = Math.max(1, camera.position.z - p.z), hh = Math.tan(camera.fov * Math.PI / 360) * dist * .85, hw = hh * camera.aspect;
+    if (Math.abs(p.x - camera.position.x) > hw) { p.x = camera.position.x + Math.sign(p.x - camera.position.x) * hw; throwVel.x *= -.6; }
+    if (Math.abs(p.y - camera.position.y) > hh) { p.y = camera.position.y + Math.sign(p.y - camera.position.y) * hh; throwVel.y *= -.6; }
+    throwVel.multiplyScalar(Math.pow(.25, dt));
+    if (throwVel.length() < .12) throwing = null; else (throwing.userData._flyAt ||= new THREE.Vector3()).copy(p);
+  }
+  const objState = throwing ? 'IN FLIGHT' : resizing ? 'MANIPULATING' : holding ? 'HELD' : 'STANDBY';
+  if (objState !== lastObjState) { lastObjState = objState; $('objState').textContent = objState; $('objState').classList.toggle('live', objState !== 'STANDBY'); }
+  if (S.debug && hands.hands.length) { rec.push({t: now, hands: hands.hands.map(h => ({handed: h.handed, landmarks: h.lm.map(({x, y, z}) => ({x, y, z}))}))}); if (rec.length > 120) rec.shift(); }
   if (mode && mode.update) mode.update(dt, t);
   drawHands(now);
   renderer.render(scene, camera);
@@ -423,4 +508,5 @@ let first = 'xenon'; try { first = localStorage.getItem('xholo-mode') || 'xenon'
 setMode(MODES[first] ? first : 'xenon');
 loop();
 // Test hook (only with ?debug): drive gestures with recorded or synthetic landmarks.
-if (params.has('debug')) window.__holo = {hands, MODES, setMode, mode: () => mode, openMenu, pick, camera, THREE, act, S};
+if (params.has('debug')) window.__holo = {hands, MODES, setMode, mode: () => mode, openMenu, pick, camera, THREE, act, S,
+  throwState: () => ({throwing: !!throwing, v: throwVel.length(), fv: fistVel.length(), holding, manip: manip && manip.uuid})};

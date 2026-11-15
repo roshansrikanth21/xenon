@@ -371,6 +371,15 @@ export default function create(ctx) {
       {label: 'RESET', run: safe(() => { resetAll(); ctx.closeCard && ctx.closeCard(); ctx.toast('XR-7 reset'); })},
     ],
     update: safe((dt, t) => {
+      // readiness cues, like the original: what the hands are about to do
+      try {
+        const hs = ctx.hands() || [], fists = hs.filter(h => h.fist), palms = hs.filter(h => h.palm);
+        let cue = null;
+        if (!exploded && fists.length === 2) cue = {title: 'EXPLODE READY', lines: ['PULL HANDS APART', 'TO EXPLODE']};
+        else if (exploded && palms.length === 2) cue = {title: 'ASSEMBLE READY', lines: ['CLAP HANDS', 'TO ASSEMBLE']};
+        else if (fists.length === 1 && hs.length === 1) cue = {title: 'TWIST', lines: ['CCW: EXPLODE', 'CW: ASSEMBLE']};
+        if (ctx.cue) ctx.cue(cue);
+      } catch (e) {}
       const k6 = 1 - Math.exp(-dt * 6);
       explodeAmt += ((exploded ? 1 : 0) - explodeAmt) * (1 - Math.exp(-dt * 3));
       const tx = TILT.home[0] + (TILT.exp[0] - TILT.home[0]) * explodeAmt, ty = TILT.home[1] + (TILT.exp[1] - TILT.home[1]) * explodeAmt;

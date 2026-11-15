@@ -36,6 +36,7 @@ video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:s
 @media (max-width:720px){.settings button{display:none}.settings .stoggle,.settings.open button{display:inline-block}}
 .settings button.on{color:var(--holo);border-color:var(--holo-2)}
 .settings button:hover,.gbtn:hover{color:var(--fg);border-color:var(--holo-2)}
+#objState{font-size:9px;letter-spacing:.3em;color:var(--dim);text-align:right;margin-top:6px;transition:color .3s}#objState.live{color:var(--gold);text-shadow:0 0 10px rgba(255,210,122,.45)}
 #modeName{font-size:15px;letter-spacing:.42em;color:var(--holo);text-shadow:0 0 14px rgba(111,243,255,.45);text-align:right}
 .bottom{position:fixed;left:28px;right:28px;bottom:24px;display:flex;justify-content:space-between;align-items:flex-end;pointer-events:none;gap:20px}
 #hint{color:var(--fg);letter-spacing:.08em;max-width:60vw;line-height:1.6}
@@ -91,7 +92,7 @@ video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:s
       <button data-act="setting" data-s="labels">LABELS</button><button data-act="setting" data-s="skeleton">HANDS</button><button data-act="setting" data-s="occlusion">OCCLUSION</button>
       <button data-act="guide">? GUIDE</button>
     </div></div>
-  <div><div class="k" style="text-align:right">Mode</div><div id="modeName">XENON</div></div>
+  <div><div class="k" style="text-align:right">Mode</div><div id="modeName">XENON</div><div id="objState">STANDBY</div></div>
 </div>
 <div class="bottom">
   <div><div id="state">PRESS START</div><div id="hint"></div></div>
@@ -121,7 +122,7 @@ video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:s
     <div class="grow"><b>QUALITY</b><span>AUTO picks for this laptop. HIGH sharpest, MEDIUM most laptops, LOW lighter, SAFE runs tracking on the CPU. Or add ?quality=low to the link. If it runs slowly, Holo offers a lower setting.</span></div>
     <div class="grow"><b>OCCLUSION</b><span>Your real hand is drawn over the holograms, so it passes in front of them. HANDS shows the tracked skeleton.</span></div>
     <div class="grow"><b>VIEW</b><span>MIRROR flips the view, DEPTH INVERT swaps push/pull, B&amp;W the holographic grey look, DIM darkens a bright room, CAMERA switches cameras.</span></div>
-    <div class="grow"><b>KEYS</b><span>M menu · E explode/assemble · F mirror · I depth invert · B black &amp; white · C next camera · L labels · O hand occlusion · K hand skeleton · D debug · Q quality · H guide · Esc close</span></div></div>
+    <div class="grow"><b>KEYS</b><span>M menu · E explode/assemble · F mirror · I depth invert · B black &amp; white · C next camera · L labels · O hand occlusion · K hand rings &amp; skeleton · D debug (then R saves 120 frames of hand data) · Q quality · H guide · Esc close</span></div></div>
   <div class="gsec"><h3>05 · CREDITS</h3><div class="grow"><b>INSPIRED BY</b><span>Holo-Explorer by Augma Imaginarium (CC BY-NC 4.0). Core and ring models from their Futurist Lantern. Built for Xenon.</span></div></div>
   <button class="gbtn" data-act="guide" style="margin-top:28px">CLOSE GUIDE</button>
 </div></div>

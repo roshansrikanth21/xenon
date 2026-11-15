@@ -80,8 +80,6 @@ export const MOLECULES = [
     atoms: [['C', 0, 0, 0], ['O', 1.16, 0, 0], ['O', -1.16, 0, 0]], bonds: [[0, 1, 2], [0, 2, 2]]},
   {formula: 'CH4', name: 'Methane', fact: 'The simplest hydrocarbon: four hydrogens at the corners of a tetrahedron.',
     atoms: [['C', 0, 0, 0], ...ch4.map(p => ['H', ...p])], bonds: [[0, 1, 1], [0, 2, 1], [0, 3, 1], [0, 4, 1]]},
-  {formula: 'NaCl', name: 'Sodium Chloride', fact: 'Table salt; in a crystal each ion sits among six of the other kind.',
-    atoms: [['Na', -1.18, 0, 0], ['Cl', 1.18, 0, 0]], bonds: [[0, 1, 1]]},
   {formula: 'NH3', name: 'Ammonia', fact: 'A trigonal pyramid that flips inside out billions of times a second.',
     atoms: [['N', 0, .38, 0], ['H', .94, 0, 0], ['H', -.47, 0, .814], ['H', -.47, 0, -.814]], bonds: [[0, 1, 1], [0, 2, 1], [0, 3, 1]]},
   {formula: 'O2', name: 'Oxygen', fact: 'Its two unpaired electrons make liquid oxygen stick to a magnet.',
@@ -111,6 +109,17 @@ export const MOLECULES = [
   {formula: 'O3', name: 'Ozone', fact: 'High in the stratosphere this bent molecule soaks up ultraviolet light.',
     atoms: [['O', 0, .33, 0], ['O', 1.088, -.33, 0], ['O', -1.088, -.33, 0]], bonds: [[0, 1, 2], [0, 2, 1]]},
   {formula: 'CH3OH', name: 'Methanol', fact: 'The simplest alcohol, once distilled from wood.', ...methanol()},
+  {formula: 'HF', name: 'Hydrogen Fluoride', fact: 'So eager to bond that its acid etches glass.',
+    atoms: [['H', -.46, 0, 0], ['F', .46, 0, 0]], bonds: [[0, 1, 1]]},
+  {formula: 'Cl2', name: 'Chlorine', fact: 'A yellow-green gas once used to bleach and to disinfect water.',
+    atoms: [['Cl', -.995, 0, 0], ['Cl', .995, 0, 0]], bonds: [[0, 1, 1]]},
+  {formula: 'NaOH', name: 'Sodium Hydroxide', fact: 'Lye: strong enough to turn fat into soap.',
+    atoms: [['Na', -1.95, 0, 0], ['O', 0, 0, 0], ['H', .96, 0, 0]], bonds: [[0, 1, 1], [1, 2, 1]]},
+  {formula: 'SiO2', name: 'Silicon Dioxide', fact: 'Quartz and sand; melted, it becomes glass.',
+    atoms: [['O', -1.61, 0, 0], ['Si', 0, 0, 0], ['O', 1.61, 0, 0]], bonds: [[0, 1, 2], [1, 2, 2]]},
+  {formula: 'CaCO3', name: 'Calcium Carbonate', fact: 'Chalk, marble, seashells and the white cliffs of Dover.',
+    atoms: [['C', 0, 0, 0], ['O', 1.29, 0, 0], ['O', -.645, 1.117, 0], ['O', -.645, -1.117, 0], ['Ca', -2.6, 0, 0]],
+    bonds: [[0, 1, 2], [0, 2, 1], [0, 3, 1], [4, 2, 1], [4, 3, 1]]},
   {formula: 'NO', name: 'Nitric Oxide', fact: 'A tiny radical your blood vessels use as a signal to relax.',
     atoms: [['N', -.575, 0, 0], ['O', .575, 0, 0]], bonds: [[0, 1, 2]]},
 ];
@@ -128,6 +137,28 @@ export function sameCounts(a, b) {
   const clean = o => Object.entries(o || {}).filter(([, n]) => n > 0);
   const A = clean(a), B = clean(b);
   return A.length === B.length && A.every(([k, n]) => (b[k] || 0) === n);
+}
+// Ionic crystals: equal numbers of the two ions build a rock-salt lattice.
+export const CRYSTALS = [
+  {ions: ['Na', 'Cl'], charges: ['+', '-'], name: 'Sodium Chloride', formula: 'NaCl', fact: 'Table salt: every ion sits among six of the other kind.'},
+  {ions: ['K', 'Cl'], charges: ['+', '-'], name: 'Potassium Chloride', formula: 'KCl', fact: 'A salt substitute, and the potassium your nerves run on.'},
+  {ions: ['Mg', 'O'], charges: ['2+', '2-'], name: 'Magnesium Oxide', formula: 'MgO', fact: 'Melts near 2850 C, so it lines furnaces.'},
+  {ions: ['Ca', 'O'], charges: ['2+', '2-'], name: 'Calcium Oxide', formula: 'CaO', fact: 'Quicklime: it glows white-hot in a flame, the original limelight.'},
+];
+export function matchCrystal(counts) {
+  const e = Object.entries(counts || {}).filter(([, n]) => n > 0);
+  if (e.length !== 2 || e[0][1] !== e[1][1]) return null;
+  return CRYSTALS.find(c => c.ions.every(s => counts[s])) || null;
+}
+// Electrons per shell for atomic number z (Madelung filling order).
+const SHELL_EXCEPTIONS = {24: [2, 8, 13, 1], 29: [2, 8, 18, 1], 41: [2, 8, 18, 12, 1], 42: [2, 8, 18, 13, 1], 44: [2, 8, 18, 15, 1], 45: [2, 8, 18, 16, 1],
+  46: [2, 8, 18, 18], 47: [2, 8, 18, 18, 1], 78: [2, 8, 18, 32, 17, 1], 79: [2, 8, 18, 32, 18, 1]};
+export function shellsOf(z) {
+  if (SHELL_EXCEPTIONS[z]) return SHELL_EXCEPTIONS[z].slice();
+  const order = [[1, 0], [2, 0], [2, 1], [3, 0], [3, 1], [4, 0], [3, 2], [4, 1], [5, 0], [4, 2], [5, 1], [6, 0], [4, 3], [5, 2], [6, 1], [7, 0], [5, 3], [6, 2], [7, 1]];
+  const sh = []; let left = z;
+  for (const [n, l] of order) { if (left <= 0) break; const c = Math.min(left, 2 * (2 * l + 1)); sh[n - 1] = (sh[n - 1] || 0) + c; left -= c; }
+  return Array.from(sh, x => x || 0);
 }
 export function matchMolecule(counts) {
   if (!counts || typeof counts !== 'object') return null;

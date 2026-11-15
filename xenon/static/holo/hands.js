@@ -79,7 +79,7 @@ export class Hands {
     const palmUp = palm && up > 0.6;                  // same bar as the original
     const angle = Math.atan2(lm[9].y - lm[0].y, lm[9].x - lm[0].x);
     const center = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
-    return { lm, size, pinch, pinchD, point, fist, palm, palmUp, angle, tip: lm[8], center };
+    return { lm, size, pinch, pinchD, point, fist, palm, palmUp, up, handed, angle, tip: lm[8], center };
   }
 
   // Feed one MediaPipe result. now = ms.
@@ -129,7 +129,7 @@ export class Hands {
       else {
         let dA = h.angle - p.angleLast; if (dA > Math.PI) dA -= 2 * Math.PI; if (dA < -Math.PI) dA += 2 * Math.PI;
         if (this.mirror) dA = -dA;
-        this.emit('fistMove', { hand: h, dx: c.x - p.lastC.x, dy: c.y - p.lastC.y, dAngle: dA });
+        this.emit('fistMove', { hand: h, dx: c.x - p.lastC.x, dy: c.y - p.lastC.y, dAngle: dA, now });
         // A twist is the wrist turning (~50 degrees) while the fist stays
         // within about half a hand of where the turn began; carrying the fist
         // somewhere (to move an object) restarts the count.

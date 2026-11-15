@@ -4,7 +4,7 @@
 // molecule unfolds as a ball-and-stick hologram; anything else is fused into a
 // brand new (entirely invented) element. Clap with an empty tray for the table.
 
-import {ELEMENTS, BY_SYM, CATEGORY_NAMES, matchMolecule} from './elements.js';
+import {ELEMENTS, BY_SYM, CATEGORY_NAMES, matchMolecule, matchCrystal, shellsOf} from './elements.js';
 
 // ---- pure helpers (exported for tests) -----------------------------------------------
 export const LAYOUT = {px: .325, py: .37, tw: .29, th: .29 * 152 / 128, depth: .018, R: 6.5, cx: 9.5, cy: 4.3};
@@ -230,6 +230,50 @@ export default function create(ctx) {
     r.spin.rotation.set(.35, 0, 0);
     return r;
   }
+  function atomMesh(r, sym, col, radius, pos) {
+    const mat = new THREE.MeshStandardMaterial({color: col, emissive: col, emissiveIntensity: .35, roughness: .25, metalness: .1, transparent: true, opacity: .88});
+    const mesh = new THREE.Mesh(sphereGeo, mat); mesh.scale.setScalar(radius); mesh.position.copy(pos);
+    const wire = new THREE.Mesh(wireGeo, new THREE.MeshBasicMaterial({color: HOLO, wireframe: true, transparent: true, opacity: .14, depthWrite: false})); mesh.add(wire);
+    mesh.userData.target = true; mesh.userData.atom = {sym, mat, wire, base: new THREE.Color(col)};
+    r.spin.add(mesh); r.pickables.push(mesh); r.atoms.push(mesh); r.own.push(mat, wire.material);
+    return mesh;
+  }
+  // Ionic crystal: a 3x3x3 rock-salt block, ions alternating, lattice lines between neighbours.
+  function buildCrystal(c) {
+    const r = newResult('molecule'), n = 3, d = .66, off = (n - 1) / 2, pos = [];
+    for (let x = 0; x < n; x++) for (let y = 0; y < n; y++) for (let z = 0; z < n; z++) {
+      const s = c.ions[(x + y + z) % 2], [col, rad] = atomStyle(s), p = new THREE.Vector3((x - off) * d, (y - off) * d, (z - off) * d);
+      atomMesh(r, s, col, rad * .45, p);
+      if (x + 1 < n) pos.push(p.x, p.y, p.z, p.x + d, p.y, p.z);
+      if (y + 1 < n) pos.push(p.x, p.y, p.z, p.x, p.y + d, p.z);
+      if (z + 1 < n) pos.push(p.x, p.y, p.z, p.x, p.y, p.z + d);
+    }
+    const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const lm = new THREE.LineBasicMaterial({color: HOLO, transparent: true, opacity: .35, depthWrite: false});
+    const lines = new THREE.LineSegments(geo, lm); lines.raycast = () => {}; r.spin.add(lines); r.own.push(geo, lm);
+    c.ions.forEach((s, i) => { const lab = symbolSprite(s + c.charges[i], atomStyle(s)[0]); lab.position.set((i ? 1 : -1) * (off * d), off * d + .32, off * d); r.spin.add(lab); r.labels.push(lab); r.own.push(lab.material, lab.material.map); });
+    r.spin.rotation.set(.5, .6, 0);
+    return r;
+  }
+  // Bohr model for a single atom: nucleus, one ring per shell, electrons orbiting.
+  function buildBohr(e) {
+    const r = newResult('bohr'), col = CAT[e.cat] || HOLO;
+    atomMesh(r, e.sym, col, .2, new THREE.Vector3());
+    const halo = glowSprite(col, .5); halo.scale.setScalar(1.1); r.spin.add(halo); r.own.push(halo.material);
+    const lab = symbolSprite(e.sym, col); lab.position.set(0, .36, 0); r.spin.add(lab); r.labels.push(lab); r.own.push(lab.material, lab.material.map);
+    const shells = shellsOf(e.z), dR = Math.min(.26, 1.25 / shells.length), orbit = [];
+    const ringMat = new THREE.MeshBasicMaterial({color: HOLO, transparent: true, opacity: .35, depthWrite: false, blending: THREE.AdditiveBlending}); r.own.push(ringMat);
+    shells.forEach((count, i) => {
+      const rad = .45 + i * dR, geo = new THREE.TorusGeometry(rad, .004, 6, 128), ring = new THREE.Mesh(geo, ringMat); ring.raycast = () => {};
+      r.spin.add(ring); r.own.push(geo);
+      const shown = Math.min(count, 18);
+      for (let j = 0; j < shown; j++) { const s = glowSprite(j % 2 ? HOLO : WHITE, .95); s.scale.setScalar(.09); r.spin.add(s); r.own.push(s.material); orbit.push({s, rad, a: j / shown * Math.PI * 2 + i, w: .9 / (1 + i * .4)}); }
+      const cnt = symbolSprite(String(count), HOLO); cnt.scale.multiplyScalar(.55); cnt.position.set(rad + .06, .08, 0); r.spin.add(cnt); r.labels.push(cnt); r.own.push(cnt.material, cnt.material.map);
+    });
+    r.tick = (dt, t) => { orbit.forEach(o => { o.a += dt * o.w; o.s.position.set(Math.cos(o.a) * o.rad, Math.sin(o.a) * o.rad, 0); }); r.spin.rotation.y = Math.sin(t * .4) * .5; r.spin.rotation.x = Math.sin(t * .3) * .2; };
+    r.shells = shells;
+    return r;
+  }
   function drawBig(g, el, hot) {
     const W = 512, H = 608, col = hot ? GOLD : HOLO; g.clearRect(0, 0, W, H);
     const gr = g.createLinearGradient(0, 0, 0, H); gr.addColorStop(0, css(col, .3)); gr.addColorStop(1, css(col, .06)); g.fillStyle = gr; g.fillRect(0, 0, W, H);
@@ -328,9 +372,17 @@ export default function create(ctx) {
   function mix() {
     try {
       if (!tray.length) { if (result) showTable(); else ctx.toast('The tray is empty · pinch a tile to add an atom'); return; }
-      const syms = tray.slice(), counts = countTray(syms), m = matchMolecule(counts);
+      const syms = tray.slice(), counts = countTray(syms), cr = matchCrystal(counts), m = cr ? null : matchMolecule(counts);
       clearHover(); clearResultNow();
-      if (m) {
+      if (cr) {
+        result = buildCrystal(cr);
+        ctx.card({kicker: 'IONIC CRYSTAL', title: cr.name, rows: [['FORMULA', cr.formula], ['IONS', `${cr.ions[0]}${cr.charges[0]} · ${cr.ions[1]}${cr.charges[1]}`],
+          ['LATTICE', 'ROCK SALT · FCC'], ['COORDINATION', '6 : 6']], body: cr.fact});
+      } else if (syms.length === 1 && BY_SYM[syms[0]]) {
+        const e = BY_SYM[syms[0]]; result = buildBohr(e);
+        ctx.card({kicker: 'SINGLE ATOM · BOHR MODEL', title: e.name, rows: [['SYMBOL', e.sym], ['ATOMIC NO.', e.z], ['MASS', e.mass + ' u'],
+          ['SHELLS', result.shells.join(' · ')], ['CATEGORY', CATEGORY_NAMES[e.cat]]], body: 'Electrons by shell. Add a partner atom and mix again to bond it.'});
+      } else if (m) {
         result = buildMolecule(m);
         ctx.card({kicker: 'MOLECULE · MATCHED', title: m.name, rows: [['FORMULA', subscript(m.formula)], ['ATOMS', m.atoms.length],
           ['BONDS', m.bonds.length], ['MASS', massOf(counts) + ' u']], body: m.fact || ''});
@@ -403,6 +455,7 @@ export default function create(ctx) {
         halo.material.opacity = (.35 + .12 * Math.sin(t * 2.4)) * k;
         result.spin.rotation.y = Math.sin(t * .5) * .35;
       }
+      if (result.tick) { try { result.tick(dt, t); } catch (e) { result.tick = null; } }
       if (resultTarget === 0 && resultK < .01) clearResultNow();
     }
     // burst flash on mix
