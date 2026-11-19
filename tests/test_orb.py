@@ -1,6 +1,8 @@
+import io
 import math
 import threading
 import unittest
+from unittest import mock
 
 from xenon.orb_model import (
     ACTIONS,
@@ -525,6 +527,84 @@ class OrbAppTests(unittest.TestCase):
         self.assertTrue(app.panel.visible)
         self.assertIn("Result one", app.panel.text.get("1.0", "end"))
         self.assertIn(app.model.state, {"idle", "searching"})
+
+
+class OrbLoopGuardTests(unittest.TestCase):
+    """A destroyed window, or one bad frame, must never freeze the orb.
+
+    The orb used to die with ``TclError: application has been destroyed`` when
+    a timer fired during quit, and any exception inside the frame loop stopped
+    it drawing for good. Both now end in a quiet return or a retry.
+    """
+
+    def test_a_closed_orb_drops_late_callbacks(self) -> None:
+        import queue
+        import types
+
+        from xenon import orb as orb_module
+
+        events: "queue.Queue" = queue.Queue()
+        fake = types.SimpleNamespace(_closing=True, _events=events)
+        orb_module.OrbApp.post(fake, lambda: None)
+        self.assertTrue(events.empty())
+
+    def test_a_bad_frame_reschedules_instead_of_stopping(self) -> None:
+        import types
+
+        from xenon import orb as orb_module
+
+        waits: list[int] = []
+        fake = types.SimpleNamespace(
+            _closing=False,
+            _tick_failed=False,
+            _tick=orb_module.OrbApp._tick,
+            _tick_body=lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+            root=types.SimpleNamespace(after=lambda delay, _fn: waits.append(delay)),
+        )
+        with mock.patch("sys.stderr", new=io.StringIO()) as err:
+            orb_module.OrbApp._tick(fake)
+        self.assertEqual(waits, [250])
+        self.assertIn("orb tick failed", err.getvalue())
+
+    def test_a_frame_after_quit_is_not_rescheduled(self) -> None:
+        import types
+
+        from xenon import orb as orb_module
+
+        waited: list[int] = []
+
+        def body():
+            raise orb_module.tk.TclError("application has been destroyed")
+
+        fake = types.SimpleNamespace(
+            _closing=False,
+            _tick_failed=False,
+            _tick=orb_module.OrbApp._tick,
+            _tick_body=body,
+            root=types.SimpleNamespace(after=lambda delay, _fn: waited.append(delay)),
+        )
+        orb_module.OrbApp._tick(fake)
+        self.assertEqual(waited, [])
+
+
+class HotkeyBindingTests(unittest.TestCase):
+    def test_a_binding_may_carry_a_fallback(self) -> None:
+        from xenon import orb as orb_module
+
+        one = (orb_module.MOD_CONTROL, ord("X"))
+        self.assertEqual(orb_module._bindings(one), [one])
+        combos = (one, (orb_module.MOD_CONTROL | orb_module.MOD_SHIFT, ord("X")))
+        self.assertEqual(orb_module._bindings(combos), list(combos))
+
+    def test_every_default_action_has_something_to_press(self) -> None:
+        from xenon import orb as orb_module
+
+        for name, value in orb_module.DEFAULT_HOTKEYS.items():
+            combos = orb_module._bindings(value)
+            self.assertTrue(combos, name)
+            for mods, vk in combos:
+                self.assertIsInstance(vk, int)
+                self.assertTrue(mods & orb_module.MOD_CONTROL, name)
 
 
 if __name__ == "__main__":

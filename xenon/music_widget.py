@@ -1044,8 +1044,13 @@ class MusicWidget:
         self._track_changed_at = 0.0
         self._ready = threading.Event()
         self._mutex = None
+        self._overlay_requests = 0     # the orb can ask for the float (same as the hotkey)
 
     # -- lifecycle ----------------------------------------------------------
+    def float_above_windows(self) -> None:
+        """Ask the render thread to float the player (same as Ctrl+Alt+Shift+M)."""
+        self._overlay_requests += 1
+
     def start(self) -> bool:
         """Start the render thread and wait (at most a few seconds) until the
         layers exist. Only one widget runs per user session: a second start
@@ -1309,7 +1314,11 @@ class MusicWidget:
                     loop_busy += max(0.0, now - loop_mark - loop_slept)
                     loop_n += 1
                     loop_mark, loop_slept = now, 0.0
-                if surfaces["card"].pump() % 2:
+                flips = surfaces["card"].pump()
+                if self._overlay_requests:
+                    flips += self._overlay_requests
+                    self._overlay_requests = 0
+                if flips % 2:
                     if self.overlay and not self.fullscreen:
                         # Back to the wallpaper with fresh windows: layers that
                         # were floated come back blank if re-attached.

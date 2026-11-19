@@ -887,23 +887,58 @@ WM_QUIT = 0x0012
 # Ctrl+Alt+X summons Ask, Ctrl+Alt+V toggles voice.
 VK_PRIOR = 0x21  # Page Up
 VK_NEXT = 0x22   # Page Down
-DEFAULT_HOTKEYS: dict[str, tuple[int, int]] = {
-    "ask": (MOD_CONTROL | MOD_ALT, ord("X")),
-    "voice": (MOD_CONTROL | MOD_ALT, ord("V")),
+# One binding, or a few tried in order: the first one Windows will give us.
+# (PowerToys, IMEs and Spotify grab some of these.)
+Binding = tuple[tuple[int, int], ...]
+DEFAULT_HOTKEYS: dict[str, Binding] = {
+    "ask": (
+        (MOD_CONTROL | MOD_ALT, ord("X")),
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, ord("X")),
+    ),
+    "voice": (
+        (MOD_CONTROL | MOD_ALT, ord("V")),
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, ord("V")),
+    ),
     # Ctrl+Alt+B drops every screen to minimum; again restores.
-    "dim": (MOD_CONTROL | MOD_ALT, ord("B")),
+    "dim": (
+        (MOD_CONTROL | MOD_ALT, ord("B")),
+    ),
     # Ctrl+Alt+Space: listen now (no wake word), music turned down.
-    "listen": (MOD_CONTROL | MOD_ALT, 0x20),
-    "brighter": (MOD_CONTROL | MOD_ALT, VK_PRIOR),
-    "darker": (MOD_CONTROL | MOD_ALT, VK_NEXT),
+    "listen": (
+        (MOD_CONTROL | MOD_ALT, 0x20),
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, 0x20),
+        (MOD_CONTROL | MOD_SHIFT, 0x20),
+    ),
+    "brighter": (
+        (MOD_CONTROL | MOD_ALT, VK_PRIOR),
+    ),
+    "darker": (
+        (MOD_CONTROL | MOD_ALT, VK_NEXT),
+    ),
     # Ctrl+Alt+Esc stops the running task and denies any open card. It does
     # nothing when idle.
-    "stop": (MOD_CONTROL | MOD_ALT, 0x1B),
+    "stop": (
+        (MOD_CONTROL | MOD_ALT, 0x1B),
+    ),
     # Ctrl+Alt+G: game mode (everything Xenon runs stops; again restores).
-    "game": (MOD_CONTROL | MOD_ALT, ord("G")),
+    "game": (
+        (MOD_CONTROL | MOD_ALT, ord("G")),
+    ),
     # Ctrl+Alt+Shift+G: Xtreme mode (game mode + heavy apps, power, memory).
-    "xtreme": (MOD_CONTROL | MOD_ALT | MOD_SHIFT, ord("G")),
+    "xtreme": (
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, ord("G")),
+    ),
 }
+
+
+def _bindings(value) -> list[tuple[int, int]]:
+    """Normalise one hotkey definition to the list of combinations to try."""
+    if not value:
+        return []
+    first = value[0]
+    if isinstance(first, tuple):
+        return [tuple(combo) for combo in value]
+    return [tuple(value)]
 
 
 class GlobalHotkeys:
@@ -915,9 +950,9 @@ class GlobalHotkeys:
     """
 
     def __init__(self, on_press: Callable[[str], None],
-                 keys: dict[str, tuple[int, int]] | None = None) -> None:
+                 keys: dict[str, Binding] | None = None) -> None:
         self._on_press = on_press
-        self._keys = dict(keys or DEFAULT_HOTKEYS)
+        self._keys = {name: _bindings(value) for name, value in dict(keys or DEFAULT_HOTKEYS).items()}
         self.failed: list[str] = []
         self._thread_id = 0
         self._ready = threading.Event()
@@ -933,10 +968,16 @@ class GlobalHotkeys:
         user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
         self._thread_id = kernel32.GetCurrentThreadId()
         ids: dict[int, str] = {}
-        for index, (name, (mods, vk)) in enumerate(self._keys.items(), start=1):
-            if user32.RegisterHotKey(None, index, mods | MOD_NOREPEAT, vk):
-                ids[index] = name
+        slot = 1
+        for name, combos in self._keys.items():
+            for mods, vk in combos:
+                if user32.RegisterHotKey(None, slot, mods | MOD_NOREPEAT, vk):
+                    ids[slot] = name
+                    slot += 1
+                    break
             else:
+                # Every combination was taken: the action still lives in the
+                # tray and the orb menu.
                 self.failed.append(name)
         self._ready.set()
         message = wintypes.MSG()
@@ -1074,6 +1115,9 @@ class Tray:
             item("Music widget", lambda: app.post(app.toggle_music_widget),
                  checked=lambda _i: app.music_widget_running()),
             item("Music widget settings…", lambda: app.post(app.open_music_settings)),
+            item("Music widget on top   Ctrl+Alt+Shift+M",
+                 lambda: app.post(app.toggle_music_overlay),
+                 enabled=lambda _i: app.music_widget_running()),
             item("Xenon Core (3D)", lambda: app.post(app.open_core),
                  enabled=lambda _i: bool(getattr(app, "core_url", None))),
             item("Xenon Holo (hand-controlled)", lambda: app.post(app.open_holo),
@@ -1469,6 +1513,7 @@ class OrbApp:
         self._last_external = 0
         self._frame = 0
         self._render_failed = False
+        self._tick_failed = False
         self._last_frame: tuple | None = None
         self._drag_origin: tuple[int, int, int, int] | None = None
         self._dragged = False
@@ -2265,6 +2310,8 @@ class OrbApp:
 
     def post(self, callback: Callable[[], None]) -> None:
         """Run ``callback`` on the Tk thread (safe from any thread)."""
+        if self._closing:
+            return  # the window is gone; a late callback would hit a dead Tk app
         self._events.put(callback)
 
     def _notch_position(self) -> tuple[int, int]:
@@ -2346,6 +2393,28 @@ class OrbApp:
     # ----- loop ---------------------------------------------------------
 
     def _tick(self) -> None:
+        if self._closing:
+            return  # quit() destroyed the root; nothing left to draw
+        try:
+            delay = self._tick_body()
+        except tk.TclError:
+            # A timer fired while the window was being destroyed. Closing is
+            # already in progress, so there is nothing to recover.
+            return
+        except Exception as error:
+            # One bad frame used to end the loop and freeze the orb for good.
+            # Report the first one, then keep going.
+            delay = 250
+            if not self._tick_failed:
+                self._tick_failed = True
+                print(f"orb tick failed: {error!r}", file=sys.stderr, flush=True)
+        try:
+            self.root.after(max(5, int(delay)), self._tick)
+        except tk.TclError:
+            pass
+
+    def _tick_body(self) -> int:
+        """One frame; returns how long to wait before the next one (ms)."""
         now = time.perf_counter()
         dt = now - self._last
         self._last = now
@@ -2362,8 +2431,7 @@ class OrbApp:
         if self.game_mode:
             # Gaming: only hand over posted work (the tray, the hotkey to
             # leave), a few times a second; no drawing, no window tracking.
-            self.root.after(400, self._tick)
-            return
+            return 400
 
         self._frame += 1
         if self._frame % 6 == 0:
@@ -2388,8 +2456,7 @@ class OrbApp:
         if self.hidden:
             # Tucked into the tray: keep events, timers and voice running but
             # skip drawing, and wake up less often.
-            self.root.after(150, self._tick)
-            return
+            return 150
         try:
             frame = self.renderer.render(self.model)
             data = premultiplied_bgra(frame)
@@ -2406,7 +2473,7 @@ class OrbApp:
             music = (self.model.notch_info or {}).get("music")
             fps = 12 if music else 4  # bars and scrolling title vs a slow breathing dot
         delay = int(1000 / fps)
-        self.root.after(max(5, delay - int((time.perf_counter() - now) * 1000)), self._tick)
+        return max(5, delay - int((time.perf_counter() - now) * 1000))
 
     # ----- input --------------------------------------------------------
 
@@ -2948,6 +3015,14 @@ class OrbApp:
             widget = self.music_widget
             threading.Thread(target=widget.stop, daemon=True, name="xenon-music-stop").start()
 
+    def toggle_music_overlay(self) -> str:
+        """Float the player above every window, or send it back to the wallpaper."""
+        widget = self.music_widget
+        if widget is None or not widget.running:
+            return "The music widget is off. Turn it on first."
+        widget.float_above_windows()   # same path as Ctrl+Alt+Shift+M
+        return "Moving the music widget."
+
     def open_music_settings(self) -> None:
         window = self._music_settings_window
         if window is not None:
@@ -3032,3 +3107,6 @@ class OrbApp:
             self.root.mainloop()
         except KeyboardInterrupt:
             self.quit()
+        except tk.TclError:
+            # The root went away under the loop (a late callback during quit).
+            pass

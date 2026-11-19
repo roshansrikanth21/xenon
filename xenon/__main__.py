@@ -5,6 +5,7 @@ import argparse
 import os
 import re
 import sys
+import time
 
 from xenon import fastpath, websearch
 from xenon.actions import ApprovalPolicy, Risk, TaskRunner
@@ -895,7 +896,9 @@ def _sweep_snapshots_once() -> None:
 
 FOCUS_LISTEN_S = 8.0
 
-FOCUS_LISTEN_S = 8.0
+# One orb per session; see ``_claim_orb_mutex``.
+ORB_MUTEX_NAME = "Local\\XenonOrb"
+_ORB_MUTEX = None
 
 
 def _next_announcement(hooks) -> tuple[str, str] | None:
@@ -1036,6 +1039,7 @@ def _orb_voice_runner(config):
         gate = WakeGate(wake_word, aliases=aliases, always=always)
         router_model = OpenAICompatibleChat(config) if config is not None else None
         armed_until = 0.0
+        last_spoken = {"text": "", "at": 0.0}
 
         def waiting() -> None:
             """Standby (waiting for the name) or listening (taking a command)."""
@@ -1057,9 +1061,15 @@ def _orb_voice_runner(config):
             if not (reply or "").strip():
                 return  # e.g. a wake-less utterance nothing was waiting for
             hooks.state("speaking", reply[:120])
+            spoken = _speakable(reply)
+            last_spoken["text"] = spoken
+            last_spoken["at"] = time.monotonic()
             gate.set_speaking(True)
             try:
-                speaker.speak(_speakable(reply))
+                speaker.speak(spoken)
+                # SAPI returns before the speakers have finished; stay deaf
+                # through the tail so it cannot be heard as a command.
+                _drain_tail(source)
             finally:
                 gate.set_speaking(False)
             # The input stream buffered Xenon's own voice while it spoke;
@@ -1120,6 +1130,13 @@ def _orb_voice_runner(config):
                 text = (transcriber.transcribe(pcm, source.sample_rate) or "").strip()
                 if not text or stop.is_set():
                     continue
+                if (
+                    time.monotonic() - last_spoken["at"] < ECHO_WINDOW_S
+                    and _is_own_echo(text, last_spoken["text"])
+                ):
+                    # Xenon heard its own reply (leaky headset, loud speakers,
+                    # the tail of its voice). Never answer itself.
+                    continue
                 command = gate.feed(text)
                 if command is None and _focus_utterance(hooks, focus_until, time.monotonic()):
                     # One utterance without the wake word, for the task that
@@ -1174,6 +1191,55 @@ def _orb_voice_runner(config):
 
     return run
 
+def _claim_orb_mutex() -> bool:
+    """One orb per session: a second one would fight over the same hotkeys."""
+    global _ORB_MUTEX
+    import ctypes
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        handle = kernel32.CreateMutexW(None, False, ORB_MUTEX_NAME)
+        if not handle:
+            return True  # cannot tell: let it run rather than refuse to start
+        if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return False
+        _ORB_MUTEX = handle  # held for the life of the process
+        return True
+    except Exception:
+        return True
+
+
+def _tell_running_orb(text: str) -> bool:
+    """Send one of Xenon's own commands to the orb that is already running.
+
+    The orb's little local server (``remote``) answers ``/api/cmd`` with the
+    key from ``%APPDATA%\\xenon\\remote.json``, and "listen now" is one of the
+    commands it already understands.
+    """
+    try:
+        import json as _json
+        import urllib.request
+
+        from xenon import remote
+
+        key = str(remote.load_config().get("key", ""))
+        if not key:
+            return False
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{remote.PORT}/api/cmd",
+            data=_json.dumps({"text": text}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Xenon-Key": key},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return 200 <= int(getattr(response, "status", 0)) < 300
+    except Exception:
+        return False
+
+
 def _orb(args: argparse.Namespace) -> int:
     if not is_windows():
         print("xenon orb requires Windows", file=sys.stderr)
@@ -1186,6 +1252,18 @@ def _orb(args: argparse.Namespace) -> int:
 
     if getattr(args, "startup", None):
         return _orb_startup(args.startup == "on")
+
+    wants_voice = getattr(args, "voice", False) or os.environ.get(
+        "XENON_VOICE_AUTO", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not _claim_orb_mutex():
+        # Already floating: talk to that one instead of starting a twin that
+        # grabs no hotkeys and shows a second tray icon.
+        if wants_voice and _tell_running_orb("listen now"):
+            print("Xenon is already running; it is listening now.", flush=True)
+        else:
+            print("Xenon is already running (tray icon). Use its menu, or Ctrl+Alt+X / Ctrl+Alt+V.",
+                  file=sys.stderr, flush=True)
+        return 0
 
     config = chat_config_from_env()
     if config is None:
@@ -1202,7 +1280,7 @@ def _orb(args: argparse.Namespace) -> int:
         from xenon.orb import start_music_widget_async
 
         app.root.after(1500, lambda: start_music_widget_async(app))
-    if getattr(args, "voice", False) or os.environ.get("XENON_VOICE_AUTO", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if wants_voice:
         app.root.after(1200, lambda: app._toggle_voice() if app._voice_runner is not None else None)
     print(
         "orb running: hover for options, drag to move, Ctrl+Alt+X to ask "
@@ -1918,6 +1996,39 @@ def _speakable(text: str) -> str:
     """Drop markdown punctuation that sounds wrong through SAPI."""
     cleaned = re.sub(r"[`*_#>|~]", " ", text)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+# After speech ends, Windows still has a moment of audio in its output buffer.
+# The microphone is deaf for this long so that tail is never transcribed.
+SPEECH_TAIL_S = 0.35
+# A transcript that repeats what Xenon just said, this soon after saying it,
+# is Xenon hearing itself (a headset leak, a speaker at volume, an echo).
+ECHO_WINDOW_S = 8.0
+
+_ECHO_WORDS = re.compile(r"[a-z0-9']+")
+
+
+def _drain_tail(source, seconds: float = SPEECH_TAIL_S) -> None:
+    """Read and throw away audio still playing after ``speak`` returned."""
+    deadline = time.monotonic() + max(0.0, seconds)
+    while time.monotonic() < deadline:
+        try:
+            if not source.read_frame():
+                break
+        except Exception:
+            break
+
+
+def _is_own_echo(transcript: str, spoken: str, threshold: float = 0.6) -> bool:
+    """True when a transcript is mostly the reply Xenon just spoke aloud."""
+    heard = _ECHO_WORDS.findall((transcript or "").lower())
+    said = _ECHO_WORDS.findall((spoken or "").lower())
+    if len(heard) < 3 or not said:
+        return False
+    if len(heard) > 2 * len(said) + 6:
+        return False  # far longer than the reply: someone is talking over it
+    common = set(heard) & set(said)
+    return len(common) / len(set(heard)) >= threshold
 
 
 def _do(args: argparse.Namespace) -> int:

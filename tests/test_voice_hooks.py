@@ -118,6 +118,47 @@ class HookHelperTests(unittest.TestCase):
         hooks = VoiceHooks(lambda *a: None, lambda *a: None, lambda *a: None)
         self.assertIsNone(hooks.confirm)
 
+    def test_a_repeated_reply_is_recognised_as_xenons_own_voice(self) -> None:
+        said = "Opening Notepad for you."
+        self.assertTrue(cli._is_own_echo("opening notepad for you", said))
+        self.assertTrue(cli._is_own_echo("Opening Notepad, for you.", said))
+        # A real question that happens to share a word is not an echo.
+        self.assertFalse(cli._is_own_echo("open spotify instead", said))
+        # Short words are left alone: "yes" must still work.
+        self.assertFalse(cli._is_own_echo("yes", said))
+        self.assertFalse(cli._is_own_echo("anything", ""))
+
+    def test_someone_talking_over_the_tail_is_not_an_echo(self) -> None:
+        said = "The weather in Bengaluru is twenty eight degrees and clear."
+        longer = said + " also can you open the settings window and then check my memory for the notes I saved"
+        self.assertFalse(cli._is_own_echo(longer, said))
+
+    def test_the_microphone_is_deaf_for_the_tail_of_speech(self) -> None:
+        reads = []
+
+        class Source:
+            def read_frame(self):
+                reads.append(1)
+                return [0.0] * 8
+
+        now = {"t": 100.0}
+
+        def monotonic():
+            now["t"] += 0.05   # each read costs 50 ms of the tail window
+            return now["t"]
+
+        with mock.patch.object(cli.time, "monotonic", monotonic):
+            cli._drain_tail(Source(), 0.3)
+        self.assertGreaterEqual(len(reads), 5)
+        self.assertLessEqual(len(reads), 8)
+
+    def test_a_dead_microphone_does_not_raise_while_draining(self) -> None:
+        class Source:
+            def read_frame(self):
+                raise OSError("device lost")
+
+        cli._drain_tail(Source(), 0.3)   # no exception, the loop carries on
+
 
 class VoiceRoutingTests(unittest.TestCase):
     """The orb's task layer as the voice thread sees it."""

@@ -438,5 +438,20 @@ class VoiceFastPathTests(unittest.TestCase):
         )
 
 
+class OneOrbPerSessionTests(unittest.TestCase):
+    def test_a_second_orb_cannot_take_the_mutex(self) -> None:
+        name = f"Local\\XenonTestOrb{os.getpid()}"
+        with mock.patch.object(cli, "ORB_MUTEX_NAME", name):
+            self.assertTrue(cli._claim_orb_mutex())
+            self.assertFalse(cli._claim_orb_mutex())
+
+    def test_talking_to_a_missing_orb_is_a_quiet_no(self) -> None:
+        from xenon import remote
+
+        with mock.patch.object(remote, "load_config", return_value={"key": "x" * 43}), \
+                mock.patch.object(remote, "PORT", 9):
+            self.assertFalse(cli._tell_running_orb("listen now"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -104,3 +104,14 @@ class ScriptFontTests(unittest.TestCase):
         self.assertEqual(script_font_file("दिल हारेया", bold=True), ("Nirmala.ttc", 1))
         self.assertEqual(script_font_file("దిల్", bold=False), ("Nirmala.ttc", 0))
         self.assertEqual(script_font_file("사랑", bold=False), ("malgun.ttf", 0))
+
+
+class OverlayRequestTests:
+    def test_the_orb_can_ask_for_the_float(self):
+        from xenon.music_widget import MusicWidget
+
+        widget = MusicWidget()
+        assert widget._overlay_requests == 0
+        widget.float_above_windows()
+        widget.float_above_windows()
+        assert widget._overlay_requests == 2
