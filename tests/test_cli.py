@@ -5,6 +5,7 @@ exercised without any API key or network access.
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -439,6 +440,18 @@ class VoiceFastPathTests(unittest.TestCase):
 
 
 class OneOrbPerSessionTests(unittest.TestCase):
+    def test_xenons_ears_are_open_by_default(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XENON_VOICE_AUTO", None)
+            self.assertTrue(cli._voice_wanted(argparse.Namespace()))
+            self.assertFalse(cli._voice_wanted(argparse.Namespace(no_voice=True)))
+            os.environ["XENON_VOICE_AUTO"] = "0"
+            self.assertFalse(cli._voice_wanted(argparse.Namespace()))
+            os.environ["XENON_VOICE_AUTO"] = "off"
+            self.assertFalse(cli._voice_wanted(argparse.Namespace()))
+            os.environ["XENON_VOICE_AUTO"] = "1"
+            self.assertTrue(cli._voice_wanted(argparse.Namespace()))
+
     @unittest.skipUnless(sys.platform == "win32", "named mutexes are a Windows API")
     def test_a_second_orb_cannot_take_the_mutex(self) -> None:
         name = f"Local\\XenonTestOrb{os.getpid()}"

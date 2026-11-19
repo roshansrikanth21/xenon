@@ -530,6 +530,46 @@ class OrbAppTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_sys.platform == "win32", "the orb is a Windows window")
+class SummonTests(unittest.TestCase):
+    """Saying its name brings the orb back out, without stealing focus."""
+
+    def test_a_hidden_orb_comes_back_when_it_hears_its_name(self) -> None:
+        import types
+
+        from xenon import orb as orb_module
+
+        handed_back = []
+        handed_back = []
+        handed_back = []
+        calls = []
+        fake = types.SimpleNamespace(
+            game_mode=False,
+            hidden=True,
+            toggle_hidden=lambda: calls.append("unhide"),
+            model=types.SimpleNamespace(mark_active=lambda: calls.append("active")),
+            _raise_orb=lambda: calls.append("raise"),
+        )
+        orb_module.OrbApp._summon(fake)
+        self.assertEqual(calls, ["unhide", "active", "raise"])
+
+    def test_a_game_in_front_is_left_alone(self) -> None:
+        import types
+
+        from xenon import orb as orb_module
+
+        calls = []
+        fake = types.SimpleNamespace(
+            game_mode=True,
+            hidden=True,
+            toggle_hidden=lambda: calls.append("unhide"),
+            model=types.SimpleNamespace(mark_active=lambda: calls.append("active")),
+            _raise_orb=lambda: calls.append("raise"),
+        )
+        orb_module.OrbApp._summon(fake)
+        self.assertEqual(calls, [])
+
+
+@unittest.skipUnless(_sys.platform == "win32", "the orb is a Windows window")
 class OrbLoopGuardTests(unittest.TestCase):
     """A destroyed window, or one bad frame, must never freeze the orb.
 

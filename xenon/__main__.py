@@ -980,7 +980,7 @@ def _orb_voice_runner(config):
         wake_word = os.environ.get("XENON_WAKE_WORD", "xenon")
         aliases = tuple(
             part.strip()
-            for part in os.environ.get("XENON_WAKE_ALIASES", "").split(",")
+            for part in os.environ.get("XENON_WAKE_ALIASES", "zenon").split(",")
             if part.strip()
         )
         # The orb floats on screen all day, so it waits for its name by default
@@ -1240,6 +1240,19 @@ def _tell_running_orb(text: str) -> bool:
         return False
 
 
+def _voice_wanted(args: argparse.Namespace) -> bool:
+    """Xenon keeps its ears open unless told otherwise.
+
+    Waiting for its name all day is the point of the orb, so voice starts with
+    it. ``--no-voice`` or ``XENON_VOICE_AUTO=0`` leaves the microphone off
+    until the Voice button or Ctrl+Alt+V switches it on.
+    """
+    if getattr(args, "no_voice", False):
+        return False
+    setting = os.environ.get("XENON_VOICE_AUTO", "1").strip().lower()
+    return setting not in {"0", "off", "false", "no"}
+
+
 def _orb(args: argparse.Namespace) -> int:
     if not is_windows():
         print("xenon orb requires Windows", file=sys.stderr)
@@ -1253,8 +1266,7 @@ def _orb(args: argparse.Namespace) -> int:
     if getattr(args, "startup", None):
         return _orb_startup(args.startup == "on")
 
-    wants_voice = getattr(args, "voice", False) or os.environ.get(
-        "XENON_VOICE_AUTO", "").strip().lower() in {"1", "true", "yes", "on"}
+    wants_voice = _voice_wanted(args)
     if not _claim_orb_mutex():
         # Already floating: talk to that one instead of starting a twin that
         # grabs no hotkeys and shows a second tray icon.
@@ -1283,7 +1295,9 @@ def _orb(args: argparse.Namespace) -> int:
     if wants_voice:
         app.root.after(1200, lambda: app._toggle_voice() if app._voice_runner is not None else None)
     print(
-        "orb running: hover for options, drag to move, Ctrl+Alt+X to ask "
+        "orb running: "
+        + ("listening for its name, " if wants_voice else "")
+        + "hover for options, drag to move, Ctrl+Alt+X to ask "
         "(\"do ...\" runs a task), Ctrl+Alt+V for voice, Ctrl+Alt+Esc stops a task, "
         "Close to quit",
         flush=True,
@@ -2512,7 +2526,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     orb.add_argument(
         "--voice", action="store_true",
-        help="start voice listening automatically when the orb opens",
+        help="listening for its name is the default: this keeps working and is accepted for scripts",
+    )
+    orb.add_argument(
+        "--no-voice", action="store_true",
+        help="open the orb with the microphone off (XENON_VOICE_AUTO=0 does the same)",
     )
     orb.set_defaults(handler=_orb)
 

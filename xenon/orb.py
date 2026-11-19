@@ -2222,6 +2222,20 @@ class OrbApp:
             self.dimmer.sync(overlays)
             self._raise_orb()
 
+    def _summon(self) -> None:
+        """It heard its name: come out of the tray and stand in front.
+
+        The orb folds into the notch when idle; a spoken name unfolds it (the
+        state stops being quiet), and this also brings it back if it had been
+        tucked away or covered.
+        """
+        if self.game_mode:
+            return          # never pop up over a game
+        if self.hidden:
+            self.toggle_hidden()
+        self.model.mark_active()
+        self._raise_orb()
+
     def _raise_orb(self) -> None:
         """Keep the orb above the dimming overlays."""
         try:
@@ -2936,6 +2950,8 @@ class OrbApp:
                 if state == self.model.state:
                     return
             self.model.set_state(state, detail)
+            if state in {"listening", "heard", "speaking"}:
+                self._summon()
 
         def on_state(state: str, detail: str) -> None:
             self.post(lambda: apply(state, detail))
