@@ -439,6 +439,7 @@ class VoiceFastPathTests(unittest.TestCase):
 
 
 class OneOrbPerSessionTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "named mutexes are a Windows API")
     def test_a_second_orb_cannot_take_the_mutex(self) -> None:
         name = f"Local\\XenonTestOrb{os.getpid()}"
         with mock.patch.object(cli, "ORB_MUTEX_NAME", name):

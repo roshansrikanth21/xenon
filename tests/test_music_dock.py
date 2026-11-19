@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import sys
 import tempfile
 import unittest
 
@@ -186,6 +187,7 @@ class SmoothLyricTests(unittest.TestCase):
         self.assertEqual(c.now(60000, True, "a", t=0.2), 60000)   # a seek snaps
         self.assertEqual(c.now(500, True, "b", t=0.25), 500)      # new song snaps
 
+    @unittest.skipUnless(sys.platform == "win32", "the lyric layout is measured with the Windows fonts")
     def test_wipe_crosses_the_word_and_lines_slide(self):
         box = scene.Box(0, 0, 900, 300)
         st = ms.coerce({"lyric_motion": "wipe", "line_motion": "slide"})
@@ -228,10 +230,12 @@ class HistoryTests(unittest.TestCase):
     def test_bad_file_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "music_history.json"), "w") as f:
-                json.dump([{"title": ""}, "junk", {"title": "ok", "cover": "..\\..\\evil.png"}], f)
+                json.dump([{"title": ""}, "junk", {"title": "ok", "cover": "..\\..\\evil.png"},
+                           {"title": "posix", "cover": "../../evil.png"}], f)
             entries = MusicHistory(tmp).entries()
-            self.assertEqual([e.title for e in entries], ["ok"])
+            self.assertEqual([e.title for e in entries], ["ok", "posix"])
             self.assertEqual(entries[0].cover, "evil.png")             # no path escapes
+            self.assertEqual(entries[1].cover, "evil.png")             # either separator
 
 
 class SplitOrbTests(unittest.TestCase):

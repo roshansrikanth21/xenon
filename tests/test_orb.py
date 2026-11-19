@@ -529,6 +529,7 @@ class OrbAppTests(unittest.TestCase):
         self.assertIn(app.model.state, {"idle", "searching"})
 
 
+@unittest.skipUnless(_sys.platform == "win32", "the orb is a Windows window")
 class OrbLoopGuardTests(unittest.TestCase):
     """A destroyed window, or one bad frame, must never freeze the orb.
 
@@ -587,6 +588,7 @@ class OrbLoopGuardTests(unittest.TestCase):
         self.assertEqual(waited, [])
 
 
+@unittest.skipUnless(_sys.platform == "win32", "global hotkeys are a Windows API")
 class HotkeyBindingTests(unittest.TestCase):
     def test_a_binding_may_carry_a_fallback(self) -> None:
         from xenon import orb as orb_module

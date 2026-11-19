@@ -7,10 +7,10 @@ requires-python = ">=3.11"
 [project.optional-dependencies]
 uia = ["pywinauto>=0.6.9", "pywin32>=306"]
 capture = ["mss>=9", "pillow>=10"]
-orb = ["pillow>=10", "pystray>=0.19", "pywin32>=306", "pycaw>=20240316"]
+orb = ["pillow>=10", "pystray>=0.19", "pywin32>=306", "pycaw>=20240316", "psutil>=5.9"]
 music = ["pillow>=10", "numpy>=1.26", "winsdk>=1.0.0b10", "pyaudiowpatch>=0.2.12.6"]
 voice = ["sounddevice>=0.4", "faster-whisper>=1.0", "pywin32>=306"]
-dev = ["pytest>=8", "numpy>=1.26"]
+dev = ["pytest>=8", "numpy>=1.26", "psutil>=5.9"]
 
 [build-system]
 requires = ["setuptools>=68"]

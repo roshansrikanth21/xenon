@@ -36,6 +36,16 @@ def history_dir() -> str:
     return os.path.join(base, "xenon")
 
 
+def cover_name(value: object) -> str:
+    """The bare file name of a stored cover, whichever separator wrote it.
+
+    The history file only ever holds hashed names, but it is a file on disk:
+    a hand-edited one must never be able to point outside the covers folder.
+    """
+    name = str(value or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    return "" if name in {"", ".", ".."} else name
+
+
 class MusicHistory:
     def __init__(self, directory: str | None = None) -> None:
         self.directory = directory or history_dir()
@@ -57,7 +67,7 @@ class MusicHistory:
                 continue
             entries.append(HistoryEntry(
                 title=item["title"], artist=str(item.get("artist", "")), app=str(item.get("app", "")),
-                cover=os.path.basename(str(item.get("cover", ""))),
+                cover=cover_name(item.get("cover", "")),
                 played_at=float(item.get("played_at", 0) or 0),
             ))
         return entries[:MAX_ENTRIES]
