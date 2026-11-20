@@ -2,9 +2,15 @@
 
 Worked one at a time: finish, show, get approval, commit, then next.
 
-- [x] **P0 — Barge-in (Alexa-style).** While Xenon is speaking, if it hears the
-      user through the microphone, lower its own TTS volume, then stop and
-      listen if the user keeps talking. Configurable; never answers itself.
+- [x] **P0 — Speech-driven system audio ducking (revised).** Not just Xenon's
+      own voice: while the *user* is talking, lower or pause whatever other
+      apps are playing (music, browser, games). Track the whole utterance from
+      first word to last, then restore every app's exact previous level after
+      the user finishes the command. Keep the TTS barge-in ducking too.
+- [ ] **P1 — Smart form-field suggestions.** When the user clicks a text field
+      (job application, bio, email, resume upload), read what the field is and
+      suggest 2-3 non-sensitive variations in a pop-up. Never auto-fill;
+      clicking a suggestion fills it. Process the field's context in real time.
 - [ ] **1 — 3D Core page.** WebGL polish: load progress, click/fullscreen,
       state-driven glow and motion.
 - [ ] **2 — Hand control / Holo.** Webcam gesture layer, real-hand test.

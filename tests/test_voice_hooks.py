@@ -11,6 +11,7 @@ import os
 import queue
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -296,11 +297,18 @@ class FakeTranscriber:
 
 
 class FakeDucker:
+    ducked = False
+    ducks = 0
+    restores = 0
+
     def duck(self, *args) -> int:
-        return 0
+        FakeDucker.ducked = True
+        FakeDucker.ducks += 1
+        return 1
 
     def restore(self) -> None:
-        pass
+        FakeDucker.ducked = False
+        FakeDucker.restores += 1
 
 
 class VoiceLoopTests(unittest.TestCase):
@@ -312,10 +320,13 @@ class VoiceLoopTests(unittest.TestCase):
         FakeSpeaker.wait_results = []
         FakeSpeaker.stops = 0
         FakeSpeaker.volumes = []
+        FakeDucker.ducked = False
+        FakeDucker.ducks = 0
+        FakeDucker.restores = 0
 
     def run_loop(self, utterances: list[str], announcements: list[tuple[str, str]], task, focus_listen,
-                 states=None, source_factory=None):
-        stop = threading.Event()
+                 states=None, source_factory=None, detector_factory=None, stop=None):
+        stop = stop or threading.Event()
         script = list(utterances)
 
         class FakeDetector:
@@ -352,7 +363,7 @@ class VoiceLoopTests(unittest.TestCase):
 
         with mock.patch("importlib.util.find_spec", find_spec), mock.patch.multiple(
             audio, MicrophoneSource=source_factory or FakeSource, SapiSpeaker=FakeSpeaker,
-            UtteranceDetector=FakeDetector, WhisperTranscriber=FakeTranscriber,
+            UtteranceDetector=detector_factory or FakeDetector, WhisperTranscriber=FakeTranscriber,
         ), mock.patch.object(duck, "make_ducker", FakeDucker):
             runner = cli._orb_voice_runner(None)
             self.assertIsNotNone(runner)
@@ -423,6 +434,42 @@ class VoiceLoopTests(unittest.TestCase):
         self.run_loop(["xenon hello"], [("say", "Hi.")],
                       lambda text, origin: None, focus_listen=lambda: False, states=states)
         self.assertEqual(FakeSpeaker.stops, 0)
+
+    def test_other_apps_duck_while_the_user_talks_then_restore(self) -> None:
+        # Nothing said the wake word: just a person talking. Other apps still
+        # go quiet for the whole utterance and come back afterwards.
+        stop = threading.Event()
+
+        class TalkingDetector:
+            def __init__(self, *args, **kwargs) -> None:
+                self.n = 0
+                self._speaking = True
+
+            @property
+            def speaking(self) -> bool:
+                return self._speaking
+
+            def reset(self) -> None:
+                pass
+
+            def feed(self, frame):
+                self.n += 1
+                if self.n < 12:
+                    return None
+                if self.n == 12:
+                    self._speaking = False
+                    return "just talking in the room"   # no wake word
+                if self.n > 20:
+                    stop.set()
+                else:
+                    time.sleep(0.06)   # let the restore tail expire
+                return None
+
+        self.run_loop([], [], lambda text, origin: None, focus_listen=lambda: False,
+                      detector_factory=TalkingDetector, stop=stop)
+        self.assertGreaterEqual(FakeDucker.ducks, 1)
+        self.assertGreaterEqual(FakeDucker.restores, 1)
+        self.assertFalse(FakeDucker.ducked)
 
 
 if __name__ == "__main__":

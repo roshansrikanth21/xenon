@@ -896,6 +896,10 @@ def _sweep_snapshots_once() -> None:
 
 FOCUS_LISTEN_S = 8.0
 
+# Once the user stops talking, hold other apps down briefly (natural pause
+# between words and before Xenon's reply) before restoring their exact levels.
+SPEECH_DUCK_TAIL_S = 0.8
+
 # One orb per session; see ``_claim_orb_mutex``.
 ORB_MUTEX_NAME = "Local\\XenonOrb"
 _ORB_MUTEX = None
@@ -1066,6 +1070,7 @@ def _orb_voice_runner(config):
         ducker = make_ducker()
         listen_now = getattr(hooks, "listen_now", None)
         focus_until = 0.0
+        speech_end_at = 0.0     # when the user's last utterance finished
 
         def say(reply: str) -> bool:
             """Speak a reply; True means the user talked over it and won."""
@@ -1138,11 +1143,22 @@ def _orb_voice_runner(config):
             waiting()
             shown_armed = False
             while not stop.is_set():
+                # Nothing is holding the duck and the user has stopped talking:
+                # put every other app back at the exact level it had before.
+                if (
+                    speech_end_at
+                    and ducker.ducked
+                    and not shown_armed
+                    and time.monotonic() - speech_end_at >= SPEECH_DUCK_TAIL_S
+                ):
+                    ducker.restore()
+                    speech_end_at = 0.0
                 announcement = _next_announcement(hooks)
                 if announcement is not None:
                     # A task finished or asked something: say it. A question
                     # opens one wake-less listen (8 s) for the answer.
                     kind, spoken = announcement
+                    speech_end_at = 0.0   # Xenon is about to speak; hold the duck
                     ducker.duck()
                     say(spoken)
                     ducker.restore()
@@ -1154,6 +1170,7 @@ def _orb_voice_runner(config):
                     # Push-to-talk: listen now, no wake word, music turned down.
                     listen_now.clear()
                     gate.arm()
+                    speech_end_at = 0.0
                     ducker.duck()
                     detector.reset()
                     armed_until = time.monotonic() + DEFAULT_TTL_S
@@ -1167,9 +1184,17 @@ def _orb_voice_runner(config):
                 # Drop back to standby once the armed window runs out.
                 if shown_armed and time.monotonic() >= armed_until:
                     shown_armed = False
+                    speech_end_at = 0.0
                     ducker.restore()
                     waiting()
+                # The instant the user starts talking, lower everything else —
+                # music, browser, games — and remember the levels to put back.
+                if getattr(detector, "speaking", False) and not ducker.ducked:
+                    ducker.duck()
+                    speech_end_at = 0.0
                 pcm = detector.feed(frame)
+                if pcm is not None:
+                    speech_end_at = time.monotonic()   # last word heard
                 if pcm is None:
                     continue
                 text = (transcriber.transcribe(pcm, source.sample_rate) or "").strip()
@@ -1211,6 +1236,7 @@ def _orb_voice_runner(config):
                     continue
                 armed_until = 0.0
                 shown_armed = False
+                speech_end_at = 0.0     # hold until Xenon's reply is finished
                 ducker.duck()  # keep it down while thinking and replying
                 chime.play("heard")
                 hooks.state("heard", command)
