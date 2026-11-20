@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 
 from xenon.audio import (
+    BargeInDetector,
     MicrophoneSource,
     SapiSpeaker,
     UtteranceDetector,
@@ -246,9 +247,15 @@ class FakeSapiEngine:
         self.spoken: list[tuple[str, int]] = []
         self.Rate = 0
         self.Volume = 100
+        self.wait_results: list[bool] | None = None
 
     def Speak(self, text: str, flags: int) -> None:  # noqa: N802 - SAPI naming
         self.spoken.append((text, flags))
+
+    def WaitUntilDone(self, ms: int) -> bool:  # noqa: N802 - SAPI naming
+        if self.wait_results:
+            return bool(self.wait_results.pop(0))
+        return True
 
 
 class SapiSpeakerTests(unittest.TestCase):
@@ -273,6 +280,47 @@ class SapiSpeakerTests(unittest.TestCase):
 
         self.assertEqual(engine.Rate, 2)
         self.assertEqual(engine.Volume, 80)
+
+    def test_async_speak_stops_and_ducks(self) -> None:
+        engine = FakeSapiEngine()
+        engine.wait_results = [False, True]
+        speaker = SapiSpeaker(engine=engine)
+        speaker.speak_async("  hello there  ")
+        self.assertEqual(engine.spoken[-1], ("hello there", 1))   # SVSFAsync
+        self.assertTrue(speaker.is_speaking())
+        self.assertFalse(speaker.is_speaking())
+        self.assertFalse(speaker.is_speaking())
+        speaker.set_volume(35)
+        self.assertEqual(engine.Volume, 35)
+        speaker.stop()
+        self.assertEqual(engine.spoken[-1], ("", 3))             # SVSFPurge
+        self.assertFalse(speaker.is_speaking())
+
+
+class BargeInDetectorTests(unittest.TestCase):
+    def test_it_ignores_xenons_own_audio_while_learning(self) -> None:
+        detector = BargeInDetector(learn_ms=300, need_ms=150)
+        for _ in range(10):
+            self.assertEqual(detector.feed(0.5, 30), 0)
+
+    def test_a_user_voice_ducks_then_stops_the_reply(self) -> None:
+        detector = BargeInDetector(floor=0.01, ratio=1.5, stop_ratio=2.0,
+                                   need_ms=120, learn_ms=90)
+        for _ in range(3):
+            detector.feed(0.02, 30)     # learn the leak
+        self.assertEqual(detector.feed(0.05, 30), 1)   # duck me
+        self.assertEqual(detector.feed(0.05, 30), 1)
+        self.assertEqual(detector.feed(0.05, 30), 1)
+        self.assertEqual(detector.feed(0.05, 30), 2)   # stop and listen
+        self.assertEqual(detector.feed(0.0, 30), 0)    # quiet resets
+
+    def test_a_brief_sound_does_not_interrupt(self) -> None:
+        detector = BargeInDetector(floor=0.01, ratio=1.5, stop_ratio=2.0,
+                                   need_ms=200, learn_ms=30)
+        detector.feed(0.0, 30)
+        self.assertLess(detector.feed(0.2, 30), 2)
+        for _ in range(4):
+            self.assertLess(detector.feed(0.0, 30), 2)
 
 
 class FakeMicStream:

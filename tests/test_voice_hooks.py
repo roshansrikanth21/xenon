@@ -261,9 +261,30 @@ class FakeSource:
 
 class FakeSpeaker:
     said: list[str] = []
+    wait_results: list[bool] = []
+    stops = 0
+    volumes: list[int] = []
 
     def speak(self, text: str) -> None:
         FakeSpeaker.said.append(text)
+
+    def speak_async(self, text: str) -> None:
+        FakeSpeaker.said.append(text)
+
+    def stop(self) -> None:
+        FakeSpeaker.stops += 1
+
+    def is_speaking(self) -> bool:
+        if FakeSpeaker.wait_results:
+            return bool(FakeSpeaker.wait_results.pop(0))
+        return False
+
+    def set_volume(self, volume: int) -> None:
+        FakeSpeaker.volumes.append(volume)
+
+    @property
+    def volume(self) -> int:
+        return 100
 
 
 class FakeTranscriber:
@@ -288,8 +309,12 @@ class VoiceLoopTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         scrubbed_env(self, XENON_CHIME="off", XENON_DB_PATH=str(Path(tmp.name) / "voice.db"))
         FakeSpeaker.said = []
+        FakeSpeaker.wait_results = []
+        FakeSpeaker.stops = 0
+        FakeSpeaker.volumes = []
 
-    def run_loop(self, utterances: list[str], announcements: list[tuple[str, str]], task, focus_listen):
+    def run_loop(self, utterances: list[str], announcements: list[tuple[str, str]], task, focus_listen,
+                 states=None, source_factory=None):
         stop = threading.Event()
         script = list(utterances)
 
@@ -318,14 +343,15 @@ class VoiceLoopTests(unittest.TestCase):
             said.put(item)
         exchanges = []
         hooks = VoiceHooks(
-            lambda state, detail: None, lambda level: None,
+            lambda state, detail: (states.append((state, detail)) if states is not None else None),
+            lambda level: None,
             lambda you, answer, private=False: exchanges.append((you, answer)),
             listen_now=None, task=task, focus_listen=focus_listen, say=said,
         )
         from xenon import audio, duck
 
         with mock.patch("importlib.util.find_spec", find_spec), mock.patch.multiple(
-            audio, MicrophoneSource=FakeSource, SapiSpeaker=FakeSpeaker,
+            audio, MicrophoneSource=source_factory or FakeSource, SapiSpeaker=FakeSpeaker,
             UtteranceDetector=FakeDetector, WhisperTranscriber=FakeTranscriber,
         ), mock.patch.object(duck, "make_ducker", FakeDucker):
             runner = cli._orb_voice_runner(None)
@@ -373,6 +399,30 @@ class VoiceLoopTests(unittest.TestCase):
                       lambda text, origin: calls.append((text, origin)), focus_listen=lambda: True)
         self.assertEqual(calls, [])
         self.assertIn("Done.", " | ".join(FakeSpeaker.said))
+
+    def test_barge_in_ducks_then_stops_the_reply_and_listens(self) -> None:
+        # A loud room while Xenon is speaking: it must lower its own voice,
+        # cut the reply, and show that it is listening again.
+        FakeSpeaker.wait_results = [True] * 40
+
+        class LoudSource(FakeSource):
+            def read_frame(self):
+                return [0.4] * 8
+
+        states: list[tuple[str, str]] = []
+        self.run_loop([], [("say", "This is a rather long reply.")],
+                      lambda text, origin: None, focus_listen=lambda: False,
+                      states=states, source_factory=LoudSource)
+        self.assertGreaterEqual(FakeSpeaker.stops, 1)
+        self.assertIn(35, FakeSpeaker.volumes)          # ducked first
+        self.assertIn(("listening", "go ahead"), states)
+
+    def test_quiet_room_never_barges_in(self) -> None:
+        FakeSpeaker.wait_results = [True] * 20 + [False]
+        states: list[tuple[str, str]] = []
+        self.run_loop(["xenon hello"], [("say", "Hi.")],
+                      lambda text, origin: None, focus_listen=lambda: False, states=states)
+        self.assertEqual(FakeSpeaker.stops, 0)
 
 
 if __name__ == "__main__":

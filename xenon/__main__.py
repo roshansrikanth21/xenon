@@ -970,6 +970,7 @@ def _orb_voice_runner(config):
         import time
 
         from xenon.audio import (
+            BargeInDetector,
             MicrophoneSource,
             SapiSpeaker,
             UtteranceDetector,
@@ -992,6 +993,16 @@ def _orb_voice_runner(config):
                 return kind(os.environ.get(name, default))
             except (TypeError, ValueError):
                 return default
+
+        # Alexa-style barge-in: if the user starts talking while Xenon is
+        # replying, turn Xenon's own voice down, then stop and listen.
+        barge_in = os.environ.get("XENON_BARGE_IN", "on").strip().lower() not in {"0", "off", "false", "no"}
+        barge_opts = dict(
+            ratio=env_number("XENON_BARGE_IN_RATIO", 1.6, float),
+            stop_ratio=env_number("XENON_BARGE_IN_STOP_RATIO", 2.4, float),
+            need_ms=env_number("XENON_BARGE_IN_MS", 180, int),
+        )
+        barge_volume = int(max(0, min(100, env_number("XENON_BARGE_IN_VOLUME", 35, int))))
 
         mic = os.environ.get("XENON_MIC_DEVICE") or None
         if mic is not None:
@@ -1056,26 +1067,60 @@ def _orb_voice_runner(config):
         listen_now = getattr(hooks, "listen_now", None)
         focus_until = 0.0
 
-        def say(reply: str) -> None:
+        def say(reply: str) -> bool:
+            """Speak a reply; True means the user talked over it and won."""
             nonlocal detector
             if not (reply or "").strip():
-                return  # e.g. a wake-less utterance nothing was waiting for
+                return False  # e.g. a wake-less utterance nothing was waiting for
             hooks.state("speaking", reply[:120])
             spoken = _speakable(reply)
             last_spoken["text"] = spoken
             last_spoken["at"] = time.monotonic()
             gate.set_speaking(True)
+            interrupted = False
+            volume = getattr(speaker, "volume", 100)
+            async_ok = all(hasattr(speaker, name) for name in
+                           ("speak_async", "stop", "is_speaking", "set_volume"))
             try:
-                speaker.speak(spoken)
-                # SAPI returns before the speakers have finished; stay deaf
-                # through the tail so it cannot be heard as a command.
-                _drain_tail(source)
+                if barge_in and async_ok:
+                    watcher = BargeInDetector(**barge_opts)
+                    ducked = False
+                    speaker.speak_async(spoken)
+                    # Watch the mic while it talks. Stage 1 lowers Xenon's own
+                    # volume; stage 2 cuts it off so the user can be heard.
+                    while speaker.is_speaking():
+                        frame = source.read_frame()
+                        if frame:
+                            rms = _math.sqrt(sum(v * v for v in frame) / len(frame))
+                            hooks.level(min(1.0, rms / 0.08))
+                            verdict = watcher.feed(rms)
+                            if verdict >= 1 and not ducked:
+                                speaker.set_volume(min(volume, barge_volume))
+                                ducked = True
+                            if verdict >= 2:
+                                speaker.stop()
+                                interrupted = True
+                                break
+                    if ducked:
+                        speaker.set_volume(volume)
+                    if not interrupted:
+                        # SAPI returns before the speakers have finished; stay
+                        # deaf through the tail so it cannot answer itself.
+                        _drain_tail(source)
+                else:
+                    speaker.speak(spoken)
+                    _drain_tail(source)
             finally:
                 gate.set_speaking(False)
             # The input stream buffered Xenon's own voice while it spoke;
             # reopening it drops that audio so it cannot answer itself.
             source.close()
             detector = make_detector()
+            if interrupted:
+                # The user spoke up: show that Xenon is listening again.
+                chime.play("wake")
+                hooks.state("listening", "go ahead")
+            return interrupted
 
         def answer(command: str) -> str:
             hooks.state("thinking", command)

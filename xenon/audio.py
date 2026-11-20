@@ -253,6 +253,12 @@ def _pcm_to_float(pcm: bytes):
     return (samples.astype(np.float32) / 32768.0)
 
 
+# SAPI Speak flags (verified against the installed SAPI type library):
+# 0 = speak synchronously, 1 = speak asynchronously, 3 = purge + asynchronous.
+SAPI_ASYNC = 1
+SAPI_PURGE = 3
+
+
 class SapiSpeaker:
     """Windows speech synthesis through SAPI, with an injectable engine."""
 
@@ -260,6 +266,8 @@ class SapiSpeaker:
         if sys.platform != "win32" and engine is None:
             raise RuntimeError("SAPI speech is Windows-only")
         self._engine = engine if engine is not None else _default_sapi_engine()
+        self._volume = volume
+        self._async_speaking = False
         try:
             self._engine.Rate = rate
             self._engine.Volume = volume
@@ -273,6 +281,99 @@ class SapiSpeaker:
         # 0 waits for playback to finish, which keeps the voice loop's mute
         # window aligned with the actual audio.
         self._engine.Speak(text, 0)
+
+    def speak_async(self, text: str) -> None:
+        """Start speaking without blocking, so the caller can listen for barge-in."""
+        text = text.strip()
+        if not text:
+            return
+        self._engine.Speak(text, SAPI_ASYNC)
+        # Engines without playback feedback (test doubles) are done instantly.
+        self._async_speaking = hasattr(self._engine, "WaitUntilDone")
+
+    def stop(self) -> None:
+        """Cut the current reply short (purge everything SAPI has queued)."""
+        self._async_speaking = False
+        self._engine.Speak("", SAPI_PURGE)
+
+    def is_speaking(self) -> bool:
+        """True while an asynchronous reply is still playing."""
+        wait = getattr(self._engine, "WaitUntilDone", None)
+        if wait is not None:
+            try:
+                return not bool(wait(0))
+            except Exception:
+                pass
+        return self._async_speaking
+
+    def set_volume(self, volume: int) -> None:
+        """Change SAPI's own volume (0-100), used to duck for the user."""
+        self._volume = int(max(0, min(100, volume)))
+        try:
+            self._engine.Volume = self._volume
+        except Exception:
+            pass
+
+    @property
+    def volume(self) -> int:
+        return self._volume
+
+
+class BargeInDetector:
+    """Notice the user talking over Xenon's own voice.
+
+    SAPI returns before the speakers finish, and a little of Xenon's own audio
+    always leaks into the microphone. The first fraction of a reply is used to
+    learn that leak; after that a sustained rise means the user has joined in.
+    Stage 1 asks the caller to duck Xenon's volume, stage 2 asks it to stop and
+    listen. Ambient noise is already quiet because ``duck`` lowered the music.
+    """
+
+    def __init__(self, floor: float = 0.015, ratio: float = 1.6,
+                 stop_ratio: float = 2.4, need_ms: float = 180.0,
+                 learn_ms: float = 350.0, frame_ms: float = 30.0,
+                 max_leak: float = 0.15) -> None:
+        self._floor = floor
+        self._ratio = ratio
+        self._stop_ratio = stop_ratio
+        self._need = need_ms
+        self._learn = learn_ms
+        self._frame_ms = frame_ms
+        self._max_leak = max_leak
+        self._learned = 0.0
+        self._leak = 0.0
+        self._loud_ms = 0.0
+        self._ducked = False
+        self._duck_seen = False
+
+    def feed(self, rms: float, frame_ms: float | None = None) -> int:
+        """Return 0 (keep talking), 1 (duck Xenon), or 2 (stop and listen)."""
+        ms = self._frame_ms if frame_ms is None else frame_ms
+        level = max(0.0, float(rms))
+        if self._learned < self._learn:
+            self._learned += ms
+            self._leak = max(self._leak, min(level, self._max_leak))
+            return 0
+        # Keep the learned leak as a slowly decaying reference: a loud user
+        # must not raise it to their own level and hide the interruption.
+        self._leak *= 0.999
+        duck_at = max(self._floor * 3.0, self._leak * self._ratio)
+        stop_at = max(self._floor * 4.0, self._leak * self._stop_ratio)
+        if level >= stop_at:
+            self._loud_ms += ms
+        elif level >= duck_at:
+            self._loud_ms += ms * 0.4     # talking, but not clearly over Xenon
+        else:
+            self._loud_ms = max(0.0, self._loud_ms - ms * 2)
+            self._duck_seen = False
+        if level < duck_at:
+            return 0
+        # Always duck first, even if the interruption is loud from the start:
+        # the caller needs one frame to turn Xenon's own volume down.
+        if not self._duck_seen or self._loud_ms < self._need:
+            self._duck_seen = True
+            return 1
+        return 2
 
 
 def _default_sapi_engine():
