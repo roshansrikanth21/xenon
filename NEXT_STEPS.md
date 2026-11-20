@@ -16,7 +16,7 @@ Worked one at a time: finish, show, get approval, commit, then next.
 - [ ] **2 — Hand control / Holo.** Webcam gesture layer, real-hand test.
 - [ ] **3 — Voice quality.** Whisper model/latency, SAPI voice, reliable
       push-to-talk.
-- [ ] **4 — Orb visuals.** Notch fold/unfold, idle "alive" breathing,
+- [x] **4 — Orb visuals.** Notch fold/unfold, idle "alive" breathing,
       ultrawide placement.
 - [ ] **5 — Music widget polish.** Lyrics sync, follow-the-singing,
       visible-by-default overlay.
