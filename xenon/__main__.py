@@ -1262,6 +1262,25 @@ def _orb_voice_runner(config):
 
     return run
 
+def _fields(args: argparse.Namespace) -> int:
+    """Watch clicked text fields and offer suggestions from the local profile."""
+    if not is_windows():
+        print("xenon fields requires Windows", file=sys.stderr)
+        return 2
+    try:
+        from xenon.field_assistant import FieldAssistant
+    except ImportError as error:
+        print(f"the field assistant needs pywin32 and tkinter: {error}", file=sys.stderr)
+        return 2
+    assistant = FieldAssistant()
+    print("fields: click a text field for suggestions (nothing is filled automatically)", flush=True)
+    try:
+        assistant.run()
+    except KeyboardInterrupt:
+        assistant.stop()
+    return 0
+
+
 def _claim_orb_mutex() -> bool:
     """One orb per session: a second one would fight over the same hotkeys."""
     global _ORB_MUTEX
@@ -2614,6 +2633,12 @@ def main(argv: list[str] | None = None) -> int:
         help="open the settings window (changes apply live to a running widget)",
     )
     music_widget.set_defaults(handler=_music_widget)
+
+    fields = subparsers.add_parser(
+        "fields",
+        help="suggest text for the form field you click (nothing is filled automatically)",
+    )
+    fields.set_defaults(handler=_fields)
 
     voice = subparsers.add_parser("voice", help="listen continuously and answer aloud")
     voice.add_argument("--mic", default=None, help="input device index or name (or set XENON_MIC_DEVICE)")
