@@ -981,8 +981,9 @@ def _orb_voice_runner(config):
             WhisperTranscriber,
         )
         from xenon.wake import WakeGate
+        from xenon.identity import wake_word as configured_wake_word
 
-        wake_word = os.environ.get("XENON_WAKE_WORD", "xenon")
+        wake_word = configured_wake_word()
         aliases = tuple(
             part.strip()
             for part in os.environ.get("XENON_WAKE_ALIASES", "zenon").split(",")
@@ -1832,8 +1833,10 @@ def _phone_status(app) -> dict:
     except Exception:
         now = None
     from xenon.untrusted import strip_invisible
+    from xenon.identity import display_name
 
     return {
+        "name": display_name(),
         "game": bool(getattr(app, "game_mode", False)),
         "xtreme": bool(getattr(app, "xtreme", False)),
         "widget": bool(app.music_widget_running()) if hasattr(app, "music_widget_running") else False,

@@ -27,7 +27,7 @@ canvas{display:block}
 </head><body>
 <div id="load">CHARGING CORE</div>
 <div class="hud">
-  <div class="row"><div><div class="brand">XENON</div><div class="k" style="margin-top:7px">Core · 02</div></div>
+  <div class="row"><div><div class="brand" id="brand">XENON</div><div class="k" style="margin-top:7px">Core · 02</div></div>
     <div style="text-align:right"><div class="k">Laptop</div><div class="v" id="clock">--:--</div></div></div>
   <div class="row"><div><div class="k">Now playing</div><div class="v" id="np">Nothing</div></div>
     <div style="text-align:right"><div class="k">Mode</div><div class="v" id="mode">Normal</div><div class="k" style="margin-top:12px">Esc to close · F for full screen</div></div></div>
@@ -100,7 +100,11 @@ const LABEL={idle:'STANDING BY',standby:'SAY XENON',listening:'LISTENING',heard:
   speaking:'SPEAKING',working:'WORKING',confirm:'CONFIRM ON SCREEN',error:'ERROR'};
 let st={orb:'idle',energy:0,playing:false},target=.25;
 async function poll(){try{const res=await fetch('/api/status',{headers:{'X-Xenon-Key':key}});if(res.ok){st=await res.json();
-  document.getElementById('state').textContent=st.xtreme?'XTREME MODE':st.game?'GAME MODE':(LABEL[st.orb]||String(st.orb||'').toUpperCase()||'STANDING BY');
+  const brand=String(st.name||'Xenon');
+  const brandEl=document.getElementById('brand');if(brandEl.textContent!==brand.toUpperCase())brandEl.textContent=brand.toUpperCase();
+  const raw=LABEL[st.orb]||String(st.orb||'').toUpperCase()||'STANDING BY';
+  const label=(raw.includes('XENON')?raw.replace(/XENON/g,brand.toUpperCase()):raw);
+  document.getElementById('state').textContent=st.xtreme?'XTREME MODE':st.game?'GAME MODE':label;
   document.getElementById('np').textContent=st.track?`${st.track}${st.artist?' · '+st.artist:''}`:'Nothing';
   document.getElementById('mode').textContent=st.xtreme?'Xtreme':st.game?'Game':'Normal';document.getElementById('clock').textContent=st.time||'--:--'}}
   catch(e){document.getElementById('state').textContent='OFFLINE'}}

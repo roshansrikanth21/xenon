@@ -13,6 +13,8 @@ import math
 import re
 from dataclasses import dataclass, field
 
+from xenon.identity import display_name, standby_hint
+
 # Window and orb geometry (logical px). The window is larger than the orb so
 # the satellites can fan out around it without resizing the window.
 WINDOW = 320
@@ -96,8 +98,8 @@ PALETTE: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "confirm": ((251, 191, 36), (245, 158, 11)),
 }
 STATE_LABELS = {
-    "idle": "XENON",
-    "standby": "say xenon",
+    "idle": display_name().upper(),
+    "standby": standby_hint(),
     "listening": "listening",
     "heard": "got it",
     "thinking": "thinking",

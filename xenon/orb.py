@@ -1139,7 +1139,9 @@ class Tray:
             pystray.Menu.SEPARATOR,
             item("Quit Xenon", lambda: app.post(app.quit)),
         )
-        self._icon = pystray.Icon("xenon", self._image(), "Xenon", menu)
+        from xenon.identity import display_name
+
+        self._icon = pystray.Icon("xenon", self._image(), display_name(), menu)
         self._icon.run_detached()
 
     def _image(self):

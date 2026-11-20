@@ -16,6 +16,7 @@ from functools import lru_cache
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
+from xenon.identity import display_name
 from xenon.orb_model import (
     NOTCH_DROP,
     NOTCH_HEIGHT,
@@ -269,7 +270,7 @@ class OrbRenderer:
         elif music:
             main, sub = music.get("title", ""), clock
         else:
-            main, sub = clock or "XENON", ""
+            main, sub = clock or display_name().upper(), ""
         measure = ImageDraw.Draw(Image.new("L", (1, 1)))
         main_w = measure.textlength(main, font=self._notch_font)
         sub_w = measure.textlength(sub, font=self._notch_small) if sub else 0
@@ -741,7 +742,7 @@ class OrbRenderer:
         text = model.center_label()
         if not text:
             return
-        if text == "XENON":
+        if text == display_name().upper():
             text = " ".join(text)  # letter-spaced wordmark
         else:
             text = text.lower()
