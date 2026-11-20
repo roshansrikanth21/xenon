@@ -18,7 +18,7 @@ Worked one at a time: finish, show, get approval, commit, then next.
       push-to-talk.
 - [ ] **4 — Orb visuals.** Notch fold/unfold, idle "alive" breathing,
       ultrawide placement.
-- [ ] **5 — Music widget polish.** Lyrics sync, follow-the-singing,
+- [x] **5 — Music widget polish.** Lyrics sync, follow-the-singing,
       visible-by-default overlay.
 - [ ] **6 — Smarter navigation + gestures.** Navigate the computer on voice
       command; understand pause/resume music from hand gestures.

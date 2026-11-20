@@ -76,6 +76,7 @@ _CHOICES = {
 class MusicSettings:
     # startup / behaviour
     start_with_orb: bool = True
+    start_on_top: bool = False        # float above windows from the start (wallpaper by default)
     idle_minutes: float = 5.0       # no music this long -> only the corner record (0 = never)
     pause_when_covered: bool = True
     show_dock: bool = True           # corner disc with controls and recent songs

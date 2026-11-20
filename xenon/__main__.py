@@ -1385,6 +1385,8 @@ def _music_widget(args: argparse.Namespace) -> int:
     if not is_windows():
         print("xenon music-widget requires Windows", file=sys.stderr)
         return 2
+    if getattr(args, "overlay", False):
+        os.environ["XENON_MUSIC_OVERLAY"] = "1"
     if getattr(args, "settings", False):
         from xenon.music_settings_ui import SettingsWindow
 
@@ -2612,6 +2614,10 @@ def main(argv: list[str] | None = None) -> int:
     music_widget.add_argument(
         "--settings", action="store_true",
         help="open the settings window (changes apply live to a running widget)",
+    )
+    music_widget.add_argument(
+        "--overlay", action="store_true",
+        help="start the player above windows instead of on the wallpaper",
     )
     music_widget.set_defaults(handler=_music_widget)
 
