@@ -21,16 +21,18 @@ canvas{display:block}
 .brand{letter-spacing:.46em;color:var(--holo);font-weight:600;font-size:12px}
 #state{font-size:15px;letter-spacing:.42em;color:var(--holo);text-shadow:0 0 14px rgba(111,243,255,.5)}
 .center{position:fixed;left:0;right:0;bottom:12%;text-align:center;pointer-events:none}
-#load{position:fixed;inset:0;display:grid;place-items:center;color:var(--dim);letter-spacing:.3em;font-size:11px}
+#load{position:fixed;inset:0;display:grid;place-items:center;color:var(--dim);letter-spacing:.3em;font-size:11px;transition:opacity .6s}
+#load .bar{width:220px;height:2px;background:rgba(111,243,255,.15);margin-top:14px;overflow:hidden}
+#load .bar>i{display:block;height:100%;width:0%;background:var(--holo);box-shadow:0 0 8px var(--holo);transition:width .25s}
 </style>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 </head><body>
-<div id="load">CHARGING CORE</div>
+<div id="load">CHARGING CORE<div class="bar"><i id="bar"></i></div></div>
 <div class="hud">
   <div class="row"><div><div class="brand">XENON</div><div class="k" style="margin-top:7px">Core · 02</div></div>
     <div style="text-align:right"><div class="k">Laptop</div><div class="v" id="clock">--:--</div></div></div>
   <div class="row"><div><div class="k">Now playing</div><div class="v" id="np">Nothing</div></div>
-    <div style="text-align:right"><div class="k">Mode</div><div class="v" id="mode">Normal</div><div class="k" style="margin-top:12px">Esc to close · F for full screen</div></div></div>
+    <div style="text-align:right"><div class="k">Mode</div><div class="v" id="mode">Normal</div><div class="k" style="margin-top:12px">Esc to close · click or F for full screen</div></div></div>
 </div>
 <div class="center"><div id="state">STANDING BY</div></div>
 <script type="module">
@@ -44,7 +46,7 @@ import {MeshoptDecoder} from 'three/addons/libs/meshopt_decoder.module.js';
 
 const key=(location.hash.match(/k=([^&]+)/)||[])[1]||(()=>{try{return sessionStorage.getItem('xk')||''}catch(e){return ''}})();
 if(location.hash){try{sessionStorage.setItem('xk',key)}catch(e){} history.replaceState(null,'',location.pathname)}
-addEventListener('keydown',e=>{if(e.key==='Escape')window.close();if(e.key==='f'||e.key==='F'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}});
+addEventListener('keydown',e=>{if(e.key==='Escape')window.close();if(e.key==='f'||e.key==='F'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}});addEventListener('click',()=>{if(!document.fullscreenElement)document.documentElement.requestFullscreen().catch(()=>{})})
 
 // ---- scene ------------------------------------------------------------------
 const r=new THREE.WebGLRenderer({antialias:true});r.setPixelRatio(Math.min(2,devicePixelRatio));r.setSize(innerWidth,innerHeight);
@@ -88,19 +90,30 @@ function relight(obj,list,glow,glass){const extra=[];obj.traverse(o=>{if(!o.isMe
   // A faint wireframe over the glass shell, so its shape reads in the dark.
   if(glass){const w=new THREE.Mesh(o.geometry,new THREE.MeshBasicMaterial({color:0x6ff3ff,wireframe:true,transparent:true,opacity:.05,depthWrite:false}));extra.push([o,w])}});
   extra.forEach(([o,w])=>o.add(w))}
-Promise.all([loader.loadAsync('/models/core.glb'),loader.loadAsync('/models/ring.glb')]).then(([a,b])=>{
+const loadEl=document.getElementById('load'),bar=document.getElementById('bar');
+function setProgress(p){if(bar)bar.style.width=Math.max(0,Math.min(100,p))+'%'}
+let coreP=0,ringP=0;
+function track(url){return new Promise((resolve,reject)=>{
+  loader.load(url,d=>resolve(d),e=>{if(e&&e.total){const p=e.loaded/e.total*100;
+    if(url.includes('core.glb'))coreP=p;else ringP=p;setProgress((coreP+ringP)/2)}},e=>reject(e))})}
+Promise.all([track('/models/core.glb'),track('/models/ring.glb')]).then(([a,b])=>{
   shell=new THREE.Group();shell.add(a.scene);fit(a.scene,2.6,1.15);relight(a.scene,shellMats,.05,true);scene.add(shell);
-  // The ring lies on the floor and orbits under the core.
-  // A small power ring standing on the floor, orbiting the core.
   ring=new THREE.Group();ring.add(b.scene);fit(b.scene,.55,0);relight(b.scene,ringMats,.08,false);scene.add(ring);
-  document.getElementById('load').remove()}).catch(e=>{document.getElementById('load').textContent='COULD NOT LOAD THE CORE: '+e})
+  loadEl.style.opacity='0';setTimeout(()=>loadEl.remove(),650)}).catch(e=>{loadEl.textContent='COULD NOT LOAD THE CORE: '+e})
 
 // ---- Xenon's live state ----------------------------------------------------------
 const LABEL={idle:'STANDING BY',standby:'SAY XENON',listening:'LISTENING',heard:'GOT IT',thinking:'THINKING',searching:'SEARCHING',
   speaking:'SPEAKING',working:'WORKING',confirm:'CONFIRM ON SCREEN',error:'ERROR'};
 let st={orb:'idle',energy:0,playing:false},target=.25;
+// The core takes on the colour of what Xenon is doing.
+const HUE={idle:.52,standby:.52,listening:.52,heard:.14,thinking:.74,searching:.74,
+  speaking:.08,working:.36,confirm:.12,error:.0};
+let stateHue=.52;
 async function poll(){try{const res=await fetch('/api/status',{headers:{'X-Xenon-Key':key}});if(res.ok){st=await res.json();
-  document.getElementById('state').textContent=st.xtreme?'XTREME MODE':st.game?'GAME MODE':(LABEL[st.orb]||String(st.orb||'').toUpperCase()||'STANDING BY');
+  const s=st.orb||'idle';stateHue=HUE[s]??.52;
+  const label=st.xtreme?'XTREME MODE':st.game?'GAME MODE':(LABEL[s]||String(s||'').toUpperCase()||'STANDING BY');
+  const stateEl=document.getElementById('state');
+  if(stateEl.textContent!==label){stateEl.textContent=label;stateEl.style.color=`hsl(${stateHue*360} 100% 72%)`}
   document.getElementById('np').textContent=st.track?`${st.track}${st.artist?' · '+st.artist:''}`:'Nothing';
   document.getElementById('mode').textContent=st.xtreme?'Xtreme':st.game?'Game':'Normal';document.getElementById('clock').textContent=st.time||'--:--'}}
   catch(e){document.getElementById('state').textContent='OFFLINE'}}
@@ -115,7 +128,8 @@ function frame(){const dt=Math.min(.05,clock.getDelta()),t=clock.elapsedTime;
   charge+=(want+music*.9+speakPulse-charge)*Math.min(1,dt*4);
   const fast={thinking:3.2,searching:3.2,working:2.4,listening:1.4,heard:1.8}[s]??.35;spin+=dt*(fast+music*1.5);
   energyU.uCharge.value=charge;energyU.uTime.value=t;energy.scale.setScalar(1+music*.18+speakPulse*.3);
-  coreLight.intensity=1.5+charge*4;coreLight.color.setHSL(s==='error'?.0:.52,1,.62);
+  coreLight.intensity=1.5+charge*4;coreLight.color.setHSL(stateHue,1,.62);
+  dustMat.color.setHSL(stateHue,.9,.7);
   bloom.strength=.25+charge*.45;r.toneMappingExposure=.7+charge*.12;
   shellMats.forEach(m=>m.emissiveIntensity=.02+charge*.12);ringMats.forEach(m=>m.emissiveIntensity=.04+charge*.35+music*.6);
   if(shell){shell.rotation.y=spin*.15;shell.position.y=Math.sin(t*.8)*.05}
