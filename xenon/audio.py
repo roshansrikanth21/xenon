@@ -8,11 +8,19 @@ from __future__ import annotations
 
 import array
 import math
+import os
 import sys
 from collections import deque
 from typing import Callable, Iterable, Protocol, Sequence
 
 SampleFrame = Sequence[float]
+
+
+def _env_number(name: str, default, kind):
+    try:
+        return kind(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def rms(frame: SampleFrame) -> float:
@@ -223,6 +231,10 @@ class WhisperTranscriber:
             )
         return self._model
 
+    def warmup(self) -> None:
+        """Load the model ahead of the first real utterance (no transcription)."""
+        self._load()
+
     def transcribe(self, pcm: bytes, sample_rate: int) -> str:
         model = self._load()
         audio = _pcm_to_float(resample_pcm16(pcm, sample_rate, TARGET_SAMPLE_RATE))
@@ -262,15 +274,23 @@ SAPI_PURGE = 3
 class SapiSpeaker:
     """Windows speech synthesis through SAPI, with an injectable engine."""
 
-    def __init__(self, rate: int = 1, volume: int = 100, engine=None) -> None:
+    def __init__(self, rate: int | None = None, volume: int | None = None, engine=None) -> None:
         if sys.platform != "win32" and engine is None:
             raise RuntimeError("SAPI speech is Windows-only")
         self._engine = engine if engine is not None else _default_sapi_engine()
-        self._volume = volume
+        rate = _env_number("XENON_TTS_RATE", 1, int) if rate is None else rate
+        volume = _env_number("XENON_TTS_VOLUME", 100, int) if volume is None else volume
+        self._volume = max(0, min(100, int(volume)))
         self._async_speaking = False
         try:
-            self._engine.Rate = rate
-            self._engine.Volume = volume
+            self._engine.Rate = int(rate)
+            self._engine.Volume = self._volume
+            wanted = os.environ.get("XENON_TTS_VOICE", "").strip().lower()
+            if wanted:
+                for voice in self._engine.GetVoices():
+                    if wanted in str(voice.GetAttribute("Name")).lower():
+                        self._engine.Voice = voice
+                        break
         except Exception:
             pass
 
@@ -374,6 +394,15 @@ class BargeInDetector:
             self._duck_seen = True
             return 1
         return 2
+
+
+def list_voices() -> list[str]:
+    """Names of the installed SAPI voices (for 'xenon voice --list-voices')."""
+    try:
+        engine = _default_sapi_engine()
+        return [str(voice.GetAttribute("Name")) for voice in engine.GetVoices()]
+    except Exception:
+        return []
 
 
 def _default_sapi_engine():

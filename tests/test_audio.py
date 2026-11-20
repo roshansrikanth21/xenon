@@ -1,9 +1,11 @@
 import array
+import os
 import unittest
 from unittest import mock
 
 from xenon.audio import (
     BargeInDetector,
+    list_voices,
     MicrophoneSource,
     SapiSpeaker,
     UtteranceDetector,
@@ -431,6 +433,46 @@ class ListenOnceTests(unittest.TestCase):
                 return "   "
 
         self.assertIsNone(listen_once(self.source(sequence), self.detector, MuteTranscriber()))
+
+
+class VoiceQualityTests(unittest.TestCase):
+    def test_tts_settings_come_from_the_environment(self) -> None:
+        engine = FakeSapiEngine()
+        with mock.patch.dict(os.environ, {"XENON_TTS_RATE": "3", "XENON_TTS_VOLUME": "55"}):
+            speaker = SapiSpeaker(engine=engine)
+        self.assertEqual(engine.Rate, 3)
+        self.assertEqual(engine.Volume, 55)
+        self.assertEqual(speaker.volume, 55)
+
+    def test_a_named_voice_is_selected_by_substring(self) -> None:
+        class Voice:
+            def __init__(self, name):
+                self.name = name
+
+            def GetAttribute(self, key):
+                return self.name
+
+        engine = FakeSapiEngine()
+        engine.GetVoices = lambda: [Voice("Microsoft David"), Voice("Microsoft Zira")]  # type: ignore[attr-defined]
+        with mock.patch.dict(os.environ, {"XENON_TTS_VOICE": "zira"}):
+            SapiSpeaker(engine=engine)
+        self.assertEqual(engine.Voice.name, "Microsoft Zira")
+
+    def test_warmup_loads_the_model_once_without_transcribing(self) -> None:
+        loads = []
+
+        def factory(name, device, compute):
+            loads.append((name, device, compute))
+            return object()
+
+        transcriber = WhisperTranscriber(model_factory=factory)
+        transcriber.warmup()
+        transcriber.warmup()
+        self.assertEqual(loads, [("base", "cpu", "int8")])
+
+    def test_listing_voices_never_raises(self) -> None:
+        with mock.patch("xenon.audio._default_sapi_engine", side_effect=OSError("no SAPI")):
+            self.assertEqual(list_voices(), [])
 
 
 if __name__ == "__main__":

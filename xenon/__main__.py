@@ -204,6 +204,18 @@ def _voice(args: argparse.Namespace) -> int:
                 print(f"{index}: {device.get('name')} (inputs={device.get('max_input_channels')})")
         return 0
 
+    if getattr(args, "list_voices", False):
+        from xenon.audio import list_voices
+
+        voices = list_voices()
+        if not voices:
+            print("no SAPI voices found", file=sys.stderr)
+            return 1
+        for voice in voices:
+            print(voice)
+        print("pick one with XENON_TTS_VOICE=<name>", file=sys.stderr)
+        return 0
+
     config = chat_config_from_env()
     if config is None:
         print(
@@ -971,6 +983,7 @@ def _orb_voice_runner(config):
 
     def run(hooks, stop) -> None:
         import math as _math
+        import threading
         import time
 
         from xenon.audio import (
@@ -1037,7 +1050,17 @@ def _orb_voice_runner(config):
                 "XENON_WHISPER_PROMPT", _whisper_hint(wake_word)
             ),
             beam_size=env_number("XENON_WHISPER_BEAM", 1, int),
+            language=os.environ.get("XENON_WHISPER_LANGUAGE", "en"),
         )
+        # Cold-loading the model on the first word costs a few seconds. Warm it
+        # in the background while the orb is already showing "loading voice".
+        if os.environ.get("XENON_WHISPER_WARMUP", "on").strip().lower() not in {"0", "off", "false", "no"}:
+            def warm():
+                try:
+                    transcriber.warmup()
+                except Exception:
+                    pass
+            threading.Thread(target=warm, daemon=True, name="xenon-whisper-warm").start()
         store = MemoryStore(os.environ.get("XENON_DB_PATH", DEFAULT_DB_PATH))
         # Without a model, open/switch/search still work through the fast path.
         assistant = (
@@ -2622,6 +2645,7 @@ def main(argv: list[str] | None = None) -> int:
     voice.add_argument("--always", action="store_true", help="dispatch every sentence without a wake word (default)")
     voice.add_argument("--wake", action="store_true", help="require the wake word again")
     voice.add_argument("--list-mics", action="store_true", help="list input devices and exit")
+    voice.add_argument("--list-voices", action="store_true", help="list installed SAPI voices and exit")
     voice.set_defaults(handler=_voice)
 
     search = subparsers.add_parser("search", help="search the web (DuckDuckGo)")

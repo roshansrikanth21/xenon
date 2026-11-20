@@ -7,14 +7,14 @@ Worked one at a time: finish, show, get approval, commit, then next.
       apps are playing (music, browser, games). Track the whole utterance from
       first word to last, then restore every app's exact previous level after
       the user finishes the command. Keep the TTS barge-in ducking too.
-- [ ] **P1 — Smart form-field suggestions.** When the user clicks a text field
+- [x] **P1 — Smart form-field suggestions.** When the user clicks a text field
       (job application, bio, email, resume upload), read what the field is and
       suggest 2-3 non-sensitive variations in a pop-up. Never auto-fill;
       clicking a suggestion fills it. Process the field's context in real time.
-- [ ] **1 — 3D Core page.** WebGL polish: load progress, click/fullscreen,
+- [x] **1 — 3D Core page.** WebGL polish: load progress, click/fullscreen,
       state-driven glow and motion.
 - [ ] **2 — Hand control / Holo.** Webcam gesture layer, real-hand test.
-- [ ] **3 — Voice quality.** Whisper model/latency, SAPI voice, reliable
+- [x] **3 — Voice quality.** Whisper model/latency, SAPI voice, reliable
       push-to-talk.
 - [ ] **4 — Orb visuals.** Notch fold/unfold, idle "alive" breathing,
       ultrawide placement.
