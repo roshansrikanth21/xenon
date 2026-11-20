@@ -20,7 +20,7 @@ Worked one at a time: finish, show, get approval, commit, then next.
       ultrawide placement.
 - [ ] **5 — Music widget polish.** Lyrics sync, follow-the-singing,
       visible-by-default overlay.
-- [ ] **6 — Smarter navigation + gestures.** Navigate the computer on voice
+- [x] **6 — Smarter navigation + gestures.** Navigate the computer on voice
       command; understand pause/resume music from hand gestures.
 - [ ] **7 — Custom wake word + UI rename (lowest priority).** Change the wake
       word (e.g. "Rose") and have the whole UI/branding reflect it.
