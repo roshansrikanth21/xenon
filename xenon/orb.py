@@ -931,6 +931,18 @@ DEFAULT_HOTKEYS: dict[str, Binding] = {
 }
 
 
+def notch_x(left: int, right: int, size: int, position: str = "center") -> int:
+    """Top-edge x for the folded orb on this monitor.
+
+    On an ultrawide screen the middle can be a long way from where you work;
+    ``XENON_ORB_POSITION=left|right`` puts the notch near the side instead.
+    """
+    width = right - left
+    fraction = {"left": 1 / 6, "start": 1 / 6, "right": 5 / 6, "end": 5 / 6}
+    f = fraction.get((position or "center").strip().lower(), 0.5)
+    return int(left + width * f - size / 2)
+
+
 def _bindings(value) -> list[tuple[int, int]]:
     """Normalise one hotkey definition to the list of combinations to try."""
     if not value:
@@ -1458,6 +1470,7 @@ class OrbApp:
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
         self.notch = os.environ.get("XENON_ORB_NOTCH", "on").strip().lower() not in {"0", "off", "false", "no"}
+        self.notch_position = os.environ.get("XENON_ORB_POSITION", "center").strip().lower()
         if self.notch:
             position = self._notch_position()
         else:
@@ -2345,7 +2358,7 @@ class OrbApp:
                 left, top, right = info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right
         except Exception:
             pass
-        x = (left + right) // 2 - self.size // 2
+        x = notch_x(left, right, self.size, self.notch_position)
         y = top + int(NOTCH_DROP * self.scale) - self.size // 2
         return x, y
 

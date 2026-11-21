@@ -649,5 +649,24 @@ class HotkeyBindingTests(unittest.TestCase):
                 self.assertTrue(mods & orb_module.MOD_CONTROL, name)
 
 
+class OrbPositionTests(unittest.TestCase):
+    def test_notch_defaults_to_the_middle_of_the_monitor(self) -> None:
+        from xenon.orb import notch_x
+
+        self.assertEqual(notch_x(0, 3440, 100), 1720 - 50)
+
+    def test_ultrawide_can_put_the_notch_at_a_side(self) -> None:
+        from xenon.orb import notch_x
+
+        self.assertLess(notch_x(0, 3440, 100, "left"), 900)
+        self.assertGreater(notch_x(0, 3440, 100, "right"), 2500)
+        self.assertEqual(notch_x(0, 3440, 100, "nonsense"), notch_x(0, 3440, 100))
+
+    def test_a_second_monitor_offset_is_respected(self) -> None:
+        from xenon.orb import notch_x
+
+        self.assertGreater(notch_x(3440, 4880, 100, "left"), 3440)
+
+
 if __name__ == "__main__":
     unittest.main()
