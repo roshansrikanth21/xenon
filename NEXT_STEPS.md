@@ -36,7 +36,8 @@
       exercises the actual SAPI, microphone, pycaw and UI Automation.
 - [x] **Audio device settings.** `xenon audio` shows and changes the microphone
       and SAPI speaker, persists them in `%APPDATA%\xenon\audio.json`, and
-      `xenon audio --settings` opens a picker with a real test.
+      `xenon audio --settings` opens a picker with a real test. The same two
+      pickers are in the Music widget settings, Audio tab.
 - [ ] **Packaging.** No `xenon` entry point, installer/exe, or voice autostart
       yet.
 - [ ] **Noisy-room VAD / mic-in-the-loop latency.** Energy endpointer still

@@ -478,3 +478,31 @@ checkout keeps using Windows defaults.
 precedence and bad input. `tests/test_audio.py` gained SAPI output-token
 selection tests. Full suite: **1138 passed, 1 skipped, 633 subtests**.
 
+---
+
+## Session — 2026-11-22 (device pickers in the music settings window)
+
+Asked: "add an option here" while looking at the Music widget settings, Audio
+tab. The separate `xenon audio --settings` window was not where they wanted it.
+
+Added in commit `e6837bf` to `xenon/music_settings_ui.py`:
+
+- The Audio tab now starts with a **Xenon voice** section containing
+  **Microphone** and **Speaker** dropdowns.
+- Input values are `index: friendly name` from sounddevice; output values are
+  SAPI audio-output descriptions. Both include **System default**.
+- Selecting either one writes `%APPDATA%\xenon\audio.json` immediately through
+  `audio_settings.save()`; the status line says a restart is needed.
+- The existing Sensitivity and Smoothing sliders moved under a **Visualizer**
+  heading, with a corrected note: the visualizer still follows the default
+  speaker through WASAPI loopback, it is not affected by the voice device
+  pickers.
+- A test instance of `SettingsWindow` was created and destroyed successfully;
+  full suite remains **1138 passed, 1 skipped**.
+
+Note for the next session: this window and the orb are separate processes. The
+running orb must be restarted (or relaunched from the tray) before it reads a
+new `audio.json`; the settings window itself always reads the file when it
+opens.
+
+
