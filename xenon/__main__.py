@@ -971,6 +971,35 @@ def _exchange(hooks, command: str, reply: str, private: bool) -> None:
         hooks.exchange(command, reply)
 
 
+def _read_frame_and_level(source) -> tuple[object, float]:
+    """Read one mic frame and compute its level exactly once.
+
+    ``MicrophoneSource`` does the RMS in numpy while converting the samples;
+    injected fakes only have ``read_frame``, so keep that path working too.
+    """
+    frame_ms = getattr(source, "frame_ms", None)
+    start = time.monotonic() if frame_ms is not None else 0.0
+    read_with_level = getattr(source, "read_frame_with_level", None)
+    if read_with_level is not None:
+        result = read_with_level()
+    else:
+        frame = source.read_frame()
+        if not frame:
+            result = (frame, 0.0)
+        else:
+            import math
+
+            result = (frame, math.sqrt(sum(value * value for value in frame) / len(frame)))
+    if frame_ms is not None:
+        # A healthy sounddevice read blocks for roughly one frame. If a device
+        # hands back data instantly (dropped/broken stream), don't spin at
+        # thousands of frames a second and burn a core all day.
+        wait = float(frame_ms) / 1000 - (time.monotonic() - start)
+        if wait > 0.002:
+            time.sleep(wait)
+    return result
+
+
 def _orb_voice_runner(config):
     """Return a runner for the orb's Voice toggle, or None without the extras."""
     import importlib.util
@@ -1115,9 +1144,8 @@ def _orb_voice_runner(config):
                     # Watch the mic while it talks. Stage 1 lowers Xenon's own
                     # volume; stage 2 cuts it off so the user can be heard.
                     while speaker.is_speaking():
-                        frame = source.read_frame()
+                        frame, rms = _read_frame_and_level(source)
                         if frame:
-                            rms = _math.sqrt(sum(v * v for v in frame) / len(frame))
                             hooks.level(min(1.0, rms / 0.08))
                             verdict = watcher.feed(rms)
                             if verdict >= 1 and not ducked:
@@ -1198,9 +1226,8 @@ def _orb_voice_runner(config):
                     shown_armed = True
                     chime.play("wake")
                     waiting()
-                frame = source.read_frame()
+                frame, rms = _read_frame_and_level(source)
                 if frame:
-                    rms = _math.sqrt(sum(v * v for v in frame) / len(frame))
                     hooks.level(min(1.0, rms / 0.08))
                 # Drop back to standby once the armed window runs out.
                 if shown_armed and time.monotonic() >= armed_until:
@@ -1213,7 +1240,7 @@ def _orb_voice_runner(config):
                 if getattr(detector, "speaking", False) and not ducker.ducked:
                     ducker.duck()
                     speech_end_at = 0.0
-                pcm = detector.feed(frame)
+                pcm = detector.feed(frame, rms)
                 if pcm is not None:
                     speech_end_at = time.monotonic()   # last word heard
                 if pcm is None:

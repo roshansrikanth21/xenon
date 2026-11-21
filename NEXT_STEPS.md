@@ -36,6 +36,8 @@
       exercises the actual SAPI, microphone, pycaw and UI Automation.
 - [x] **Microphone light bar.** A proximity bar in the folded notch and under
       the open orb follows live mic volume (`XENON_MIC_BAR=off` disables it).
+- [x] **Voice-loop CPU fix.** One mic read, one numpy RMS per frame, plus a
+      guard against broken streams spinning hot.
 - [x] **Audio device settings.** `xenon audio` shows and changes the microphone
       and SAPI speaker, persists them in `%APPDATA%\xenon\audio.json`, and
       `xenon audio --settings` opens a picker with a real test. The same two

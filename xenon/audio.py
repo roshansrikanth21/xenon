@@ -105,9 +105,14 @@ class UtteranceDetector:
         ordered = sorted(self._levels)
         self.noise_floor = ordered[int(len(ordered) * 0.2)]
 
-    def feed(self, frame: SampleFrame) -> bytes | None:
-        """Return completed 16-bit mono PCM for one utterance, or ``None``."""
-        level = rms(frame)
+    def feed(self, frame: SampleFrame, level: float | None = None) -> bytes | None:
+        """Return completed 16-bit mono PCM for one utterance, or ``None``.
+
+        ``level`` lets the caller reuse an RMS it already computed (for the
+        mic meter) instead of walking the same frame a second time.
+        """
+        if level is None:
+            level = rms(frame)
         if self.adaptive:
             self._track_floor(level)
             ratio = self.end_ratio if self._speaking else self.start_ratio
@@ -509,11 +514,25 @@ class MicrophoneSource:
         return self._stream
 
     def read_frame(self) -> list[float]:
+        return self.read_frame_with_level()[0]
+
+    def read_frame_with_level(self) -> tuple[list[float], float]:
+        """Read one frame and its RMS without a second pass over the samples.
+
+        numpy does both the dot product and the float conversion in C; doing
+        it in Python three times per frame (conversion, level for the orb,
+        level for the endpointer) kept a core busy all day.
+        """
         stream = self._open()
         data, overflowed = stream.read(self._frame_samples)
-        if overflowed:
-            pass
-        return [float(value) for value in data.reshape(-1)]
+        values = data.reshape(-1)
+        try:
+            level = float(math.sqrt(float(values.dot(values)) / len(values))) if len(values) else 0.0
+            frame = values.tolist()
+        except (AttributeError, TypeError):
+            frame = [float(value) for value in values]
+            level = rms(frame)
+        return frame, level
 
     def close(self) -> None:
         if self._stream is not None:

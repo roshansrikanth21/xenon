@@ -336,7 +336,7 @@ class VoiceLoopTests(unittest.TestCase):
             def reset(self) -> None:
                 pass
 
-            def feed(self, frame):
+            def feed(self, frame, level=None):
                 if not script:
                     stop.set()
                     return None
@@ -452,7 +452,7 @@ class VoiceLoopTests(unittest.TestCase):
             def reset(self) -> None:
                 pass
 
-            def feed(self, frame):
+            def feed(self, frame, level=None):
                 self.n += 1
                 if self.n < 12:
                     return None

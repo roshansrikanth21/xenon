@@ -385,6 +385,39 @@ class MicrophoneSourceTests(unittest.TestCase):
         source.close()
         source.close()
 
+    def test_read_frame_with_level_reuses_the_samples(self) -> None:
+        stream = FakeMicStream([0.5] * 480)
+        source = MicrophoneSource(stream_factory=lambda r, s: stream)
+        frame, level = source.read_frame_with_level()
+        self.assertEqual(len(frame), 480)
+        self.assertAlmostEqual(level, rms(frame))
+
+    def test_numpy_frames_use_the_fast_path(self) -> None:
+        import numpy as np
+
+        class Stream:
+            def read(self, count):
+                return np.full((count, 1), 0.25, dtype="float32"), False
+
+        source = MicrophoneSource(stream_factory=lambda r, s: Stream())
+        frame, level = source.read_frame_with_level()
+        self.assertEqual(len(frame), 480)
+        self.assertAlmostEqual(level, 0.25)
+
+
+class ReusedLevelTests(unittest.TestCase):
+    def test_feed_can_use_a_level_computed_elsewhere(self) -> None:
+        detector = UtteranceDetector(threshold=0.5, adaptive=False)
+        for _ in range(8):
+            self.assertIsNone(detector.feed([0.0] * 8, 0.9))
+        self.assertTrue(detector.speaking)
+        result = None
+        for _ in range(12):
+            result = detector.feed([0.0] * 8, 0.0)
+            if result is not None:
+                break
+        self.assertIsNotNone(result)
+
 
 class ListenOnceTests(unittest.TestCase):
     def setUp(self) -> None:

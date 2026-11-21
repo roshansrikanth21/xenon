@@ -566,4 +566,50 @@ clock should fill cyan from the centre and fall back when you stop. Say
 "Xenon" and keep talking: the short bar under the open orb should track your
 voice. `XENON_MIC_BAR=off` removes both.
 
+---
+
+## Session — 2026-11-22 (why Xenon felt slow: mic loop CPU)
+
+Asked: "why does xenon feel so slow restart it".
+
+### Measurement, not a guess
+
+The running orb (`python -m xenon orb`) was using about **105% of one core**
+continuously (6.31 s of CPU over 6.03 s wall). `py-spy record -p <pid> -d 6`
+put ~90% of samples in the `xenon-orb-voice` thread, with the hottest frames:
+
+- `MicrophoneSource.read_frame.<locals>.<listcomp>` — converting 480 numpy
+  floats to Python floats with a comprehension on every 30 ms frame.
+- two separate `rms()` generators over the same frame: one for `hooks.level`
+  (the light bar) and another inside `UtteranceDetector.feed()`.
+
+Orb rendering was not the problem: a docked notch frame takes ~2 ms and a full
+orb ~9 ms (2 ms was even measured while the light bar was active).
+
+### What was changed
+
+- `xenon/audio.py`: `MicrophoneSource.read_frame_with_level()` now computes the
+  RMS with `numpy.dot` and converts samples with `ndarray.tolist()`, both in C.
+  `read_frame()` delegates to it. A fallback keeps injected fake streams
+  working.
+- `UtteranceDetector.feed(frame, level=None)`: the caller can hand in an RMS it
+  already computed instead of recomputing it.
+- `xenon/__main__.py`: new `_read_frame_and_level()` helper; both the standby
+  loop and the barge-in watcher read once and compute one level, then pass it to
+  the orb and the endpointer. It also throttles a broken stream that returns
+  instantly to roughly one frame interval, instead of spinning at thousands of
+  reads a second.
+- Test doubles in `tests/test_voice_hooks.py` accept the optional `level`
+  argument.
+
+A local microbenchmark of the old three Python passes vs the new numpy path:
+**61.6 µs/frame → 6.4 µs/frame (9.6x)**.
+
+### Tests
+
+`tests/test_audio.py` covers the new fast path, its fake-stream fallback, and
+`feed(..., level=...)`. Full suite: **1146 passed, 1 skipped, 633 subtests**.
+After deploying, CPU should be re-measured on the restarted orb; if it is still
+high, the next suspect is the music widget's own loops, not the voice loop.
+
 
