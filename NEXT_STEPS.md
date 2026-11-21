@@ -7,7 +7,7 @@ Worked one at a time: finish, show, get approval, commit, then next.
       apps are playing (music, browser, games). Track the whole utterance from
       first word to last, then restore every app's exact previous level after
       the user finishes the command. Keep the TTS barge-in ducking too.
-- [ ] **P1 — Smart form-field suggestions.** When the user clicks a text field
+- [x] **P1 — Smart form-field suggestions.** When the user clicks a text field
       (job application, bio, email, resume upload), read what the field is and
       suggest 2-3 non-sensitive variations in a pop-up. Never auto-fill;
       clicking a suggestion fills it. Process the field's context in real time.
