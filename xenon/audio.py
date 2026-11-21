@@ -274,14 +274,22 @@ SAPI_PURGE = 3
 class SapiSpeaker:
     """Windows speech synthesis through SAPI, with an injectable engine."""
 
-    def __init__(self, rate: int | None = None, volume: int | None = None, engine=None) -> None:
+    def __init__(
+        self,
+        rate: int | None = None,
+        volume: int | None = None,
+        engine=None,
+        output: str | None = None,
+    ) -> None:
         if sys.platform != "win32" and engine is None:
             raise RuntimeError("SAPI speech is Windows-only")
+        injected = engine is not None
         self._engine = engine if engine is not None else _default_sapi_engine()
         rate = _env_number("XENON_TTS_RATE", 1, int) if rate is None else rate
         volume = _env_number("XENON_TTS_VOLUME", 100, int) if volume is None else volume
         self._volume = max(0, min(100, int(volume)))
         self._async_speaking = False
+        self._output_name = ""
         try:
             self._engine.Rate = int(rate)
             self._engine.Volume = self._volume
@@ -293,6 +301,21 @@ class SapiSpeaker:
                         break
         except Exception:
             pass
+        if output is None:
+            if injected:
+                output = ""
+            else:
+                try:
+                    from xenon.audio_settings import current_output
+
+                    output = current_output()
+                except Exception:
+                    output = os.environ.get("XENON_TTS_OUTPUT", "")
+        if output:
+            try:
+                self._output_name = _apply_sapi_output(self._engine, str(output))
+            except Exception:
+                self._output_name = ""
 
     def speak(self, text: str) -> None:
         text = text.strip()
@@ -337,6 +360,11 @@ class SapiSpeaker:
     @property
     def volume(self) -> int:
         return self._volume
+
+    @property
+    def output(self) -> str:
+        """The SAPI output actually selected, or '' for the system default."""
+        return self._output_name
 
 
 class BargeInDetector:
@@ -403,6 +431,46 @@ def list_voices() -> list[str]:
         return [str(voice.GetAttribute("Name")) for voice in engine.GetVoices()]
     except Exception:
         return []
+
+
+def _sapi_output_tokens():
+    """The SAPI audio-output tokens: ``[(description, token), ...]``."""
+    import win32com.client
+
+    category = win32com.client.Dispatch("SAPI.SpObjectTokenCategory")
+    category.SetId(r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\AudioOutput", False)
+    return [
+        (str(token.GetDescription()), token)
+        for token in category.EnumerateTokens()
+    ]
+
+
+def _apply_sapi_output(engine, selector: str) -> str:
+    """Point SAPI at the output whose description contains ``selector``."""
+    wanted = str(selector or "").strip().lower()
+    if not wanted:
+        return ""
+    for description, token in _sapi_output_tokens():
+        if wanted in description.lower():
+            engine.AudioOutput = token
+            return description
+    return ""
+
+
+def list_outputs() -> list[str]:
+    """Speaker endpoints SAPI can target ('xenon audio --list')."""
+    try:
+        return [description for description, _ in _sapi_output_tokens()]
+    except Exception:
+        return []
+
+
+def default_output() -> str:
+    """The output SAPI is using right now (the Windows default endpoint)."""
+    try:
+        return str(_default_sapi_engine().AudioOutput.GetDescription())
+    except Exception:
+        return ""
 
 
 def _default_sapi_engine():

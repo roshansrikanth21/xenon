@@ -1022,12 +1022,9 @@ def _orb_voice_runner(config):
         )
         barge_volume = int(max(0, min(100, env_number("XENON_BARGE_IN_VOLUME", 35, int))))
 
-        mic = os.environ.get("XENON_MIC_DEVICE") or None
-        if mic is not None:
-            try:
-                mic = int(mic)
-            except ValueError:
-                pass
+        from xenon import audio_settings
+
+        mic = audio_settings.current_input()
         hooks.state("thinking", "loading speech model")
         speaker = SapiSpeaker()
         source = MicrophoneSource(device=mic)
@@ -1325,6 +1322,75 @@ def _verify(args: argparse.Namespace) -> int:
             duck=everything or bool(getattr(args, "duck", False)),
         )
     )
+
+
+def _audio(args: argparse.Namespace) -> int:
+    from xenon import audio_settings
+
+    if getattr(args, "settings", False):
+        try:
+            from xenon.audio_settings_ui import AudioSettingsWindow
+        except ImportError as error:
+            print(f"the audio settings window needs tkinter: {error}", file=sys.stderr)
+            return 2
+        AudioSettingsWindow().run()
+        return 0
+
+    settings = audio_settings.load()
+    changed = False
+
+    if getattr(args, "input", None) is not None:
+        index = audio_settings.resolve_input(args.input)
+        if index is None:
+            print(f"no input device matches {args.input!r}; try `xenon audio --list`", file=sys.stderr)
+            return 1
+        settings.input = audio_settings.describe_input(index)
+        changed = True
+        print(f"input  -> {settings.input} (#{index})")
+
+    if getattr(args, "output", None) is not None:
+        from xenon.audio import list_outputs
+
+        wanted = str(args.output).lower()
+        match = next((name for name in list_outputs() if wanted in name.lower()), None)
+        if match is None:
+            print(f"no output matches {args.output!r}; try `xenon audio --list`", file=sys.stderr)
+            return 1
+        settings.output = match
+        changed = True
+        print(f"output -> {match}")
+
+    if changed:
+        path = audio_settings.save(settings)
+        print(f"saved {path}; restart the orb to use it")
+
+    if getattr(args, "list", False):
+        print("inputs:")
+        for index, name in audio_settings.input_devices():
+            print(f"  {index:>2}  {name}")
+        print("outputs (SAPI):")
+        for name in audio_settings.output_devices():
+            print(f"      {name}")
+    elif not changed and not getattr(args, "test", False):
+        from xenon.audio import default_output
+
+        selected_in = audio_settings.current_input()
+        selected_name = audio_settings.describe_input(selected_in)
+        if selected_name:
+            print(f"input : {selected_name} (#{selected_in})")
+        else:
+            index, name = audio_settings.default_input()
+            print(f"input : system default: {name or 'unknown'} (#{index})")
+        print(f"output: {audio_settings.current_output() or default_output() or 'system default'}")
+        print("change with `xenon audio --input <name|index> --output <name>`")
+        print("or open the window with `xenon audio --settings`")
+
+    if getattr(args, "test", False):
+        spoken, peak = audio_settings.test(settings.input or None, settings.output or None)
+        heard = "no signal" if peak is None else f"peak {peak:.3f}"
+        print(f'spoke "{spoken}" and recorded the selected microphone ({heard})')
+        print("if you did not hear it, pick another output: xenon audio --list")
+    return 0
 
 
 def _claim_orb_mutex() -> bool:
@@ -2710,6 +2776,17 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--duck", action="store_true", help="duck other apps for 1.5 s, then restore")
     verify.add_argument("--all", action="store_true", help="run every hardware check")
     verify.set_defaults(handler=_verify)
+
+    audio = subparsers.add_parser(
+        "audio",
+        help="choose the microphone Xenon listens to and the speaker it talks through",
+    )
+    audio.add_argument("--list", action="store_true", help="list input and output devices")
+    audio.add_argument("--input", default=None, help="input device index or name fragment")
+    audio.add_argument("--output", default=None, help="output device name fragment")
+    audio.add_argument("--test", action="store_true", help="speak through the output and record the input")
+    audio.add_argument("--settings", action="store_true", help="open the audio settings window")
+    audio.set_defaults(handler=_audio)
 
     voice = subparsers.add_parser("voice", help="listen continuously and answer aloud")
     voice.add_argument("--mic", default=None, help="input device index or name (or set XENON_MIC_DEVICE)")

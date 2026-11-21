@@ -5,6 +5,8 @@ from unittest import mock
 
 from xenon.audio import (
     BargeInDetector,
+    default_output,
+    list_outputs,
     list_voices,
     MicrophoneSource,
     SapiSpeaker,
@@ -473,6 +475,46 @@ class VoiceQualityTests(unittest.TestCase):
     def test_listing_voices_never_raises(self) -> None:
         with mock.patch("xenon.audio._default_sapi_engine", side_effect=OSError("no SAPI")):
             self.assertEqual(list_voices(), [])
+
+
+class SapiOutputTests(unittest.TestCase):
+    class Token:
+        def __init__(self, description: str) -> None:
+            self.description = description
+
+        def GetDescription(self):  # noqa: N802 - SAPI naming
+            return self.description
+
+    def _tokens(self):
+        return [
+            ("ED340CUR (NVIDIA High Definition Audio)", self.Token("ED340CUR")),
+            ("Speakers (Realtek(R) Audio)", self.Token("Realtek")),
+        ]
+
+    def test_an_output_name_selects_the_matching_token(self) -> None:
+        engine = FakeSapiEngine()
+        with mock.patch("xenon.audio._sapi_output_tokens", return_value=self._tokens()):
+            speaker = SapiSpeaker(engine=engine, output="realtek")
+        self.assertEqual(speaker.output, "Speakers (Realtek(R) Audio)")
+        self.assertEqual(engine.AudioOutput.description, "Realtek")
+
+    def test_an_unknown_output_leaves_the_default_in_place(self) -> None:
+        engine = FakeSapiEngine()
+        with mock.patch("xenon.audio._sapi_output_tokens", return_value=self._tokens()):
+            speaker = SapiSpeaker(engine=engine, output="no such speakers")
+        self.assertEqual(speaker.output, "")
+        self.assertFalse(hasattr(engine, "AudioOutput"))
+
+    def test_listing_outputs_returns_descriptions(self) -> None:
+        with mock.patch("xenon.audio._sapi_output_tokens", return_value=self._tokens()):
+            self.assertEqual(
+                list_outputs(),
+                ["ED340CUR (NVIDIA High Definition Audio)", "Speakers (Realtek(R) Audio)"],
+            )
+
+    def test_default_output_never_raises(self) -> None:
+        with mock.patch("xenon.audio._default_sapi_engine", side_effect=OSError("no SAPI")):
+            self.assertEqual(default_output(), "")
 
 
 if __name__ == "__main__":

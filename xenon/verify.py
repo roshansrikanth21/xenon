@@ -65,10 +65,13 @@ def check_sapi(speak: bool = False) -> Check:
         return _result("sapi", FAIL, f"voices unavailable: {error}")
     if not voices:
         return _result("sapi", FAIL, "no SAPI voices installed")
+    speaker = SapiSpeaker()
     detail = f"{len(voices)} voice(s): {voices[0]}"
+    if speaker.output:
+        detail += f"; output: {speaker.output}"
     if speak:
         try:
-            SapiSpeaker().speak("Xenon audio check. If you can hear this, speech output works.")
+            speaker.speak("Xenon audio check. If you can hear this, speech output works.")
         except Exception as error:
             return _result("sapi", FAIL, f"speak failed: {error}")
         detail += " - spoke one sentence"
@@ -90,12 +93,21 @@ def check_microphone(record: bool = False, seconds: float = 1.0) -> Check:
         return _result("microphone", FAIL, f"device query failed: {error}")
     if not inputs:
         return _result("microphone", FAIL, "no input device")
-    detail = f"{len(inputs)} input device(s): {inputs[0][1].get('name')}"
+    from xenon import audio_settings
+
+    selected = audio_settings.current_input()
+    name = audio_settings.describe_input(selected)
+    detail = f"{len(inputs)} input device(s)"
+    if name:
+        detail += f"; selected: {name} (#{selected})"
+    else:
+        default_index, default_name = audio_settings.default_input()
+        detail += f"; system default: {default_name or inputs[0][1].get('name')} (#{default_index})"
     if not record:
         return _result("microphone", PASS, detail + " - not opened (use --mic)")
     from xenon.audio import MicrophoneSource
 
-    source = MicrophoneSource()
+    source = MicrophoneSource(device=selected)
     try:
         samples = []
         deadline = time.monotonic() + max(0.2, seconds)
