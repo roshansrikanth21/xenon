@@ -49,3 +49,36 @@
 - [ ] **Docs refresh.** `README.md` still says there is no tray icon or global
       hotkey; `TODO.md` still lists the shared UIA fixture layer.
 - [ ] **Rotate the Groq key** that was pasted into chat earlier.
+
+## Xenon Holo (hand-gesture holograms, `/holo`)
+
+Done: four modes (Xenon core, XR-7 reactor, Periodic Lab, Shards), the
+Holo-Explorer gesture set, throw, cues, hand rings, occlusion, Bohr model,
+ionic crystals, camera retry, slow-quality offer. Tested on real hand photos
+through the real MediaPipe tracker. A 70-agent audit (2026-11-15) confirmed 53
+open items. The top ones:
+
+- [ ] **Security: no-key polling.** Holo opened without a key polls `/api/status`
+      with an empty key and trips the global auth limiter for every client.
+- [ ] **Stable hand identity.** `hands.js` keys state by MediaPipe array index, so
+      when one hand leaves, the other inherits its pinch or fist and a held
+      object drops. Key by handedness, as the original does.
+- [ ] **Per-hand pinch target.** `main.js` shares one `pinchTarget`/`dragging`,
+      so a second hand can steal a drag.
+- [ ] **Table drops 1.25 units** every time it is shown again (`table.js`).
+      There is a partial fix in `git stash` ("holo-fix-audit partial").
+- [ ] **Palm flip:** add a neutral band, a 100 ms hold and a 0.8 s quick-flip
+      window, and ignore a hand that has just appeared.
+- [ ] **Twist** also rotates the reactor you are holding. Explode should follow
+      the hands continuously (fist accordion, twist dial).
+- [ ] **Shards:** fist-move is 2.6x too fast (scaled parent). Cards are
+      double-escaped. The live refresh overwrites other cards.
+- [ ] **Shell:** settings don't persist; dim is a toggle, not a slider; changing
+      quality doesn't reopen the camera; restartTracking can die silently;
+      inference runs even without a new video frame.
+- [ ] **Parity extras:** reactor stats panel, slot tether and snap flash,
+      two-hand grip move/rotate, forearm/elbow panel (pose tracking).
+- [ ] **Live webcam session** by the user, including the palm-up flip.
+
+The full list with evidence is in the audit output. The fix workflow script
+`holo-fix-audit` groups the items by file. Rerun it to apply them.
