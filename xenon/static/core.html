@@ -29,7 +29,7 @@ canvas{display:block}
 </head><body>
 <div id="load">CHARGING CORE<div class="bar"><i id="bar"></i></div></div>
 <div class="hud">
-  <div class="row"><div><div class="brand">XENON</div><div class="k" style="margin-top:7px">Core · 02</div></div>
+  <div class="row"><div><div class="brand" id="brand">XENON</div><div class="k" style="margin-top:7px">Core · 02</div></div>
     <div style="text-align:right"><div class="k">Laptop</div><div class="v" id="clock">--:--</div></div></div>
   <div class="row"><div><div class="k">Now playing</div><div class="v" id="np">Nothing</div></div>
     <div style="text-align:right"><div class="k">Mode</div><div class="v" id="mode">Normal</div><div class="k" style="margin-top:12px">Esc to close · click or F for full screen</div></div></div>
@@ -111,7 +111,11 @@ const HUE={idle:.52,standby:.52,listening:.52,heard:.14,thinking:.74,searching:.
 let stateHue=.52;
 async function poll(){try{const res=await fetch('/api/status',{headers:{'X-Xenon-Key':key}});if(res.ok){st=await res.json();
   const s=st.orb||'idle';stateHue=HUE[s]??.52;
-  const label=st.xtreme?'XTREME MODE':st.game?'GAME MODE':(LABEL[s]||String(s||'').toUpperCase()||'STANDING BY');
+  const brand=String(st.name||'Xenon');
+  const brandEl=document.getElementById('brand');if(brandEl.textContent!==brand.toUpperCase())brandEl.textContent=brand.toUpperCase();
+  const raw=LABEL[s]||String(s||'').toUpperCase()||'STANDING BY';
+  const base=raw.includes('XENON')?raw.replace(/XENON/g,brand.toUpperCase()):raw;
+  const label=st.xtreme?'XTREME MODE':st.game?'GAME MODE':base;
   const stateEl=document.getElementById('state');
   if(stateEl.textContent!==label){stateEl.textContent=label;stateEl.style.color=`hsl(${stateHue*360} 100% 72%)`}
   document.getElementById('np').textContent=st.track?`${st.track}${st.artist?' · '+st.artist:''}`:'Nothing';
