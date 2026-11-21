@@ -1304,6 +1304,15 @@ def _fields(args: argparse.Namespace) -> int:
     return 0
 
 
+def _goto(args: argparse.Namespace) -> int:
+    from xenon import navigate
+
+    reply = navigate.run(" ".join(args.place))
+    print(reply or "I don't know that place. Try: desktop, documents, downloads, pictures, music, videos, home.",
+          file=sys.stderr if reply is None else sys.stdout)
+    return 0 if reply else 1
+
+
 def _claim_orb_mutex() -> bool:
     """One orb per session: a second one would fight over the same hotkeys."""
     global _ORB_MUTEX
@@ -2668,6 +2677,13 @@ def main(argv: list[str] | None = None) -> int:
         help="suggest text for the form field you click (nothing is filled automatically)",
     )
     fields.set_defaults(handler=_fields)
+
+    goto = subparsers.add_parser(
+        "goto",
+        help="open a known folder (desktop, documents, downloads, pictures, music, videos, home)",
+    )
+    goto.add_argument("place", nargs="+")
+    goto.set_defaults(handler=_goto)
 
     voice = subparsers.add_parser("voice", help="listen continuously and answer aloud")
     voice.add_argument("--mic", default=None, help="input device index or name (or set XENON_MIC_DEVICE)")
