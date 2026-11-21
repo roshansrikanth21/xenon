@@ -24,6 +24,13 @@ from typing import Callable, Sequence
 
 PROFILE_NAME = "profile.json"
 
+
+def profile_path() -> str:
+    """Where the local-only form profile lives."""
+    return os.path.join(
+        os.environ.get("APPDATA") or os.path.expanduser("~"), "xenon", PROFILE_NAME
+    )
+
 # Fields that must never be filled from a profile, however they are labelled.
 SENSITIVE = re.compile(
     r"password|passwd|pwd|secret|card|credit|cvv|cvc|ssn|social security|"
@@ -77,8 +84,7 @@ class Profile:
 
     @classmethod
     def load(cls, path: str | None = None) -> "Profile":
-        path = path or os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
-                                    "xenon", PROFILE_NAME)
+        path = path or profile_path()
         try:
             with open(path, encoding="utf-8") as handle:
                 raw = json.load(handle)

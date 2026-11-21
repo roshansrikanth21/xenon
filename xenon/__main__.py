@@ -1314,6 +1314,19 @@ def _goto(args: argparse.Namespace) -> int:
     return 0 if reply else 1
 
 
+def _verify(args: argparse.Namespace) -> int:
+    from xenon.verify import report, run
+
+    everything = bool(getattr(args, "all", False))
+    return report(
+        run(
+            speak=everything or bool(getattr(args, "speak", False)),
+            record=everything or bool(getattr(args, "mic", False)),
+            duck=everything or bool(getattr(args, "duck", False)),
+        )
+    )
+
+
 def _claim_orb_mutex() -> bool:
     """One orb per session: a second one would fight over the same hotkeys."""
     global _ORB_MUTEX
@@ -2687,6 +2700,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     goto.add_argument("place", nargs="+")
     goto.set_defaults(handler=_goto)
+
+    verify = subparsers.add_parser(
+        "verify",
+        help="touch the real microphone, speaker, ducking and UI Automation and report",
+    )
+    verify.add_argument("--speak", action="store_true", help="say one sentence through SAPI")
+    verify.add_argument("--mic", action="store_true", help="open the microphone for one second")
+    verify.add_argument("--duck", action="store_true", help="duck other apps for 1.5 s, then restore")
+    verify.add_argument("--all", action="store_true", help="run every hardware check")
+    verify.set_defaults(handler=_verify)
 
     voice = subparsers.add_parser("voice", help="listen continuously and answer aloud")
     voice.add_argument("--mic", default=None, help="input device index or name (or set XENON_MIC_DEVICE)")
