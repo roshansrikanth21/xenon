@@ -11,6 +11,7 @@ import tkinter as tk
 from dataclasses import asdict
 from tkinter import colorchooser, ttk
 
+from . import audio_settings
 from . import music_settings as ms
 
 BG = "#121318"
@@ -206,9 +207,11 @@ class SettingsWindow:
                      {"original": "Original script", "latin": "English letters"})
         self._check(lyr, "lyrics_for_videos", "Look up lyrics for videos too")
 
+        self._device_picker(audio)
+        ttk.Label(audio, text="Visualizer", style="Section.TLabel").pack(anchor="w", pady=(10, 4))
         self._slider(audio, "sensitivity", "Sensitivity", 0.3, 3.0)
         self._slider(audio, "smoothing", "Smoothing", 0.0, 0.95)
-        ttk.Label(audio, text="Reads whatever plays through your speakers (WASAPI loopback).\n"
+        ttk.Label(audio, text="The visualizer reads whatever plays through your speakers (WASAPI loopback).\n"
                               "Nothing is recorded or sent anywhere.",
                   style="Muted.TLabel", justify="left").pack(anchor="w", pady=(10, 0))
 
@@ -279,6 +282,59 @@ class SettingsWindow:
         ttk.Checkbutton(parent, text=label, variable=var,
                         command=lambda: self._set(key, bool(var.get()))).pack(anchor="w", pady=5)
         self._vars[key] = var
+
+    def _device_picker(self, parent) -> None:
+        """Microphone and speaker for Xenon's voice, saved to audio.json."""
+        ttk.Label(parent, text="Xenon voice", style="Section.TLabel").pack(anchor="w", pady=(0, 4))
+        saved = audio_settings.load()
+        inputs = audio_settings.input_devices()
+        outputs = audio_settings.output_devices()
+        current_input = audio_settings.resolve_input(saved.input, inputs) if saved.input else None
+
+        input_values = ["System default"] + [f"{index}: {name}" for index, name in inputs]
+        selected_input = "System default"
+        for index, name in inputs:
+            if index == current_input:
+                selected_input = f"{index}: {name}"
+                break
+
+        input_row = self._row(parent, "Microphone")
+        input_var = tk.StringVar(value=selected_input)
+        input_box = ttk.Combobox(input_row, values=input_values, textvariable=input_var, state="readonly")
+        input_box.pack(side="left", fill="x", expand=True)
+
+        output_row = self._row(parent, "Speaker")
+        output_var = tk.StringVar(value=saved.output or "System default")
+        output_box = ttk.Combobox(
+            output_row,
+            values=["System default"] + outputs,
+            textvariable=output_var,
+            state="readonly",
+        )
+        output_box.pack(side="left", fill="x", expand=True)
+
+        status = ttk.Label(
+            parent,
+            text="Saved for Xenon's voice; restart the orb to use a new device.",
+            style="Muted.TLabel",
+        )
+        status.pack(anchor="w", pady=(2, 0))
+
+        def store(*_event) -> None:
+            text = input_var.get()
+            name = ""
+            if text != "System default":
+                _index, _, name = text.partition(": ")
+                name = name.strip()
+            output = "" if output_var.get() == "System default" else output_var.get()
+            try:
+                audio_settings.save(audio_settings.AudioSettings(input=name, output=output))
+                status.configure(text="Saved. Restart the orb to use these devices.")
+            except OSError as error:
+                status.configure(text=f"Could not save the device choice: {error}")
+
+        input_box.bind("<<ComboboxSelected>>", store)
+        output_box.bind("<<ComboboxSelected>>", store)
 
     def _colour(self, parent) -> None:
         row = self._row(parent, "Custom colour")
