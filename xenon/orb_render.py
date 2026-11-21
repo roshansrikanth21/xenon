@@ -356,7 +356,49 @@ class OrbRenderer:
                 (canvas.width - sh - h * 0.5, mid), "\ue720", font=self._notch_icon_font, fill=255, anchor="mm"
             )
             canvas.alpha_composite(_tint(mic, (74, 222, 128), 0.9))
+        # ---- proximity light bar -------------------------------------------
+        # A quiet hairline that lights from the centre out as the microphone
+        # hears you. Hidden while a task bar uses the same line.
+        if (
+            model.mic_bar
+            and info.get("voice")
+            and not model.progress_text
+            and not info.get("flash")
+            and model.state in {"standby", "listening"}
+        ):
+            self._mic_bar(
+                canvas,
+                model,
+                int(text_left),
+                int(canvas.width - sh - h * 0.7),
+                int(h - 7 * s),
+                int(h - 5 * s),
+            )
         return canvas
+
+    def _mic_bar(self, canvas: Image.Image, model: OrbModel, x0: int, x1: int,
+                 y0: int, y1: int) -> None:
+        """A microphone level bar: faint track, bright fill from the centre."""
+        s = self.scale
+        if x1 - x0 < 12 or y1 - y0 < 1:
+            return
+        thick = y1 - y0
+        radius = thick / 2
+        mid = (x0 + x1) / 2
+        track = Image.new("L", canvas.size, 0)
+        ImageDraw.Draw(track).rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=255)
+        canvas.alpha_composite(_tint(track, (255, 255, 255), 0.12))
+        level = model.meter
+        if level <= 0.02:
+            return
+        half = (x1 - x0) / 2 * min(1.0, level)
+        if half < radius:
+            return
+        fill = Image.new("L", canvas.size, 0)
+        ImageDraw.Draw(fill).rounded_rectangle((mid - half, y0, mid + half, y1), radius=radius, fill=255)
+        color = lerp_color((74, 222, 128), (34, 211, 238), min(1.0, level))
+        canvas.alpha_composite(_tint(fill.filter(ImageFilter.GaussianBlur(3 * s)), color, 0.6 * level))
+        canvas.alpha_composite(_tint(fill, color, 0.95))
 
     def _draw_task_bar(self, canvas: Image.Image, model: OrbModel, x0: int, x1: int, core, accent) -> None:
         """A hairline under the task text: filled to step/total, or a slow
@@ -507,6 +549,7 @@ class OrbRenderer:
             self._draw_timer_ring(frame, model)
         if model.voice_on:
             self._draw_badge(frame, model)
+        self._draw_proximity_bar(frame, model)
         if model.notch and model.dock > 0.001:
             frame = self._fold_into_notch(frame, model, core, accent)
         return frame
@@ -614,6 +657,24 @@ class OrbRenderer:
         inner = self._badge.resize((max(2, int(size * 0.72)),) * 2, Image.LANCZOS)
         off = (size - inner.width) // 2
         frame.alpha_composite(_tint(inner, color), (x + off, y + off))
+
+    def _draw_proximity_bar(self, frame: Image.Image, model: OrbModel) -> None:
+        """Small light bar under the open orb, lit by the microphone level.
+
+        The folded notch has its own bar; this one covers the moment the orb
+        unfolds to listen, which is exactly when the user is talking.
+        """
+        if not model.mic_bar or not model.voice_on or model.shrink < 0.9:
+            return
+        s = self.scale
+        half = 36 * s
+        y1 = (CENTER + ORB_RADIUS + 16) * s
+        y0 = y1 - max(3, round(2.6 * s))
+        self._mic_bar(
+            frame, model,
+            int(self.size / 2 - half), int(self.size / 2 + half),
+            int(y0), int(y1),
+        )
 
     def _render_orb(self, model: OrbModel, core, accent) -> Image.Image:
         d, r = self._d, self._r

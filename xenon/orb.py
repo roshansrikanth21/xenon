@@ -1494,6 +1494,7 @@ class OrbApp:
         self._give_back_focus(previous)
 
         self.model = OrbModel(notch=self.notch)
+        self.model.mic_bar = os.environ.get("XENON_MIC_BAR", "on").strip().lower() not in {"0", "off", "false", "no"}
         default_idle = NOTCH_IDLE_S if self.notch else self.model.idle_after
         try:
             self.model.idle_after = float(os.environ.get("XENON_ORB_IDLE_S", default_idle))
@@ -2500,7 +2501,12 @@ class OrbApp:
         fps = self.FPS
         if self.notch and self.model.dock >= 0.999:
             music = (self.model.notch_info or {}).get("music")
-            fps = 12 if music else 4  # bars and scrolling title vs a slow breathing dot
+            if music:
+                fps = 12  # bars and scrolling title
+            elif self.model.mic_bar and self.model.meter > 0.02:
+                fps = 20  # the proximity bar is moving
+            else:
+                fps = 4  # a slow breathing dot
         delay = int(1000 / fps)
         return max(5, delay - int((time.perf_counter() - now) * 1000))
 

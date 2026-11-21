@@ -505,4 +505,65 @@ running orb must be restarted (or relaunched from the tray) before it reads a
 new `audio.json`; the settings window itself always reads the file when it
 opens.
 
+---
+
+## Session — 2026-11-22 (proximity / microphone light bar)
+
+Asked: "add a proximity visualizer as well like when I talk there be a small
+lightbar that lights up based on the audio inputs volume".
+
+### What already existed
+
+The voice loop already pushes a live microphone RMS into the orb at every
+capture frame (`hooks.level(...)`, from both the standby loop and the speaking
+watcher). `OrbModel.level` already drove the halo and the in-orb equaliser, but
+there was no small, always-visible meter, and the folded notch showed nothing
+about the microphone.
+
+### What was added
+
+`xenon/orb_model.py`:
+
+- `OrbModel.meter` is the display level: it jumps up with `set_level()` but
+  falls at 4.5/s in `step()`, so the bar goes dark soon after the last word
+  while the halo keeps its slower 1.6/s decay.
+- `OrbModel.mic_bar: bool = True` — `XENON_MIC_BAR=off` hides both bars.
+
+`xenon/orb_render.py`:
+
+- `OrbRenderer._mic_bar()` draws a faint hairline track and a bright fill that
+  grows from the centre outwards with `model.meter`. Colour runs from the mic
+  green `(74, 222, 128)` to cyan `(34, 211, 238)` as it gets louder, with a
+  small blurred glow.
+- In `_notch_content()`, when the voice is on and the state is
+  `standby`/`listening`, the bar sits along the notch's bottom edge. It is
+  suppressed while a task-progress bar occupies that line or a flash is up.
+- `_draw_proximity_bar()` puts a separate short bar under the open orb; this
+  covers the moment Xenon unfolds to listen, which is exactly when the user
+  talks. It is hidden while the orb is shrunk or folded.
+
+`xenon/orb.py`:
+
+- The app reads `XENON_MIC_BAR` into `model.mic_bar`.
+- A folded notch with an active meter redraws at 20 fps instead of 4, so the
+  bar follows speech instead of stepping.
+
+No test double was added: the meter is fed by the same real microphone frames
+that drive wake-word detection. A silent mic shows only the faint track.
+
+### Tests
+
+`tests/test_orb_model.py`: meter attack/decay and the default-on flag.
+`tests/test_orb.py`: notch bar lights with a level and respects `mic_bar=False`;
+the orb's light bar follows the level and can be disabled. Both bars were also
+rendered to images and inspected visually. Full suite: **1143 passed, 1 skipped,
+633 subtests**.
+
+### Manual check
+
+Say something while Xenon is folded into the notch: the hairline under the
+clock should fill cyan from the centre and fall back when you stop. Say
+"Xenon" and keep talking: the short bar under the open orb should track your
+voice. `XENON_MIC_BAR=off` removes both.
+
 

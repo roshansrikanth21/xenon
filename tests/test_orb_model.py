@@ -112,5 +112,24 @@ class OrbRenderWorkingTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+class MicMeterTests(unittest.TestCase):
+    def test_level_rises_at_once_and_meter_falls_quickly(self) -> None:
+        model = OrbModel()
+        model.set_level(0.8)
+        self.assertEqual(model.meter, 0.8)
+        _run(model, 0.1)
+        self.assertLess(model.meter, 0.8)
+        self.assertGreater(model.level, model.meter)
+
+    def test_meter_never_goes_below_zero(self) -> None:
+        model = OrbModel()
+        model.set_level(0.2)
+        _run(model, 2.0)
+        self.assertEqual(model.meter, 0.0)
+
+    def test_light_bar_is_on_by_default(self) -> None:
+        self.assertTrue(OrbModel().mic_bar)
+
+
 if __name__ == "__main__":
     unittest.main()

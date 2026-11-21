@@ -209,6 +209,22 @@ class NotchTests(unittest.TestCase):
         self.assertGreater(frame.getpixel((int(CENTER), edge + 2))[3], 200)   # body right at the edge
         self.assertEqual(frame.getpixel((int(CENTER), edge + 60))[3], 0)      # nothing below it
 
+    @unittest.skipIf(OrbRenderer is None, "Pillow not installed")
+    def test_folded_notch_light_bar_lights_with_the_microphone(self) -> None:
+        renderer = OrbRenderer(1.0)
+        model = self.docked()
+        model.notch_info = {"clock": "9:41", "voice": True}
+        model.set_state("standby")
+        quiet = renderer.render(model).tobytes()
+        model.set_level(0.8)
+        loud = renderer.render(model).tobytes()
+        self.assertNotEqual(quiet, loud)
+        model.mic_bar = False
+        model.meter = 0.0
+        off = renderer.render(model).tobytes()
+        model.set_level(0.8)
+        self.assertEqual(renderer.render(model).tobytes(), off)
+
 
 class StateTests(unittest.TestCase):
     def test_state_change_blends_colours(self) -> None:
@@ -297,6 +313,26 @@ class RendererTests(unittest.TestCase):
         for satellite in model.satellites:
             alpha = frame.getpixel((int(satellite.x), int(satellite.y)))[3]
             self.assertGreater(alpha, 200, satellite.action.key)
+
+    def test_light_bar_tracks_mic_level_and_can_be_disabled(self) -> None:
+        renderer = OrbRenderer(1.0)
+        shown = OrbModel()
+        shown.voice_on = True
+        shown.step(0.5)
+        shown.set_level(0.9)
+        with_bar = renderer.render(shown).tobytes()
+
+        hidden = OrbModel()
+        hidden.voice_on = True
+        hidden.step(0.5)
+        hidden.set_level(0.9)
+        hidden.mic_bar = False
+        without_bar = renderer.render(hidden).tobytes()
+        # Same model, same level: only the light bar differs.
+        self.assertNotEqual(with_bar, without_bar)
+
+        shown.meter = 0.0  # silence: the fill goes out, the faint track stays
+        self.assertNotEqual(renderer.render(shown).tobytes(), with_bar)
 
     def test_every_state_renders_at_high_dpi(self) -> None:
         renderer = OrbRenderer(1.5)

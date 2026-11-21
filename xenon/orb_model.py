@@ -206,6 +206,8 @@ class OrbModel:
     progress: float = 0.0          # 0 closed .. 1 fully fanned out
     direction: float = math.pi
     level: float = 0.0             # 0..1 microphone level, decays
+    meter: float = 0.0             # 0..1 smoothed level for the proximity light bar
+    mic_bar: bool = True           # draw the mic light bar (XENON_MIC_BAR=off)
     timer_fraction: float | None = None  # nearest timer's time left, 1 -> 0
     voice_on: bool = False
     hovered: str | None = None     # action key under the pointer
@@ -309,6 +311,7 @@ class OrbModel:
         # Rise fast, fall slowly: reads as a live meter rather than flicker.
         level = min(max(level, 0.0), 1.0)
         self.level = max(level, self.level)
+        self.meter = max(level, self.meter)
 
     def pointer(self, x: float | None, y: float | None) -> None:
         """Feed the pointer position in window coordinates (None = far away)."""
@@ -433,6 +436,9 @@ class OrbModel:
             else:
                 self.shrink = max(target, self.shrink - rate * dt)
         self.level = max(0.0, self.level - dt * 1.6)
+        # The light bar falls faster than the halo: it should read as "you
+        # stopped talking" within a moment, not hang at the last word.
+        self.meter = max(0.0, self.meter - dt * 4.5)
 
         count = len(self.satellites)
         span = 1 + STAGGER * (count - 1)
