@@ -34,6 +34,9 @@
       suite (1126 passed, 1 skipped).
 - [x] **Real-hardware verifier.** `xenon verify [--speak|--mic|--duck|--all]`
       exercises the actual SAPI, microphone, pycaw and UI Automation.
+- [x] **Audio device settings.** `xenon audio` shows and changes the microphone
+      and SAPI speaker, persists them in `%APPDATA%\xenon\audio.json`, and
+      `xenon audio --settings` opens a picker with a real test.
 - [ ] **Packaging.** No `xenon` entry point, installer/exe, or voice autostart
       yet.
 - [ ] **Noisy-room VAD / mic-in-the-loop latency.** Energy endpointer still

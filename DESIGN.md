@@ -403,3 +403,78 @@ Done:
 - Real read-only verifier on this machine: 7/7 passed or skipped.
 - Updated `NEXT_STEPS.md` to point here and to show the true open items.
 - Pushed `main`; launched the orb for manual testing.
+
+---
+
+## Session — 2026-11-22 (microphone and speaker settings)
+
+Asked: which microphone is Xenon using right now, and add a setting to change
+both the input and output device.
+
+### What this machine was using
+
+- **Input:** sounddevice's system default, device `#1`,
+  `Microphone Array (Realtek(R) Au...` (the built-in Realtek array). It was not
+  chosen by Xenon; it was simply the Windows default, because
+  `MicrophoneSource(device=None)` lets sounddevice pick.
+- **Output:** SAPI's system default, `ED340CUR J0 (NVIDIA High Definition
+  Audio)`, which is the monitor's audio endpoint, not the Realtek speakers.
+  That is why a spoken reply could be inaudible even though SAPI "worked".
+
+### What was added (commit `adfe2dd`)
+
+New `xenon/audio_settings.py`:
+
+- `%APPDATA%\xenon\audio.json` stores `{"input": "...", "output": "..."}`.
+  Friendly names are stored, not indices, because Windows renumbers devices.
+- `resolve_input()` accepts an index or a case-insensitive name fragment.
+- `current_input()` precedence: `XENON_MIC_DEVICE` → saved file → system default.
+- `current_output()` precedence: `XENON_TTS_OUTPUT` → saved file → SAPI default.
+- `default_input()` reports what sounddevice would pick, for display.
+- `test()` speaks through the chosen output and records the chosen input,
+  returning a peak level.
+
+New `xenon/audio_settings_ui.py`: a small Tk window with microphone and speaker
+dropdowns, a real Test button, and Save. Run with `xenon audio --settings`.
+
+`xenon/audio.py`:
+
+- `_sapi_output_tokens()` enumerates `SAPI.SpObjectTokenCategory` under
+  `HKLM\SOFTWARE\Microsoft\Speech\AudioOutput`.
+- `_apply_sapi_output()` sets `engine.AudioOutput` to the matching token.
+- `list_outputs()` and `default_output()` expose the list and the current
+  endpoint.
+- `SapiSpeaker(output=...)` applies the saved output. Injected test engines do
+  not read the settings file, so tests stay deterministic.
+
+`xenon/__main__.py`:
+
+- New `xenon audio` command:
+  `--list`, `--input`, `--output`, `--test`, `--settings`.
+- The voice loop now calls `audio_settings.current_input()` instead of reading
+  only `XENON_MIC_DEVICE`.
+
+`xenon/verify.py` reports the selected input and the SAPI output in its
+microphone/SAPI lines.
+
+### How to use it
+
+```powershell
+python -m xenon audio                      # show current input and output
+python -m xenon audio --list               # every input + SAPI output
+python -m xenon audio --input realtek      # name fragment or index
+python -m xenon audio --output "Speakers (Realtek"
+python -m xenon audio --test               # speak + record 0.8 s
+python -m xenon audio --settings           # graphical picker
+```
+
+Changes take effect on the next orb/voice start; the settings window says so.
+The current file is only written when a device is actually chosen, so a fresh
+checkout keeps using Windows defaults.
+
+### Tests
+
+`tests/test_audio_settings.py` covers the file format, resolution, env
+precedence and bad input. `tests/test_audio.py` gained SAPI output-token
+selection tests. Full suite: **1138 passed, 1 skipped, 633 subtests**.
+
