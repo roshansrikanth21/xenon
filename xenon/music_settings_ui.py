@@ -213,6 +213,7 @@ class SettingsWindow:
                   style="Muted.TLabel", justify="left").pack(anchor="w", pady=(10, 0))
 
         self._check(system, "start_with_orb", "Start with the orb")
+        self._check(system, "start_on_top", "Start above windows (otherwise on the wallpaper)")
         self._check(system, "show_dock", "Corner dock (controls + recent songs)")
         self._slider(system, "idle_minutes", "Sleep after no music (min, 0 = never)", 0.0, 60.0)
         self._check(system, "suggestions", "Suggest similar songs in the dock (asks Deezer)")

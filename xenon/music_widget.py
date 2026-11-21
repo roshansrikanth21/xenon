@@ -1252,6 +1252,12 @@ class MusicWidget:
         self._player_surface = surfaces["ring"]
         self._player_rect = (layout.orb_box.x, layout.orb_box.y, layout.orb_box.w, layout.orb_box.h)
         self._place_all(surfaces, order)
+        start_on_top = settings.start_on_top or os.environ.get(
+            "XENON_MUSIC_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}
+        if start_on_top and not self.overlay:
+            # The user asked for the player above windows: same path as the
+            # hotkey, so re-parenting and click-through are set up identically.
+            self._toggle_overlay(*[surfaces[n] for n in order])
         self._ready.set()
 
         blank = {name: Image.new("RGBA", (boxes[name].w, boxes[name].h), (0, 0, 0, 0)) for name in order}

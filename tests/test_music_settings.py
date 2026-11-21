@@ -28,6 +28,11 @@ class CoerceTests(unittest.TestCase):
         self.assertEqual(s.custom_color, ms.MusicSettings().custom_color)
         self.assertEqual(s.bar_count, 78)
 
+    def test_start_on_top_is_opt_in(self):
+        self.assertFalse(ms.MusicSettings().start_on_top)
+        self.assertFalse(ms.coerce({"start_on_top": "yes"}).start_on_top)
+        self.assertTrue(ms.coerce({"start_on_top": True}).start_on_top)
+
     def test_accent(self):
         self.assertEqual(ms.MusicSettings(accent="album").accent_rgb((1, 2, 3)), (1, 2, 3))
         self.assertEqual(ms.MusicSettings(accent="white").accent_rgb((1, 2, 3)), (255, 255, 255))
