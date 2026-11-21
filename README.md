@@ -2,6 +2,13 @@
 
 A lightweight, local-first Windows personal assistant that works beside its user.
 
+## Status and checklist
+
+- [Development checklist](NEXT_STEPS.md) — what is done and what is still open.
+- [DESIGN.md](DESIGN.md) — append-only design and work log: every commit and
+  branch, environment knobs, the fake-vs-real testing split, and the manual
+  test plan.
+
 ## v1 priorities
 
 1. **Screen context** — read the foreground window through Windows UI Automation first; capture a screenshot only when the accessibility tree is insufficient.

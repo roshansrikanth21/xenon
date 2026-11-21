@@ -611,5 +611,25 @@ A local microbenchmark of the old three Python passes vs the new numpy path:
 `feed(..., level=...)`. Full suite: **1146 passed, 1 skipped, 633 subtests**.
 After deploying, CPU should be re-measured on the restarted orb; if it is still
 high, the next suspect is the music widget's own loops, not the voice loop.
+It was re-measured: **3.3% of one core** (down from 105%) with the new orb at
+PID 12532. `xenon verify` remained 7/7.
+
+---
+
+## Session — 2026-11-22 (push everything, including the checklist)
+
+Asked: "ok push everything to github along with checklist".
+
+- `main` was already in sync with `origin/main` at `822fbc1`; `git status` was
+  clean.
+- `fix/reasoning-model-budget` had three local commits that were already merged
+  into `main` but missing from its remote branch; pushed with `git push --all`.
+- README now links the checklist (`NEXT_STEPS.md`) and this append-only log
+  (`DESIGN.md`) near the top, so both are discoverable from the repo landing
+  page. The checklist itself stays in `NEXT_STEPS.md`; its manual test plan
+  stays here, as required.
+- The only checklist items still unchecked remain: the real-hand Holo webcam
+  test, packaging, noisy-room VAD/latency, README/TODO drift beyond these
+  links, and the Groq key rotation.
 
 
